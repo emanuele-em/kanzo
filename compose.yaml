@@ -1,0 +1,25 @@
+# Kanzo board on a server: put KANZO_HOSTNAME=<this server's name> in .env, then
+#   mkdir -p data && docker compose up -d --build
+# (Without the mkdir, Docker creates ./data owned by root and the board cannot write it.)
+# Board: http://<hostname>.local:4242  Agents: http://<hostname>.local:4242/mcp
+# Agents connect over HTTP only; never run `kanzo mcp` on the host against ./data.
+# No login: anyone who can reach the port can change the board. Limit it with
+# KANZO_BIND=<one IP of this server>. Docker ignores ufw for published ports.
+services:
+  kanzo:
+    build: .
+    # The board refuses host names it does not know, so this must be the server's name.
+    hostname: ${KANZO_HOSTNAME:?put this server's name in .env}
+    # Both sides must be 4242: the board checks the port in the Host header.
+    ports:
+      - "${KANZO_BIND:-0.0.0.0}:4242:4242"
+    volumes:
+      - ./data:/data
+    # Owner of ./data. Shells do not export UID and GID; if yours are not 1000, put them in .env.
+    user: "${UID:-1000}:${GID:-1000}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4242/api/ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

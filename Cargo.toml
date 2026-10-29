@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["kanban", "mcp", "agents", "todo", "claude"]
 categories = ["command-line-utilities", "development-tools"]
 # Only what builds Kanzo: the README's screenshots and the repo's GitHub files stay out.
-exclude = ["/docs", "/.github", "/.cargo", "/dist-workspace.toml", "/rustfmt.toml", "/server.json"]
+exclude = ["/docs", "/.github", "/.cargo", "/dist-workspace.toml", "/rustfmt.toml", "/server.json", "/Dockerfile", "/compose.yaml", "/.dockerignore"]
 
 [dependencies]
 anyhow = "1.0.104"

@@ -3,3 +3,7 @@
 # macOS metadata (AppleDouble files appear on exFAT drives)
 ._*
 .DS_Store
+
+# Docker data folder and per-server settings (compose.yaml)
+/data
+/.env

@@ -48,6 +48,7 @@ Where things are:
 | `src/sync.rs` | `kanzo sync` |
 | `src/export.rs` | `kanzo export` |
 | `src/service.rs` | `kanzo service` |
+| `Dockerfile`, `compose.yaml` | One board in a container on a server |
 
 ## How it stays light
 

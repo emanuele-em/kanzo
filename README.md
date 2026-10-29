@@ -91,6 +91,16 @@ listen = "127.0.0.1"   # "0.0.0.0" opens the board to your network: no logins, s
 mcp_http = true        # MCP at /mcp
 ```
 
+## On a server, with Docker
+
+`compose.yaml` runs one board for all your machines and agents, on a server on a network you trust. In a clone of this repo:
+
+1. Put the server's name in `.env`: `KANZO_HOSTNAME=myserver.lan`. The board refuses host names it does not know.
+2. Run `mkdir -p data && docker compose up -d --build`. The board is in `./data`.
+3. Open `http://myserver.lan:4242`, and point your agents at `http://myserver.lan:4242/mcp`.
+
+The image has no git, so sync is off there: this board is the shared copy. Back up `./data` instead.
+
 ## Small and fast
 
 | | |
