@@ -7,6 +7,7 @@ mod sync;
 mod update;
 mod web;
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -27,6 +28,10 @@ struct Cli {
     /// Port for the board [default: from config.toml]
     #[arg(long)]
     port: Option<u16>,
+
+    /// Address to listen on [default: from config.toml]
+    #[arg(long, value_name = "ADDR")]
+    listen: Option<IpAddr>,
 
     /// Start the board without opening the browser
     #[arg(long)]
@@ -117,7 +122,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let home = Home::open(dir)?;
     match cli.command {
-        None => web::serve(home, cli.port, !cli.no_open).await,
+        None => web::serve(home, cli.port, cli.listen, !cli.no_open).await,
         Some(Command::Mcp) => mcp::serve(home).await,
         Some(Command::Init { .. }) => {
             println!("Kanzo data folder ready at {}", home.dir.display());

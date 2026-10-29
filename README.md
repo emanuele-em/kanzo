@@ -34,7 +34,7 @@ cargo install kanzo
 
 | Command | Does |
 | --- | --- |
-| `kanzo` | Starts the board at http://localhost:4242 and opens it; `--port` for another port, `--no-open` to not open it |
+| `kanzo` | Starts the board at http://localhost:4242 and opens it; `--port` for another port, `--listen 0.0.0.0` to open it to your network, `--no-open` to not open it |
 | `kanzo service install` | Keeps the board running and starts it at login; `uninstall` removes it |
 | `kanzo mcp` | The MCP server for agents: they start it, not you |
 | `kanzo sync` | Commits the board and pulls or pushes it; `--repo <url>` sets the repo, `--keep-local` or `--keep-remote` when both sides changed |

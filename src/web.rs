@@ -31,9 +31,9 @@ const LOGO: &[u8] = include_bytes!("logo.png");
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
                    connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
+pub async fn serve(home: Home, port: Option<u16>, listen: Option<IpAddr>, open: bool) -> Result<()> {
     let port = port.unwrap_or(home.config.port);
-    let listen = home.config.listen;
+    let listen = listen.unwrap_or(home.config.listen);
     let url = format!("http://localhost:{port}");
     let listener = match tokio::net::TcpListener::bind(SocketAddr::new(listen, port)).await {
         Ok(l) => l,
