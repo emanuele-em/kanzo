@@ -99,11 +99,23 @@ mcp_http = true        # MCP at /mcp
 2. Run `mkdir -p data && docker compose up -d --build`. The board is in `./data`.
 3. Open `http://myserver.lan:4242`, and point your agents at `http://myserver.lan:4242/mcp`.
 
-To sync this board with your private repo, as in [Your board on every machine](#your-board-on-every-machine):
+### Sync the server's board
 
-1. Make a [fine-grained token](https://github.com/settings/personal-access-tokens/new) that can read and write the contents of that one repo.
-2. Put it in `secrets/git-credentials` as one line: `https://x-access-token:<token>@github.com`. Then run `docker compose up -d`.
-3. In Settings, choose Sync and paste the repo's `https://` URL.
+The server's board can sync with your private repo, as in [Your board on every machine](#your-board-on-every-machine). The container has no SSH key, so it signs in to GitHub with a token over HTTPS.
+
+1. [Make a fine-grained token](https://github.com/settings/personal-access-tokens/new). Under Repository access, choose Only select repositories and pick your data repo. Under Repository permissions, set Contents to Read and write. Copy the token.
+2. On the server, in the clone, store the token. The command asks for it and does not show it:
+
+   ```sh
+   mkdir -p secrets && (umask 077; printf 'Token: '; stty -echo; read -r t; stty echo; echo
+     printf 'https://x-access-token:%s@%s\n' "$t" github.com > secrets/git-credentials)
+   ```
+
+   Make `secrets` before the first `docker compose up`. Otherwise Docker makes it, and it belongs to root.
+3. Run `docker compose up -d`. Then check that the container can reach the repo: `docker compose exec kanzo git ls-remote https://github.com/you/kanzo-data HEAD` must end without an error.
+4. On the board, choose Settings, then Sync, and paste the repo's `https://` URL. The short `you/kanzo-data` form tries SSH first, which the container cannot use.
+
+When the token expires, sync fails with an authentication error. Regenerate the token on GitHub and do step 2 again. The board reads the file at each sync, so it needs no restart.
 
 ## Small and fast
 
