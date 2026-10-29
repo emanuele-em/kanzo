@@ -18,10 +18,11 @@ services:
       # For sync: secrets/git-credentials holds one line, https://x-access-token:<token>@github.com
       - ./secrets:/secrets:ro
     environment:
-      # Git config without a home folder, so it works for any user.
+      # Git config without a home folder, so it works for any user. The helper only reads
+      # the read-only file: it answers "get" and skips "store" and "erase".
       GIT_CONFIG_COUNT: 1
       GIT_CONFIG_KEY_0: credential.helper
-      GIT_CONFIG_VALUE_0: store --file=/secrets/git-credentials
+      GIT_CONFIG_VALUE_0: '!f() { [ "$$1" != get ] || git credential-store --file=/secrets/git-credentials get; }; f'
     # Owner of ./data. Shells do not export UID and GID; if yours are not 1000, put them in .env.
     user: "${UID:-1000}:${GID:-1000}"
     restart: unless-stopped
