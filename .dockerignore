@@ -3,3 +3,4 @@
 /.codegraph
 /data
 /.env
+/secrets

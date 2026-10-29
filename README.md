@@ -99,7 +99,11 @@ mcp_http = true        # MCP at /mcp
 2. Run `mkdir -p data && docker compose up -d --build`. The board is in `./data`.
 3. Open `http://myserver.lan:4242`, and point your agents at `http://myserver.lan:4242/mcp`.
 
-The image has no git, so sync is off there: this board is the shared copy. Back up `./data` instead.
+To sync this board with your private repo, as in [Your board on every machine](#your-board-on-every-machine):
+
+1. Make a [fine-grained token](https://github.com/settings/personal-access-tokens/new) that can read and write the contents of that one repo.
+2. Put it in `secrets/git-credentials` as one line: `https://x-access-token:<token>@github.com`. Then run `docker compose up -d`.
+3. In Settings, choose Sync and paste the repo's `https://` URL.
 
 ## Small and fast
 

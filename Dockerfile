@@ -6,8 +6,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
     cargo build --release --locked && cp target/release/kanzo /kanzo
 
 # Alpine for busybox: `hostname` lets the board accept the server's name, `wget` runs the healthcheck.
-# No git on purpose: this board is the one shared copy, so sync is not used here. Back up ./data instead.
+# Git for sync: compose gives it the repo's credentials.
 FROM alpine:3
+RUN apk add --no-cache git
 COPY --from=build /kanzo /usr/local/bin/kanzo
 ENV KANZO_HOME=/data
 # Not root, also under a plain `docker run`; compose sets its own user.

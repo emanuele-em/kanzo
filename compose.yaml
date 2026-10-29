@@ -15,6 +15,13 @@ services:
       - "${KANZO_BIND:-0.0.0.0}:4242:4242"
     volumes:
       - ./data:/data
+      # For sync: secrets/git-credentials holds one line, https://x-access-token:<token>@github.com
+      - ./secrets:/secrets:ro
+    environment:
+      # Git config without a home folder, so it works for any user.
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: credential.helper
+      GIT_CONFIG_VALUE_0: store --file=/secrets/git-credentials
     # Owner of ./data. Shells do not export UID and GID; if yours are not 1000, put them in .env.
     user: "${UID:-1000}:${GID:-1000}"
     restart: unless-stopped
