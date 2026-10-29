@@ -97,7 +97,13 @@ mcp_http = true        # MCP at /mcp
 
 1. Put the server's name in `.env`: `KANZO_HOSTNAME=myserver.lan`. The board refuses host names it does not know.
 2. Run `mkdir -p data && docker compose up -d --build`. The board is in `./data`.
-3. Open `http://myserver.lan:4242`, and point your agents at `http://myserver.lan:4242/mcp`.
+3. Open `http://myserver.lan:4242`, and point your agents at `http://myserver.lan:4242/mcp`. For Claude Code, on each machine:
+
+   ```sh
+   claude mcp add --transport http kanzo --scope user http://myserver.lan:4242/mcp
+   ```
+
+   Over HTTP the board cannot see the agent's git repo, so agents pass the project by name.
 
 ### Sync the server's board
 
