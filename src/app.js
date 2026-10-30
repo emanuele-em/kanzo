@@ -1347,12 +1347,18 @@ async function installUpdate(available) {
   button.hidden = false;
   button.disabled = true;
   $("#update-label").textContent = "Updating…";
+  let res;
   try {
-    await api("POST", "/update");
+    res = await api("POST", "/update");
   } catch (err) {
     toast(err.message);
     button.disabled = false;
     $("#update-label").textContent = `Update to ${available}`;
+    return;
+  }
+  if (!res.restarting) {
+    $("#update-label").textContent = "Restart Kanzo to finish";
+    toast(`Kanzo ${available} is installed. Restart Kanzo to use it.`);
     return;
   }
   // The old program answered, then gives way to the new one: wait for it, then reload.

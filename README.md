@@ -24,7 +24,13 @@ Kanzo is a kanban board in your browser and an MCP server in one small program, 
 curl -LsSf https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-installer.sh | sh
 ```
 
-For macOS and Linux, including every Raspberry Pi. Every release is signed by GitHub: check a download with `gh attestation verify <file> --repo emanuele-em/kanzo`. Or with Cargo:
+For macOS and Linux, including every Raspberry Pi. On Windows, in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-installer.ps1 | iex"
+```
+
+Every release is signed by GitHub: check a download with `gh attestation verify <file> --repo emanuele-em/kanzo`. Or with Cargo:
 
 ```sh
 cargo install kanzo

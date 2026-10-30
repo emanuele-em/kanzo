@@ -1,5 +1,6 @@
 //! `kanzo service`: run the board in the background, started at login.
-//! A LaunchAgent on macOS, a systemd user unit on Linux (a Raspberry Pi, an old laptop).
+//! A LaunchAgent on macOS, a systemd user unit on Linux (a Raspberry Pi, an old laptop),
+//! a Task Scheduler task on Windows.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,6 +11,7 @@ use crate::home::Home;
 
 const LABEL: &str = "com.github.emanuele-em.kanzo";
 const UNIT: &str = "kanzo.service";
+const TASK: &str = "Kanzo";
 
 pub fn install(home: &Home) -> Result<()> {
     let exe = std::env::current_exe().context("cannot find the kanzo program")?;
@@ -17,8 +19,10 @@ pub fn install(home: &Home) -> Result<()> {
         install_launchd(home, &exe)
     } else if cfg!(target_os = "linux") {
         install_systemd(home, &exe)
+    } else if cfg!(windows) {
+        install_task(home, &exe)
     } else {
-        bail!("kanzo service supports macOS and Linux; start `kanzo --no-open` with your own service manager")
+        bail!("kanzo service supports macOS, Linux and Windows; start `kanzo --no-open` with your own service manager")
     }
 }
 
@@ -27,8 +31,10 @@ pub fn uninstall() -> Result<()> {
         uninstall_launchd()
     } else if cfg!(target_os = "linux") {
         uninstall_systemd()
+    } else if cfg!(windows) {
+        uninstall_task()
     } else {
-        bail!("kanzo service supports macOS and Linux")
+        bail!("kanzo service supports macOS, Linux and Windows")
     }
 }
 
@@ -39,6 +45,8 @@ pub fn restart() -> Result<bool> {
         run("launchctl", &["kickstart", "-k", &format!("{}/{LABEL}", launchd_domain()?)])?;
     } else if cfg!(target_os = "linux") && unit_path()?.exists() {
         run("systemctl", &["--user", "restart", UNIT])?;
+    } else if cfg!(windows) && task_exists() {
+        restart_task()?;
     } else {
         return Ok(false);
     }
@@ -199,6 +207,113 @@ fn uninstall_systemd() -> Result<()> {
     Ok(())
 }
 
+// Windows
+
+/// Stops the board, which may be this process (cmd outlives it), waits 3 s for it to let
+/// go of its port (`timeout` needs a console), then starts it. `/end` stops conhost; the
+/// board then exits with its console (see `web::exit_with_console`).
+fn restart_task() -> Result<()> {
+    let line = format!("schtasks /end /tn {TASK} & ping -n 4 127.0.0.1 >nul & schtasks /run /tn {TASK}");
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", &line]);
+    // A console of its own (CREATE_NO_WINDOW): the board's goes away with `/end`, and
+    // takes the processes in it along.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+    let out = cmd.output().context("cannot run cmd")?;
+    if !out.status.success() {
+        bail!("cannot restart the Kanzo task: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// Whether this process is the board the Windows task starts: the task's arguments, and
+/// the task is installed.
+pub fn is_task_board(dir: &Path) -> bool {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    args == ["--no-open".into(), "--home".into(), dir.as_os_str().to_owned()] && task_exists()
+}
+
+fn task_exists() -> bool {
+    Command::new("schtasks").args(["/query", "/tn", TASK]).output().is_ok_and(|o| o.status.success())
+}
+
+/// A logon task that runs the board in the user's session, so it can use their saved
+/// git credentials, through `conhost --headless`, so it has no window. S4U has no
+/// window either, but can't read Credential Manager and needs an elevated shell.
+fn task(exe: &Path, dir: &Path, user: &str) -> String {
+    let esc = |s: &str| xml_escape(s).replace('"', "&quot;");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger><UserId>{user}</UserId></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType></Principal>
+  </Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+  </Settings>
+  <Actions>
+    <Exec><Command>conhost.exe</Command><Arguments>--headless {exe} --no-open --home {dir}</Arguments></Exec>
+  </Actions>
+</Task>
+"#,
+        user = esc(user),
+        exe = esc(&format!("\"{}\"", exe.display())),
+        dir = esc(&format!("\"{}\"", dir.display())),
+    )
+}
+
+/// `domain\user`, from Windows in UTF-8: `whoami` prints in the console's code page, and
+/// %USERDOMAIN% is WORKGROUP over SSH.
+fn account() -> Result<String> {
+    let name =
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Security.Principal.WindowsIdentity]::GetCurrent().Name";
+    let out =
+        Command::new("powershell").args(["-NoProfile", "-Command", name]).output().context("cannot run powershell")?;
+    let user = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || user.is_empty() {
+        bail!("cannot find your Windows account: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(user)
+}
+
+fn install_task(home: &Home, exe: &Path) -> Result<()> {
+    let user = account()?;
+    let xml = std::env::temp_dir().join("kanzo-task.xml");
+    // schtasks reads the XML as UTF-16, as the declaration says.
+    let utf16: Vec<u8> =
+        std::iter::once(0xFEFF).chain(task(exe, &home.dir, &user).encode_utf16()).flat_map(u16::to_le_bytes).collect();
+    std::fs::write(&xml, utf16).with_context(|| format!("cannot write {}", xml.display()))?;
+    let created = run("schtasks", &["/create", "/tn", TASK, "/xml", &xml.to_string_lossy(), "/f"]);
+    let _ = std::fs::remove_file(&xml);
+    created?;
+    // Restart rather than start, so a changed path or data folder takes effect.
+    restart_task()?;
+    println!(
+        "Kanzo now starts at login and is running at http://localhost:{}\n\
+         It has no window and no log; to see its errors, run `kanzo service uninstall`, then `kanzo --no-open`.",
+        home.config.port
+    );
+    Ok(())
+}
+
+fn uninstall_task() -> Result<()> {
+    if !task_exists() {
+        println!("The Kanzo task was not installed.");
+        return Ok(());
+    }
+    let _ = Command::new("schtasks").args(["/end", "/tn", TASK]).output();
+    run("schtasks", &["/delete", "/tn", TASK, "/f"])?;
+    println!("Removed the Kanzo task; the board no longer starts at login.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +338,17 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn task_quotes_paths() {
+        let text = task(Path::new(r"C:\Users\a&b\.cargo\bin\kanzo.exe"), Path::new(r"C:\Users\a&b\kanzo"), r"pc\a&b");
+        assert!(
+            text.contains(
+                r"<Arguments>--headless &quot;C:\Users\a&amp;b\.cargo\bin\kanzo.exe&quot; --no-open --home &quot;C:\Users\a&amp;b\kanzo&quot;</Arguments>"
+            ),
+            "{text}"
+        );
+        assert!(text.contains(r"<UserId>pc\a&amp;b</UserId>"));
     }
 }
