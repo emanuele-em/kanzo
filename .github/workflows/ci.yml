@@ -13,8 +13,8 @@ jobs:
   test:
     strategy:
       matrix:
-        # The newest LTS Ubuntu and the newest macOS.
-        os: [ubuntu-26.04, macos-latest]
+        # The newest LTS Ubuntu, the newest macOS and the newest Windows.
+        os: [ubuntu-26.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
