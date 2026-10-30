@@ -98,9 +98,9 @@ fn old_exe(exe: &Path) -> PathBuf {
     exe.with_extension(format!("exe.{CURRENT}.old"))
 }
 
-/// Deletes the programs that updates replaced on Windows, except those still running.
-pub fn remove_old_exes() {
-    let Ok(exe) = std::env::current_exe() else { return };
+/// Deletes the programs that updates replaced `exe` with on Windows (see `old_exe`),
+/// except those still running.
+pub fn remove_old_exes(exe: &Path) {
     let (Some(dir), Some(name)) = (exe.parent(), exe.file_name()) else { return };
     let prefix = format!("{}.", name.to_string_lossy());
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -113,29 +113,35 @@ pub fn remove_old_exes() {
 }
 
 fn run_installer(script: &[u8], dir: &Path) -> Result<Output, String> {
+    // PowerShell runs a script from a file, not from stdin.
+    let file = std::env::temp_dir().join("kanzo-installer.ps1");
     let mut cmd = if cfg!(windows) {
-        // PowerShell runs a script from a file, not from stdin.
-        let file = std::env::temp_dir().join("kanzo-installer.ps1");
         std::fs::write(&file, script).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
         let mut ps = Command::new("powershell");
-        ps.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(file).stdin(Stdio::null());
+        ps.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(&file).stdin(Stdio::null());
         ps
     } else {
         let mut sh = Command::new("sh");
         sh.arg("-s").stdin(Stdio::piped());
         sh
     };
-    let mut child = cmd
-        .env("KANZO_INSTALL_DIR", dir)
-        .env("KANZO_NO_MODIFY_PATH", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run the installer: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(script).map_err(|e| e.to_string())?;
+    let out = (|| {
+        let mut child = cmd
+            .env("KANZO_INSTALL_DIR", dir)
+            .env("KANZO_NO_MODIFY_PATH", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("cannot run the installer: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(script).map_err(|e| e.to_string())?;
+        }
+        child.wait_with_output().map_err(|e| e.to_string())
+    })();
+    if cfg!(windows) {
+        let _ = std::fs::remove_file(&file);
     }
-    child.wait_with_output().map_err(|e| e.to_string())
+    out
 }
 
 /// The arguments to start again with: the same ones, without opening another browser tab.
@@ -182,6 +188,20 @@ mod tests {
         assert!(!newer(CURRENT));
         assert!(!newer("0.0.1"));
         assert!(!newer("not a version"));
+    }
+
+    #[test]
+    fn removes_only_old_programs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keep = ["kanzo.exe", "kanzo.exe.bak", "other.exe.old", "kanzo.old"];
+        for f in keep.iter().chain(&["kanzo.exe.0.2.1.old", "kanzo.exe.0.3.0.old"]) {
+            std::fs::write(tmp.path().join(f), "").unwrap();
+        }
+        remove_old_exes(&tmp.path().join("kanzo.exe"));
+        let mut left: Vec<_> =
+            std::fs::read_dir(tmp.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["kanzo.exe", "kanzo.exe.bak", "kanzo.old", "other.exe.old"]);
     }
 
     #[test]

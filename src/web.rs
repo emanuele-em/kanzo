@@ -641,10 +641,11 @@ async fn update_status(Query(q): Query<UpdateQuery>) -> Response {
 /// Installs the latest release over this program, answers, then starts it in place, or
 /// asks the user to restart it where it can't.
 async fn update_now(State(home): Shared) -> Response {
-    let restart = update::can_restart(&home.dir);
-    match tokio::task::spawn_blocking(update::install).await {
-        Ok(Ok(_)) if !restart => Json(json!({ "restarting": false })).into_response(),
-        Ok(Ok(exe)) => {
+    // `can_restart` runs schtasks on Windows, so it waits off the async thread too.
+    let dir = home.dir.clone();
+    match tokio::task::spawn_blocking(move || (update::can_restart(&dir), update::install())).await {
+        Ok((false, Ok(_))) => Json(json!({ "restarting": false })).into_response(),
+        Ok((true, Ok(exe))) => {
             tokio::spawn(async move {
                 // Let the answer reach the board first.
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -655,7 +656,7 @@ async fn update_now(State(home): Shared) -> Response {
             });
             Json(json!({ "restarting": true })).into_response()
         }
-        Ok(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error }))).into_response(),
+        Ok((_, Err(error))) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }

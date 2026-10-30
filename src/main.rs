@@ -88,8 +88,10 @@ enum ServiceAction {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if cfg!(windows) {
-        update::remove_old_exes();
+    if cfg!(windows)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        update::remove_old_exes(&exe);
     }
     // One thread runs all the async work: the board serves one person, and each
     // agent starts its own `kanzo mcp`. Database calls run on a few blocking
