@@ -8,13 +8,14 @@ cargo-dist-version = "0.33.1"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell"]
+installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax)
-# Macs, and static Linux builds that need no particular glibc: old PCs,
-# Raspberry Pi 3/4/5 (64-bit), Pi 2/3 on a 32-bit OS, and Pi Zero/1 (ARMv6).
+# Macs, 64-bit Intel and AMD Windows, and static Linux builds that need no particular
+# glibc: old PCs, Raspberry Pi 3/4/5 (64-bit), Pi 2/3 on a 32-bit OS, and Pi Zero/1 (ARMv6).
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
     "armv7-unknown-linux-musleabihf",
@@ -33,12 +34,13 @@ github-attestations-phase = "host"
 # Also publish each release to crates.io, for `cargo install kanzo`
 publish-jobs = ["./publish-crates"]
 
-# Build on the newest runners: Ubuntu 26.04 LTS and macOS 26. dist's defaults,
+# Build on the newest runners: Ubuntu 26.04 LTS, macOS 26 and Windows Server 2025. dist's defaults,
 # Ubuntu 22.04 and macOS 14, are deprecated on GitHub.
 [dist.github-custom-runners]
 global = "ubuntu-26.04"
 aarch64-apple-darwin = "macos-26"
 x86_64-apple-darwin = "macos-26-intel"
+x86_64-pc-windows-msvc = "windows-2025"
 x86_64-unknown-linux-musl = "ubuntu-26.04"
 aarch64-unknown-linux-musl = "ubuntu-26.04-arm"
 # dist does not know ubuntu-26.04 yet and would take it for the target itself,
