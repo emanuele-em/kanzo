@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::store::{self, ImagesOf, Store};
 
-const DEFAULT_PORT: u16 = 4242;
+pub const DEFAULT_PORT: u16 = 4242;
 
 const CONFIG_TEMPLATE: &str = r#"# Kanzo settings.
 

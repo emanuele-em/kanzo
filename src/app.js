@@ -28,6 +28,8 @@ const state = {
   layout: "",            // key of the rendered column layout
   allDone: false,        // show every card in the done column
   menu: null,            // slug of the project whose "⋯" menu is open, or "settings"
+  net: null,             // last /api/network reply; null on a board opened from another computer
+  guests: null,          // other computers using the board, while it's shared
 };
 
 // ---------- helpers ----------
@@ -66,6 +68,7 @@ const ICONS = {
   plus: '<path d="M5 12h14M12 5v14"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
   human: '<circle cx="12" cy="8" r="4"/><path d="M5 21v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1"/>',
   github: '<path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.1-1.3-.3-2.5-1-3.5.3-1.2.3-2.4 0-3.5 0 0-1 0-3 1.5a12 12 0 0 0-8 0C6 2 5 2 5 2c-.3 1.2-.3 2.4 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.4.5-.7 1-.8 1.7-.2.6-.3 1.2-.2 1.8v4"/><path d="M9 18c-4.5 2-5-2-7-2"/>',
   sync: '<path d="M12 13v8"/><path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.2"/><path d="m8 17 4-4 4 4"/>',
@@ -76,6 +79,7 @@ const ICONS = {
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>',
 };
 
 function icon(name, color) {
@@ -87,8 +91,9 @@ function icon(name, color) {
 document.querySelectorAll("[data-icon]").forEach((n) => n.replaceWith(icon(n.dataset.icon)));
 
 let toastTimer;
-// Copies a task's key, like api#12, to paste to an agent. The clipboard API needs a
-// secure page; a board opened from another device over plain HTTP falls back.
+// Copies a task's key, like api#12, to paste to an agent, or a shared board's address.
+// The clipboard API needs a secure page; a board opened from another device over plain
+// HTTP falls back.
 async function copyKey(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -449,11 +454,13 @@ function closeMenu() {
   document.querySelector(".menu")?.remove();
   document.querySelectorAll(".nav .menu-open").forEach((i) => i.classList.remove("menu-open"));
   $("#settings").classList.remove("open");
+  $("#network-menu").hidden = true;
+  $("#network").classList.remove("open");
 }
 
 // A click elsewhere closes the menu; one on a "⋯" or the Settings button is left to toggle it.
 document.addEventListener("mousedown", (e) => {
-  if (!e.target.closest(".menu, .nav .more, #settings")) closeMenu();
+  if (!e.target.closest(".menu, .nav .more, #settings, #network, #network-menu")) closeMenu();
 });
 // A click outside the task panel closes it. Cards are left to open their own task,
 // and the project menu to do its job.
@@ -1139,10 +1146,18 @@ window.addEventListener("hashchange", () => {
 async function poll() {
   if (document.hidden) return schedulePoll();
   try {
-    const { changes } = await api("GET", "/changes");
+    const { changes, guests = null } = await api("GET", "/changes");
     $("#offline").hidden = true;
+    if (guests !== state.guests) {
+      state.guests = guests;
+      renderNetwork();
+      // Who's connected changed: the settings list them.
+      if (state.menu === "network") loadNetwork();
+    }
     if (changes !== state.changes) {
       state.changes = changes;
+      // Joining or leaving a board, even from the terminal, shows another board.
+      loadNetwork();
       await loadBoard();
       if (state.task) refreshTask();
     }
@@ -1236,6 +1251,140 @@ $("#sync-form").addEventListener("submit", async (e) => {
   }
   save.disabled = false;
   save.textContent = "Save and sync";
+});
+
+// ---------- network ----------
+
+// Sharing the board with other computers on the network, or showing another computer's
+// board: `kanzo share` and `kanzo join`, from the board.
+async function loadNetwork() {
+  let net = null;
+  try { net = await api("GET", "/network"); } catch {}
+  setNet(net);
+}
+
+function setNet(net) {
+  state.net = net;
+  // A joined board's count comes from its host, with each check of /api/changes.
+  if (net && net.state !== "joined") state.guests = net.state === "sharing" ? net.guests.length : null;
+  renderNetwork();
+}
+
+// The share icon in the header: "Shared" with how many computers use the board, on the
+// computer that shares it and on those that joined it.
+function renderNetwork() {
+  const net = state.net;
+  const button = $("#network");
+  // Opened from another computer's browser, the board can't tell which computer it is on.
+  const away = !net && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  const hosted = net?.state === "joined" || away;
+  const host = net?.host?.replace(/:4242$/, "") || location.hostname;
+  const n = state.guests;
+  const shared = hosted || n != null;
+  const computers = n == null ? "" : `: ${n} computer${n === 1 ? "" : "s"} connected`;
+  button.replaceChildren(icon("share"), ...(shared ? ["Shared"] : []), ...(shared && n != null ? [el("span", { class: "count" }, String(n))] : []));
+  button.classList.toggle("on", shared);
+  button.title = hosted ? `Shared by ${host}${computers}` : shared ? `Shared on your network${computers}` : "Share this board, or join another";
+  if (state.menu === "network") renderNetworkMenu();
+}
+
+// While a change is on its way, the popover keeps showing it.
+let networkBusy = false;
+
+// Sharing and joining: a board is shared or joined, never both, so while one is on the
+// other is greyed out with the reason.
+function renderNetworkMenu() {
+  if (networkBusy) return;
+  const net = state.net;
+  const now = net?.state;
+  const share = $("#network-share");
+  share.checked = now === "sharing";
+  share.disabled = !net || now === "joined";
+  $("#network-share-row").classList.toggle("disabled", share.disabled);
+  $("#network-share-note").textContent =
+    !net ? "Only the computer with the board can change this"
+    : now === "sharing" ? `Other computers join it at ${net.addresses.length > 1 ? "the address for their network"
+      : net.addresses.length ? "this address" : "this computer's IP address"}`
+    : now === "joined" ? "Leave the shared board to share this one"
+    : "Other computers on your network can use it";
+  const addresses = $("#network-addresses");
+  addresses.hidden = now !== "sharing" || !net.addresses.length;
+  if (now === "sharing") {
+    addresses.replaceChildren(...net.addresses.map((a) => el("button", { class: "copy", type: "button", title: "Copy the address" },
+      el("span", { class: "mono" }, a), icon("copy"))));
+  }
+  const guests = $("#network-guests");
+  guests.hidden = now !== "sharing";
+  if (now === "sharing") {
+    guests.replaceChildren(
+      el("span", { class: "label" }, net.guests.length ? "Connected now" : "No other computer is connected yet"),
+      ...net.guests.map((g) => el("div", { class: "guest" },
+        el("span", { class: "dot" }), g.name || "A browser", el("span", { class: "address" }, g.address))));
+  }
+  const joined = now === "joined";
+  $("#network-join").hidden = !net;
+  $("#network-join").classList.toggle("disabled", now === "sharing");
+  $("#network-join-text").replaceChildren(joined ? `Connected to ${net.host}` : "Join a shared board",
+    el("span", {}, joined ? "This computer uses that board"
+      : now === "sharing" ? "Stop sharing to join another board"
+      : "The address the sharing computer shows"));
+  $("#network-leave").hidden = !joined;
+  $("#network-join-fields").hidden = joined;
+  $("#join-host").disabled = $("#join-submit").disabled = now === "sharing";
+}
+
+function toggleNetworkMenu() {
+  const wasOpen = state.menu === "network";
+  closeMenu();
+  if (wasOpen) return;
+  state.menu = "network";
+  const button = $("#network");
+  button.classList.add("open");
+  $("#network-error").hidden = true;
+  renderNetworkMenu();
+  const menu = $("#network-menu");
+  menu.hidden = false;
+  const r = button.getBoundingClientRect();
+  menu.style.top = `${r.bottom + 6}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
+  loadNetwork();
+}
+
+// Sends a change to this computer's board. Joining or leaving shows another board, so
+// the page reloads.
+async function changeNetwork(change) {
+  $("#network-error").hidden = true;
+  networkBusy = true;
+  let net = state.net;
+  try {
+    net = await api("POST", "/network", change);
+    if (change.action === "join" || change.action === "leave") { location.reload(); return; }
+  } catch (err) {
+    $("#network-error").textContent = err.message;
+    $("#network-error").hidden = false;
+  }
+  networkBusy = false;
+  setNet(net);
+}
+
+$("#network").addEventListener("click", toggleNetworkMenu);
+$("#network-share").addEventListener("change", (e) => changeNetwork({ action: e.target.checked ? "on" : "off" }));
+$("#network-addresses").addEventListener("click", (e) => {
+  const button = e.target.closest(".copy");
+  if (!button) return;
+  copyKey(button.textContent);
+  button.querySelector(".icon").replaceWith(icon("check"));
+  setTimeout(() => button.querySelector(".icon").replaceWith(icon("copy")), 1500);
+});
+$("#network-leave").addEventListener("click", () => changeNetwork({ action: "leave" }));
+$("#network-join").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const submit = $("#join-submit");
+  submit.disabled = true;
+  submit.textContent = "Joining…";
+  await changeNetwork({ action: "join", host: $("#join-host").value });
+  submit.disabled = false;
+  submit.textContent = "Join";
 });
 
 // ---------- menu and settings ----------
@@ -1372,6 +1521,7 @@ async function installUpdate(available) {
 checkUpdate();
 setInterval(checkUpdate, 24 * 60 * 60 * 1000);
 loadSyncRemote();
+loadNetwork();
 
 // Relative times ("5m ago") drift; refresh them now and then.
 setInterval(() => {

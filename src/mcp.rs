@@ -7,9 +7,15 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::http::request::Parts;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Extensions, Implementation,
+    ServerCapabilities, ServerConfig,
+};
+use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, Peer, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -18,6 +24,7 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::home::Home;
+use crate::share::{self, Net};
 use crate::store::{self, Error, Project, Store, Task, TaskPatch, short_time};
 
 /// The most done tasks list_tasks shows, newest first: an old board has thousands.
@@ -37,7 +44,9 @@ done and human tasks to the user.";
 pub async fn serve(home: Home) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let repos = git_repos(&cwd);
-    let server = Kanzo { ctx: Arc::new(Ctx { home, cwd: Some(cwd), repos }), tool_router: Kanzo::tools() };
+    let images = home.dir.join("images");
+    let ctx = Ctx { home, cwd: Some(cwd), repos, images, host: Default::default() };
+    let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -47,7 +56,8 @@ pub async fn serve(home: Home) -> Result<()> {
 /// checks (`web::protect`) guard it, including when it listens on the network, so
 /// rmcp's localhost-only list is turned off here.
 pub fn http_service(home: Home, shutdown: CancellationToken) -> StreamableHttpService<Kanzo, LocalSessionManager> {
-    let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new() });
+    let images = home.dir.join("images");
+    let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new(), images, host: Default::default() });
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts().with_cancellation_token(shutdown);
     // rmcp makes a server per session, and for some requests; the tool list is built once.
     let tool_router = Kanzo::tools();
@@ -64,6 +74,11 @@ struct Ctx {
     cwd: Option<PathBuf>,
     /// GitHub repos (`owner/repo`) of the git remotes of `cwd`.
     repos: Vec<String>,
+    /// Where the agent finds the images of tasks: on a computer that joined this board,
+    /// its own folder, which fetches them from here.
+    images: PathBuf,
+    /// The board this computer joined, while `kanzo mcp` uses it for the agent.
+    host: tokio::sync::Mutex<Option<share::Upstream>>,
 }
 
 impl Ctx {
@@ -259,7 +274,35 @@ impl Kanzo {
     /// Runs `f` with a fresh connection on a blocking thread and turns the
     /// outcome into text; errors go back to the agent as tool errors it can read.
     async fn run(&self, f: impl FnOnce(&Ctx, &Store) -> store::Result<String> + Send + 'static) -> CallToolResult {
-        let ctx = self.ctx.clone();
+        self.run_for(&Extensions::default(), f).await
+    }
+
+    /// Like `run`, with the agent's folder when `kanzo mcp` on a computer that joined
+    /// this board sent it along with the message.
+    async fn run_for(
+        &self,
+        ext: &Extensions,
+        f: impl FnOnce(&Ctx, &Store) -> store::Result<String> + Send + 'static,
+    ) -> CallToolResult {
+        let header = |name| {
+            let value = ext.get::<Parts>()?.headers.get(name)?;
+            Some(String::from_utf8_lossy(value.as_bytes()).into_owned())
+        };
+        let ctx = match header(share::FOLDER_HEADER) {
+            Some(folder) => Arc::new(Ctx {
+                home: self.ctx.home.clone(),
+                cwd: Some(folder.into()),
+                repos: header(share::REPOS_HEADER)
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|r| !r.is_empty())
+                    .map(String::from)
+                    .collect(),
+                images: header(share::IMAGES_HEADER).map_or_else(|| self.ctx.images.clone(), PathBuf::from),
+                host: Default::default(),
+            }),
+            None => self.ctx.clone(),
+        };
         let outcome = tokio::task::spawn_blocking(move || {
             let store = ctx.home.store().map_err(|e| e.to_string())?;
             f(&ctx, &store).map_err(|e| e.to_string())
@@ -273,9 +316,9 @@ impl Kanzo {
     }
 
     #[tool(description = "List projects with their repos and open task counts.")]
-    async fn list_projects(&self) -> Result<CallToolResult, ErrorData> {
+    async fn list_projects(&self, ext: Extensions) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(|ctx, store| {
+            .run_for(&ext, |ctx, store| {
                 let projects = store.list_projects()?;
                 if projects.is_empty() {
                     return Ok("No projects yet. Create one with create_project.".into());
@@ -327,9 +370,13 @@ impl Kanzo {
     }
 
     #[tool(description = "List tasks in board order.")]
-    async fn list_tasks(&self, Parameters(args): Parameters<ListTasksArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn list_tasks(
+        &self,
+        Parameters(args): Parameters<ListTasksArgs>,
+        ext: Extensions,
+    ) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |ctx, store| {
+            .run_for(&ext, move |ctx, store| {
                 let all = args.project.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case("all"));
                 let project = if all { None } else { Some(ctx.project(store, args.project.as_deref())?) };
                 let status = args.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -380,9 +427,13 @@ impl Kanzo {
     }
 
     #[tool(description = "Show a task with its comments and image paths.")]
-    async fn get_task(&self, Parameters(args): Parameters<TaskArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn get_task(
+        &self,
+        Parameters(args): Parameters<TaskArgs>,
+        ext: Extensions,
+    ) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |ctx, store| {
+            .run_for(&ext, move |ctx, store| {
                 let task = args.id.find(store)?;
                 task_detail(ctx, store, &task)
             })
@@ -390,9 +441,13 @@ impl Kanzo {
     }
 
     #[tool(description = "Add a task, to todo unless you pass status.")]
-    async fn create_task(&self, Parameters(args): Parameters<CreateTaskArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn create_task(
+        &self,
+        Parameters(args): Parameters<CreateTaskArgs>,
+        ext: Extensions,
+    ) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |ctx, store| {
+            .run_for(&ext, move |ctx, store| {
                 let project = ctx.project(store, args.project.as_deref())?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
                 let description = args.description.as_deref().unwrap_or("");
@@ -451,9 +506,13 @@ impl Kanzo {
     }
 
     #[tool(description = "Take the top todo task, move it to doing and show it.")]
-    async fn next_task(&self, Parameters(args): Parameters<NextTaskArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn next_task(
+        &self,
+        Parameters(args): Parameters<NextTaskArgs>,
+        ext: Extensions,
+    ) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |ctx, store| {
+            .run_for(&ext, move |ctx, store| {
                 let all = args.project.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case("all"));
                 let project = if all { None } else { Some(ctx.project(store, args.project.as_deref())?) };
                 match store.next_task(project.as_ref().map(|p| p.id))? {
@@ -488,6 +547,33 @@ impl Kanzo {
 // untrimmed one for every request.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Kanzo {
+    /// On a computer that joined another's board, each call goes to that board, so agents
+    /// already running switch boards on their next call when this computer joins or leaves.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        // Over HTTP, the board itself sends calls on when it joined another.
+        if let Some(cwd) = &self.ctx.cwd
+            && let Net::Joined(host) = Net::load(&self.ctx.home)
+        {
+            let mut upstream = self.ctx.host.lock().await;
+            if upstream.as_ref().is_none_or(|u| u.host() != host) {
+                *upstream = Some(share::Upstream::new(host, cwd, &self.ctx.repos, &self.ctx.images));
+            }
+            let client = context.peer.peer_info().and_then(|p| serde_json::to_value(&*p).ok());
+            let upstream = upstream.as_mut().expect("set above");
+            let outcome = upstream.call(client, &request.name, request.arguments).await;
+            return Ok(match outcome {
+                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
+            }
+            .into());
+        }
+        self.tool_router.call(ToolCallContext::new(self, request, context)).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("kanzo", env!("CARGO_PKG_VERSION")))
@@ -519,7 +605,7 @@ fn write_tags(out: &mut String, t: &Task) {
 fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     let comments = store.list_comments(t.id)?;
     let images = store.list_images(t.id)?;
-    let dir = ctx.home.dir.join("images");
+    let dir = &ctx.images;
     let paths = |comment: Option<i64>| -> Vec<String> {
         images.iter().filter(|i| i.comment_id == comment).map(|i| dir.join(&i.file).display().to_string()).collect()
     };

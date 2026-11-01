@@ -155,7 +155,8 @@ pub fn sync(home: &Home, keep: Option<Keep>, prompt: bool) -> Result<String> {
     let note = {
         let lock = home.lock_exclusive()?;
         Store::open(&home.db_path(), None)?.settle()?;
-        git(&["add", "--all"])?;
+        // What this machine does on the network stays here.
+        git(&["add", "--all", "--", ".", &format!(":(exclude){}", crate::share::FILE)])?;
         if lock.is_some() { String::new() } else { format!("\n{NO_LOCKS}") }
     };
     if !git_ok(&["diff", "--cached", "--quiet"]) {
@@ -287,7 +288,7 @@ fn git_ok(dir: &Path, prompt: bool, args: &[&str]) -> bool {
 }
 
 /// The machine's name for commit messages, like "Ada's MacBook Air".
-fn hostname() -> String {
+pub fn hostname() -> String {
     let run = |cmd: &str, args: &[&str]| {
         Command::new(cmd)
             .args(args)
