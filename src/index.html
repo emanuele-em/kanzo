@@ -154,6 +154,13 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 }
 #new-task { display: inline-flex; align-items: center; gap: 6px; padding-left: 12px; }
 #new-task .icon svg { width: 16px; height: 16px; }
+/* Filter: the board keeps only the tasks whose key, title, description or tags hold every word typed. */
+#filter {
+  width: 180px; height: 35px; padding: 0 14px; border: 1px solid var(--border); border-radius: 99px;
+  background: transparent; color: var(--text); font: inherit; font-size: 13px; outline: none;
+}
+#filter:focus { border-color: var(--link); }
+#filter.on { border-color: var(--link); background: color-mix(in srgb, var(--link) 8%, transparent); }
 /* Show only human tasks: a small icon, coloured while the filter is on. */
 #human-only { color: var(--muted); }
 #human-only:hover, #human-only:focus-visible { color: var(--text); }
@@ -442,6 +449,8 @@ label.setting { cursor: pointer; }
   .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   #settings-nav { flex-direction: row; border-right: 0; border-bottom: 1px solid var(--border); }
   header { padding: 12px; }
+  /* On a phone the filter takes its own line, below the title and buttons. */
+  #filter { order: 1; flex: 1 0 100%; width: auto; }
 }
 </style>
 </head>
@@ -461,6 +470,7 @@ label.setting { cursor: pointer; }
 <main>
   <header>
     <div class="info" id="header"></div>
+    <input type="search" id="filter" placeholder="Filter board" title="Show only the tasks that match (f)" aria-label="Filter the board" autocomplete="off" spellcheck="false" hidden>
     <button class="ghost" id="human-only" title="Show only human tasks (h)" aria-label="Show only human tasks" aria-pressed="false" hidden><span class="icon" data-icon="human"></span></button>
     <button class="ghost" id="network" aria-haspopup="dialog" aria-controls="network-menu"></button>
     <button class="btn primary" id="new-task" title="New task (n)" hidden><span class="icon" data-icon="plus"></span>New task</button>

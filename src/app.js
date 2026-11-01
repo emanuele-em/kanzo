@@ -481,6 +481,7 @@ function renderHeader() {
   const header = $("#header");
   $("#new-task").hidden = !projects.length;
   $("#human-only").hidden = !projects.length;
+  $("#filter").hidden = !projects.length;
   $("#human-only").setAttribute("aria-pressed", String(isHumanOnly()));
   if (!projects.length) { header.replaceChildren(); return; }
   // Plain words for what each piece is: how much is open, and the repos on GitHub.
@@ -547,21 +548,37 @@ function renderColumns() {
   if (state.dragging) return;
   const all = state.project === "all";
   const humanOnly = isHumanOnly();
+  const words = filterWords();
+  $("#filter").classList.toggle("on", words.length > 0);
   for (const status of statuses) {
     const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
-    const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
+    const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human) && matchesFilter(t, words));
     // Older done tasks the server left out (see loadBoard).
     const last = status === statuses[statuses.length - 1];
     const hidden = last && !state.allDone ? state.board.done_hidden || 0 : 0;
     // Filtered, the server's count of older done tasks says nothing about human ones.
-    const count = mine.length + (humanOnly ? 0 : hidden);
+    const filtered = humanOnly || words.length > 0;
+    const count = mine.length + (filtered ? 0 : hidden);
     col.querySelector("h2 .count").textContent = count ? String(count) : "";
     const more = hidden
       ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
-           humanOnly ? "Show older" : `Show ${hidden} older`)
+           filtered ? "Show older" : `Show ${hidden} older`)
       : null;
     col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all)));
   }
+}
+
+// The filter box keeps on the board only the tasks that hold every word typed, in their key,
+// title, description or tags: the same match as search, but the board stays a board.
+function filterWords() {
+  return $("#filter").value.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function matchesFilter(t, words) {
+  if (!words.length) return true;
+  const tags = Array.isArray(t.tags) ? t.tags.join(" ") : t.tags || "";
+  const text = `${t.project}#${t.id} ${t.title} ${t.description || ""} ${tags}`.toLowerCase();
+  return words.every((w) => text.includes(w));
 }
 
 // The board can show only human tasks; off at first, and each browser remembers the choice.
@@ -734,6 +751,10 @@ function hideNewProject() {
 
 $("#new-task").addEventListener("click", newTask);
 $("#human-only").addEventListener("click", () => setHumanOnly(!isHumanOnly()));
+$("#filter").addEventListener("input", render);
+$("#filter").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.stopPropagation(); $("#filter").value = ""; render(); $("#filter").blur(); }
+});
 $("#new-project-toggle").addEventListener("click", showNewProject);
 $("#new-project-cancel").addEventListener("click", hideNewProject);
 $("#project-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "project-dialog") hideNewProject(); });
@@ -1129,6 +1150,9 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "n" && !typing && !e.metaKey && !e.ctrlKey) {
     if (!$("#new-task").hidden) { e.preventDefault(); newTask(); }
+  }
+  if (e.key === "f" && !typing && !e.metaKey && !e.ctrlKey) {
+    if (!$("#filter").hidden) { e.preventDefault(); $("#filter").focus(); }
   }
   if (e.key === "h" && !typing && !e.metaKey && !e.ctrlKey) {
     if (!$("#human-only").hidden) { e.preventDefault(); setHumanOnly(!isHumanOnly()); }
