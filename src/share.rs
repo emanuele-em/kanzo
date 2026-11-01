@@ -2,11 +2,12 @@
 //!
 //! A shared board listens on the network as well as on this computer. A computer that
 //! joined one keeps its own board as a window onto it: the board hands the page's
-//! requests to the host (`forward`).
+//! requests to the host (`forward`), and `kanzo mcp` hands it agents' tool calls (`Upstream`).
 
 use std::fmt::Write as _;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_util::io::ReaderStream;
@@ -28,7 +29,11 @@ use crate::home::{DEFAULT_PORT, Home};
 /// `share`, or `join <host:port>`; none for neither. `kanzo sync` leaves it out.
 pub const FILE: &str = "network";
 
-/// Sent by a guest's board, so the host can list who's using it.
+/// Sent by `kanzo mcp` on a guest with every message, so the host finds the agent's
+/// project as it would on its own computer.
+pub const FOLDER_HEADER: &str = "x-kanzo-folder";
+pub const REPOS_HEADER: &str = "x-kanzo-repos";
+/// Sent by a guest's board and `kanzo mcp`, so the host can list who's using it.
 pub const COMPUTER_HEADER: &str = "x-kanzo-computer";
 
 /// Larger than any image the board takes.
@@ -251,6 +256,12 @@ struct Reply {
     body: BufReader<TcpStream>,
 }
 
+impl Reply {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+}
+
 async fn send(host: &str, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io::Result<Reply> {
     let connect = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(host));
     let mut conn = connect.await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
@@ -328,6 +339,93 @@ pub async fn forward(host: &str, req: Request) -> Response {
         }
     }
     res
+}
+
+/// `kanzo mcp`'s session with the board this computer joined, for one agent: its tool
+/// calls go there, with the agent's folder so the host finds the project.
+pub struct Upstream {
+    host: String,
+    session: Option<String>,
+    folder: String,
+    repos: String,
+}
+
+impl Upstream {
+    pub fn new(host: String, folder: &Path, repos: &[String]) -> Self {
+        let folder = folder.display().to_string();
+        Self { host, session: None, folder, repos: repos.join(",") }
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Calls the tool `name` on the host, as the agent `client` (its `initialize`
+    /// parameters, so comments keep its name). Answers its text, or its error.
+    pub async fn call(
+        &mut self,
+        client: Option<Value>,
+        name: &str,
+        args: Option<Map<String, Value>>,
+    ) -> Result<String, String> {
+        let init = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": client }).to_string();
+        let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let call =
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
+        let call = call.to_string();
+        // A host that restarted forgot the session: open a new one, once.
+        let mut reply = Err(io::ErrorKind::NotConnected.into());
+        for _ in 0..2 {
+            if self.session.is_none() {
+                self.post(&init).await.map_err(|_| unreachable(&self.host))?;
+                let _ = self.post(initialized).await;
+            }
+            reply = self.post(&call).await;
+            match reply {
+                Ok((404, _)) => self.session = None,
+                _ => break,
+            }
+        }
+        let (status, messages) = reply.map_err(|_| unreachable(&self.host))?;
+        let Some(answer) = messages.into_iter().find(|m| m["id"] == 1) else {
+            return Err(format!("The shared board answered {status}."));
+        };
+        if let Some(error) = answer["error"]["message"].as_str() {
+            return Err(error.to_string());
+        }
+        let result = &answer["result"];
+        let text =
+            result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>();
+        let text = text.join("\n");
+        if result["isError"] == true { Err(text) } else { Ok(text) }
+    }
+
+    /// Sends one message: the status, and the messages the host answered with, as JSON
+    /// or as a stream of events.
+    async fn post(&mut self, line: &str) -> io::Result<(u16, Vec<Value>)> {
+        let mut headers = vec![
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+            (FOLDER_HEADER, self.folder.as_str()),
+            (REPOS_HEADER, self.repos.as_str()),
+            (COMPUTER_HEADER, computer()),
+        ];
+        if let Some(id) = &self.session {
+            headers.push(("mcp-session-id", id));
+        }
+        let mut reply = send(&self.host, "POST", "/mcp", &headers, line.as_bytes()).await?;
+        if let Some(id) = reply.header("mcp-session-id") {
+            self.session = Some(id.to_string());
+        }
+        let mut body = String::new();
+        reply.body.read_to_string(&mut body).await?;
+        let messages = if body.trim_start().starts_with('{') {
+            serde_json::from_str(&body).into_iter().collect()
+        } else {
+            body.lines().filter_map(|l| serde_json::from_str(l.strip_prefix("data:")?.trim()).ok()).collect()
+        };
+        Ok((reply.status, messages))
+    }
 }
 
 #[cfg(test)]
