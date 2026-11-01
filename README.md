@@ -70,33 +70,66 @@ Then ask: *"take the next task from kanzo and do it."* The agent moves the card 
   <img alt="A task open on the board, with Claude Code's comments and a reply" src="docs/img/task-light.jpg">
 </picture>
 
-## Share it on your network
+## Use it on several computers
+
+Two ways, neither with any setup: share one board live, or sync it between machines.
+
+### Share it live
 
 Several computers, one board, at the same time: everyone sees the same tasks, and every agent works on them.
 
-<table>
-  <tr>
-    <td><picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/img/share-dark.jpg">
-      <img alt="The share popover on the computer with the board: sharing is on, with its address to copy and the computers connected" src="docs/img/share-light.jpg">
-    </picture></td>
-    <td><picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/img/join-dark.jpg">
-      <img alt="The share popover on another computer: connected to the shared board, with a Leave button" src="docs/img/join-light.jpg">
-    </picture></td>
-  </tr>
-  <tr>
-    <td>On the computer with the board</td>
-    <td>On every other computer</td>
-  </tr>
-</table>
+1. On the computer with the board, click the share icon next to New task and turn on **Share this board**. Copy an address it shows.
 
-1. On the computer with the board, click the share icon next to New task and turn on **Share this board**. Copy the address it shows.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/share-dark.jpg">
+  <img alt="The share popover on the computer with the board: sharing is on, with its addresses to copy and the computers connected" src="docs/img/share-light.jpg">
+</picture>
+
 2. On each other computer, click the share icon, paste the address and click **Join**.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/join-dark.jpg">
+  <img alt="The share popover on another computer: connected to the shared board, with a Leave button" src="docs/img/join-light.jpg">
+</picture>
 
 Nothing restarts and nothing needs configuring. Their board shows the shared one, and their agents use it through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
 
-From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`. There are no logins: share only on a network you trust.
+From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`. The same two commands work wherever the board lives; only the address changes:
+
+**Your computer shares its board.** Others join it from theirs, on the same network.
+
+```mermaid
+flowchart LR
+  a["💻 Another computer<br>code and agents<br>kanzo join 192.168.1.20"] -- home or office network --> host["💻 Your computer<br>board, code and agents<br>kanzo share on"]
+```
+
+**A Raspberry Pi keeps the board.** Every computer joins it, and none has to stay on.
+
+```mermaid
+flowchart LR
+  a["💻 Laptop<br>code and agents<br>kanzo join 192.168.1.50"] -- home network --> pi["🍓 Raspberry Pi<br>board<br>kanzo share on"]
+  b["💻 Desktop<br>code and agents<br>kanzo join 192.168.1.50"] -- home network --> pi
+```
+
+**The Raspberry Pi is somewhere else.** Put [Tailscale](https://tailscale.com) (free), or any VPN, on the Pi and on each computer: `kanzo share on` then shows the Pi's VPN address too.
+
+```mermaid
+flowchart LR
+  a["💻 Laptop, at the office<br>code and agents<br>kanzo join 100.101.32.7"] -- Tailscale --> pi["🍓 Raspberry Pi, at home<br>board<br>kanzo share on"]
+  b["💻 Laptop, on a train<br>code and agents<br>kanzo join 100.101.32.7"] -- Tailscale --> pi
+```
+
+On a Pi, `kanzo service install` keeps the board running after a restart. There are no logins: share only on a network you trust.
+
+### Sync it between machines
+
+To carry the board between machines you use one at a time, a private git repo you own keeps it in step.
+
+1. [Create an empty private repo](https://github.com/new?name=kanzo-data&visibility=private) on GitHub, or anywhere git can push.
+2. Click Settings at the bottom of the sidebar, choose Sync and paste its URL. Kanzo makes `~/kanzo` a git repo and pushes the board.
+3. On each other machine, do the same with the same URL: Kanzo offers to use the board that's already there.
+
+From then on, choose Sync, or run `kanzo sync`, when you switch machines. It commits the board and pulls or pushes it, and it's safe while the board and your agents are running. If both machines changed the board, Kanzo asks which one to keep. To move to another repo, change it in Settings, under Sync.
 
 ## Commands
 
@@ -114,16 +147,6 @@ From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address
 | `kanzo --version` | Prints the version |
 
 Every command takes `--home <dir>` to use another data folder. Need somewhere to park ideas? Turn on the Backlog column in Settings: agents leave its tasks alone until you move them to `todo`.
-
-## Sync between machines
-
-To carry the board between machines you work on one at a time, a private git repo you own keeps it in step.
-
-1. [Create an empty private repo](https://github.com/new?name=kanzo-data&visibility=private) on GitHub, or anywhere git can push.
-2. Click Settings at the bottom of the sidebar, choose Sync and paste its URL. Kanzo makes `~/kanzo` a git repo and pushes the board.
-3. On each other machine, do the same with the same URL: Kanzo offers to use the board that's already there.
-
-From then on, choose Sync, or run `kanzo sync`, when you switch machines. It commits the board and pulls or pushes it, and it's safe while the board and your agents are running. If both machines changed the board, Kanzo asks which one to keep. To move to another repo, change it in Settings, under Sync.
 
 ## Settings
 
