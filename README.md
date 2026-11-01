@@ -79,6 +79,15 @@ Then ask: *"take the next task from kanzo and do it."* The agent moves the card 
   <img alt="A task open on the board, with Claude Code's comments and a reply" src="docs/img/task-light.jpg">
 </picture>
 
+## Park ideas in a backlog
+
+Turn on Backlog in Settings for a column agents leave alone, until you move its tasks to `todo`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/backlog-dark.jpg">
+  <img alt="The board with the Backlog column on, left of Todo" src="docs/img/backlog-light.jpg">
+</picture>
+
 ## Use it on several computers
 
 Two ways, neither with any setup: share one board live, or sync it between machines.
@@ -164,7 +173,7 @@ From then on, choose Sync, or run `kanzo sync`, when you switch machines. It com
 | `kanzo init` | Creates the data folder; the first run does this too |
 | `kanzo --version` | Prints the version |
 
-Every command takes `--home <dir>` to use another data folder. Need somewhere to park ideas? Turn on the Backlog column in Settings: agents leave its tasks alone until you move them to `todo`.
+Every command takes `--home <dir>` to use another data folder.
 
 ## Settings
 
