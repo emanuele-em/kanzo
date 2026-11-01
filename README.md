@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
 </p>
 
-Kanzo is a kanban board in your browser and an MCP server in one 4.5 MB program, so you and your coding agents work on the same tasks. No account, no server, no setup: run `kanzo` and the board is open.
+Kanzo is a kanban board in your browser and an MCP server in one 4.5 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and the board is open.
 
 You never edit a file. Everything is done in one of three places:
 
@@ -94,7 +94,9 @@ Several computers, one board, at the same time: everyone sees the same tasks, an
 
 Nothing restarts and nothing needs configuring. Their board shows the shared one, and their agents use it through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
 
-From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`. The same two commands work wherever the board lives; only the address changes:
+From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`.
+
+The same two commands work wherever the board lives; only the address changes:
 
 **Your computer shares its board.** Others join it from theirs, on the same network.
 
@@ -111,12 +113,13 @@ flowchart LR
   B["💻 Laptop B<br><code>kanzo#nbsp;join#nbsp;192.168.1.50</code>"] -- home network --> pi
 ```
 
-**The Raspberry Pi is somewhere else.** Put [Tailscale](https://tailscale.com) (free), or any VPN, on the Pi and on each computer: `kanzo share on` then shows the Pi's VPN address too.
+**The Raspberry Pi is somewhere else, over the internet.** Put a VPN on the Pi and on each computer, like [Tailscale](https://tailscale.com), [NetBird](https://netbird.io) or WireGuard: `kanzo share on` then shows the Pi's VPN address too.
 
 ```mermaid
 flowchart LR
-  A["💻 Laptop A<br><code>kanzo#nbsp;join#nbsp;100.101.32.7</code>"] -- Tailscale --> pi["🍓 Raspberry Pi<br><i>100.101.32.7</i><br><code>kanzo#nbsp;share#nbsp;on</code>"]
-  B["💻 Laptop B<br><code>kanzo#nbsp;join#nbsp;100.101.32.7</code>"] -- Tailscale --> pi
+  A["💻 Laptop A<br><code>kanzo#nbsp;join#nbsp;100.101.32.7</code>"] -- VPN --> net(("🌐 Internet"))
+  B["💻 Laptop B<br><code>kanzo#nbsp;join#nbsp;100.101.32.7</code>"] -- VPN --> net
+  net -- VPN --> pi["🍓 Raspberry Pi<br><i>100.101.32.7</i><br><code>kanzo#nbsp;share#nbsp;on</code>"]
 ```
 
 On a Pi, `kanzo service install` keeps the board running after a restart. There are no logins: share only on a network you trust.
