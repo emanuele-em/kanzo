@@ -100,23 +100,23 @@ From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address
 
 ```mermaid
 flowchart LR
-  a["💻 Another computer<br>code and agents<br>kanzo join 192.168.1.20"] -- home or office network --> host["💻 Your computer<br>board, code and agents<br>kanzo share on"]
+  B["💻 Laptop B<br><code>kanzo#nbsp;join#nbsp;192.168.1.20</code>"] -- home network --> A["💻 Laptop A<br><i>192.168.1.20</i><br><code>kanzo#nbsp;share#nbsp;on</code>"]
 ```
 
 **A Raspberry Pi keeps the board.** Every computer joins it, and none has to stay on.
 
 ```mermaid
 flowchart LR
-  a["💻 Laptop<br>code and agents<br>kanzo join 192.168.1.50"] -- home network --> pi["🍓 Raspberry Pi<br>board<br>kanzo share on"]
-  b["💻 Desktop<br>code and agents<br>kanzo join 192.168.1.50"] -- home network --> pi
+  A["💻 Laptop A<br><code>kanzo#nbsp;join#nbsp;192.168.1.50</code>"] -- home network --> pi["🍓 Raspberry Pi<br><i>192.168.1.50</i><br><code>kanzo#nbsp;share#nbsp;on</code>"]
+  B["💻 Laptop B<br><code>kanzo#nbsp;join#nbsp;192.168.1.50</code>"] -- home network --> pi
 ```
 
 **The Raspberry Pi is somewhere else.** Put [Tailscale](https://tailscale.com) (free), or any VPN, on the Pi and on each computer: `kanzo share on` then shows the Pi's VPN address too.
 
 ```mermaid
 flowchart LR
-  a["💻 Laptop, at the office<br>code and agents<br>kanzo join 100.101.32.7"] -- Tailscale --> pi["🍓 Raspberry Pi, at home<br>board<br>kanzo share on"]
-  b["💻 Laptop, on a train<br>code and agents<br>kanzo join 100.101.32.7"] -- Tailscale --> pi
+  A["💻 Laptop A<br><code>kanzo#nbsp;join#nbsp;100.101.32.7</code>"] -- Tailscale --> pi["🍓 Raspberry Pi<br><i>100.101.32.7</i><br><code>kanzo#nbsp;share#nbsp;on</code>"]
+  B["💻 Laptop B<br><code>kanzo#nbsp;join#nbsp;100.101.32.7</code>"] -- Tailscale --> pi
 ```
 
 On a Pi, `kanzo service install` keeps the board running after a restart. There are no logins: share only on a network you trust.
