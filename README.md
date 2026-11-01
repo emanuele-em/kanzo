@@ -44,6 +44,8 @@ Every release is signed by GitHub: check a download with `gh attestation verify 
 cargo install kanzo
 ```
 
+**Or just ask your agent:** *"install Kanzo from github.com/emanuele-em/kanzo."*
+
 ## Start
 
 ```sh
@@ -54,6 +56,8 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 
 `n` adds a task, `/` or `⌘K` searches every project, `Tab` moves to the description, `⌘↵` saves and closes, `Esc` cancels. Mark a task Human and agents leave it to you; the person icon shows only those. Paste or drop an image into a task or a comment to attach it. When a new version is out, the sidebar offers it: one click installs it.
 
+**Or just ask your agent:** *"start Kanzo and keep it running at login."*
+
 ## Connect your agents
 
 ```sh
@@ -62,6 +66,8 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 ```
 
 Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `which kanzo`), or use the running board at `http://localhost:4242/mcp`.
+
+**Or just ask your agent:** *"add Kanzo as your MCP server,"* then restart it.
 
 Then ask: *"take the next task from kanzo and do it."* The agent moves the card to `doing` and comments as it works. It finds the right project from the git remote of the repo it works in; link more repos to a project from its ⋯ menu.
 
@@ -95,6 +101,8 @@ Several computers, one board, at the same time: everyone sees the same tasks, an
 Nothing restarts and nothing needs configuring. Their board shows the shared one, and their agents use it through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
 
 From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`.
+
+**Or just ask your agent:** *"share my Kanzo board"* on one computer, and *"join the Kanzo board at 192.168.1.20"* on the others.
 
 The same two commands work wherever the board lives; only the address changes:
 
@@ -134,6 +142,8 @@ To carry the board between machines you use one at a time, a private git repo yo
 
 From then on, choose Sync, or run `kanzo sync`, when you switch machines. It commits the board and pulls or pushes it, and it's safe while the board and your agents are running. If both machines changed the board, Kanzo asks which one to keep. To move to another repo, change it in Settings, under Sync.
 
+**Or just ask your agent:** *"sync my Kanzo board,"* or the first time, *"set up Kanzo sync with <your repo URL>."*
+
 ## Commands
 
 | Command | Does |
@@ -160,6 +170,8 @@ port = 4242
 listen = "127.0.0.1"   # sharing opens the board to your network; "0.0.0.0" keeps it open
 mcp_http = true        # MCP at /mcp
 ```
+
+**Or just ask your agent:** *"run Kanzo on port 4300."*
 
 ## Small and fast
 
