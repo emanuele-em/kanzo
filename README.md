@@ -21,7 +21,7 @@ You never edit a file. Everything is done in one of three places:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="The Kanzo board: agents move cards while you watch, and ⌘K finds a task in any project" src="docs/img/board-light.gif">
+  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, Laptop A shares the board and Laptop B joins it" src="docs/img/board-light.gif">
 </picture>
 
 ## Install
