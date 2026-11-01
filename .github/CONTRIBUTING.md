@@ -46,6 +46,7 @@ Where things are:
 | `src/web.rs` | The board's HTTP API, and `/mcp` |
 | `src/index.html`, `src/app.js`, `src/logo.png` | The board UI: plain HTML, CSS and JavaScript, built into the binary |
 | `src/sync.rs` | `kanzo sync` |
+| `src/share.rs` | `kanzo share`, `join` and `leave`: sharing the board on the network |
 | `src/export.rs` | `kanzo export` |
 | `src/service.rs` | `kanzo service` |
 

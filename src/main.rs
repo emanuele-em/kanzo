@@ -2,6 +2,7 @@ mod export;
 mod home;
 mod mcp;
 mod service;
+mod share;
 mod store;
 mod sync;
 mod update;
@@ -10,7 +11,7 @@ mod web;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::home::Home;
 
@@ -69,6 +70,18 @@ enum Command {
         #[arg(long, short, value_name = "FILE")]
         output: Option<PathBuf>,
     },
+    /// Share the board with other computers on your network, or stop; without on or off, show whether it is
+    Share {
+        #[arg(value_enum)]
+        state: Option<OnOff>,
+    },
+    /// Use the board another computer shares, from this computer's board and agents
+    Join {
+        /// The address `kanzo share on` printed there, like 192.168.0.12
+        host: String,
+    },
+    /// Stop using the shared board, and go back to this computer's own
+    Leave,
     /// Install the latest release over this Kanzo, and restart the board's service
     Update,
     /// Start the board automatically at login
@@ -76,6 +89,12 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -120,7 +139,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Init { folder: Some(folder) }) => folder.clone(),
         _ => Home::resolve(cli.home)?,
     };
-    let home = Home::open(dir)?;
+    let mut home = Home::open(dir)?;
+    // `--port` reaches the board on that port, for `kanzo share` and the others too.
+    if let Some(port) = cli.port {
+        home.config.port = port;
+    }
     match cli.command {
         None => web::serve(home, cli.port, !cli.no_open).await,
         Some(Command::Mcp) => mcp::serve(home).await,
@@ -142,6 +165,27 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Some(Command::Export { format, project, output }) => {
             export::export(&home, format, project.as_deref(), output.as_deref())
+        }
+        Some(Command::Share { state }) => {
+            let change = state.map(|s| match s {
+                OnOff::On => share::Change::On,
+                OnOff::Off => share::Change::Off,
+            });
+            let (status, running) = share::request(&home, change).await?;
+            // Sharing with no board running starts one, already shared.
+            if matches!(state, Some(OnOff::On)) && !running {
+                return web::serve(home, cli.port, !cli.no_open).await;
+            }
+            println!("{}", status.message());
+            Ok(())
+        }
+        Some(Command::Join { host }) => {
+            println!("{}", share::request(&home, Some(share::Change::Join(host))).await?.0.message());
+            Ok(())
+        }
+        Some(Command::Leave) => {
+            println!("{}", share::request(&home, Some(share::Change::Leave)).await?.0.message());
+            Ok(())
         }
         Some(Command::Service { action: ServiceAction::Install }) => service::install(&home),
         Some(Command::Service { action: ServiceAction::Uninstall }) => service::uninstall(),

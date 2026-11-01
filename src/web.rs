@@ -1,22 +1,25 @@
 //! `kanzo`: the board page, the small JSON API behind it, and MCP over HTTP at `/mcp`.
 
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::home::Home;
+use crate::share::{self, Change, Net};
 use crate::store::{self, Error, ImagesOf, Store, TaskPatch};
 use crate::{sync, update};
 
@@ -33,12 +36,12 @@ const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsa
 
 pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
     let port = port.unwrap_or(home.config.port);
-    let listen = home.config.listen;
+    let guard = Arc::new(Guard::new(port, home.config.listen, Net::load(&home)));
     let url = format!("http://localhost:{port}");
-    let listener = match tokio::net::TcpListener::bind(SocketAddr::new(listen, port)).await {
+    let listener = match TcpListener::bind(SocketAddr::new(guard.address(), port)).await {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            if is_kanzo(port).await {
+            if share::is_kanzo(&format!("127.0.0.1:{port}")).await {
                 println!("Kanzo is already running at {url}");
                 if open {
                     open_browser(&url);
@@ -47,17 +50,18 @@ pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
             }
             bail!("port {port} is used by another program; choose another with --port or in config.toml");
         }
-        Err(e) => return Err(e).context(format!("cannot listen on {listen} port {port}")),
+        Err(e) => return Err(e).context(format!("cannot listen on {} port {port}", guard.address())),
     };
     #[cfg(windows)]
     exit_with_console();
-    let guard = Guard::new(port, !listen.is_loopback());
     println!("Kanzo board at {url}, data in {}", home.dir.display());
-    if guard.lan {
-        if let Some(name) = guard.names.iter().find(|n| n.ends_with(".local")) {
-            println!("On your network: http://{name}:{port} (or this machine's IP address)");
+    match guard.net() {
+        Net::Private => {}
+        Net::Joined(host) => println!("It shows the board at {host}."),
+        _ => {
+            println!("{}", guard.status().message());
+            println!("Anyone who can reach port {port} can read and change this board.");
         }
-        println!("Anyone who can reach port {port} can read and change this board.");
     }
     if home.config.mcp_http {
         println!("MCP over HTTP at {url}/mcp");
@@ -67,32 +71,61 @@ pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
     }
     // Cancelling this also ends open MCP streams, which would otherwise hold up shutdown.
     let shutdown = CancellationToken::new();
-    let app = router(home, guard, shutdown.clone());
-    let serve = |listener| {
-        let stop = shutdown.clone();
-        axum::serve(listener, app.clone()).with_graceful_shutdown(async move { stop.cancelled().await }).into_future()
+    let app = router(home.clone(), guard.clone(), shutdown.clone());
+    let serve = |listener, stop: CancellationToken| {
+        let app = app.clone().into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(
+            axum::serve(listener, app).with_graceful_shutdown(async move { stop.cancelled().await }).into_future(),
+        )
     };
+    let mut running = Vec::new();
     // `localhost` is ::1 before 127.0.0.1 on many Linux systems, and not every
     // client (busybox wget, older Node) falls back, so listen on ::1 as well.
-    let v6 = match listen {
-        IpAddr::V4(ip) if ip.is_loopback() || ip.is_unspecified() => {
-            tokio::net::TcpListener::bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)).await.ok()
-        }
-        _ => None,
-    };
+    if let IpAddr::V4(ip) = home.config.listen
+        && (ip.is_loopback() || ip.is_unspecified())
+        && let Ok(v6) = TcpListener::bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)).await
+    {
+        running.push(serve(v6, shutdown.clone()));
+    }
     let stopper = shutdown.clone();
     tokio::spawn(async move {
         stop_signal().await;
         stopper.cancel();
     });
-    match v6 {
-        Some(v6) => {
-            let (a, b) = tokio::join!(serve(listener), serve(v6));
-            a.and(b)?;
+    // Sharing turns on and off while the board runs: it stops taking connections on one
+    // address and listens on the other. Connections already open finish as usual.
+    let mut listener = listener;
+    loop {
+        let rebind = shutdown.child_token();
+        *guard.rebind.lock().unwrap() = rebind.clone();
+        running.push(serve(listener, rebind.clone()));
+        rebind.cancelled().await;
+        if shutdown.is_cancelled() {
+            break;
         }
-        None => serve(listener).await?,
+        listener = match listen_again(guard.address(), port).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("kanzo: cannot listen on {}: {e}", guard.address());
+                listen_again(home.config.listen, port).await?
+            }
+        };
+    }
+    for task in running {
+        task.await??;
     }
     Ok(())
+}
+
+/// Binds once the old listener has let go of the port, which takes a moment.
+async fn listen_again(ip: IpAddr, port: u16) -> std::io::Result<TcpListener> {
+    for _ in 0..100 {
+        match TcpListener::bind(SocketAddr::new(ip, port)).await {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => tokio::time::sleep(Duration::from_millis(20)).await,
+            bound => return bound,
+        }
+    }
+    TcpListener::bind(SocketAddr::new(ip, port)).await
 }
 
 /// Ctrl-C, or SIGTERM from launchd or systemd stopping the service.
@@ -116,16 +149,14 @@ async fn stop_signal() {
     }
 }
 
-fn router(home: Home, guard: Guard, shutdown: CancellationToken) -> Router {
-    let mut app = Router::new();
+fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router {
+    // The board itself: on a computer that joined another's board, it comes from there.
+    let mut shared = Router::new();
     if home.config.mcp_http {
-        app = app.nest_service("/mcp", crate::mcp::http_service(home.clone(), shutdown));
+        shared = shared.nest_service("/mcp", crate::mcp::http_service(home.clone(), shutdown));
     }
-    app.route("/", get(|| async { Html(INDEX) }))
-        .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
-        .route("/logo.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], LOGO) }))
+    let shared = shared
         .route("/images/{file}", get(image_file))
-        .route("/api/ping", get(|| async { "kanzo" }))
         .route("/api/changes", get(changes))
         .route("/api/board", get(board))
         .route("/api/search", get(search))
@@ -140,29 +171,99 @@ fn router(home: Home, guard: Guard, shutdown: CancellationToken) -> Router {
         .route("/api/images", post(save_image).layer(DefaultBodyLimit::max(IMAGE_LIMIT)))
         .route("/api/images/{id}", delete(delete_image))
         .route("/api/tasks/{id}/images", post(attach_image))
-        .route("/api/update", get(update_status).post(update_now))
         .route("/api/sync", get(sync_status).post(sync_now).put(sync_repo))
         .route("/api/settings", patch(update_settings))
-        .layer(middleware::from_fn_with_state(Arc::new(guard), protect))
+        .route_layer(middleware::from_fn_with_state(guard.clone(), forward));
+    // This computer's own: the page, its version, and what it does on the network.
+    Router::new()
+        .route("/", get(|| async { Html(INDEX) }))
+        .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
+        .route("/logo.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], LOGO) }))
+        .route("/api/ping", get(|| async { "kanzo" }))
+        .route("/api/update", get(update_status).post(update_now))
+        .route("/api/network", get(network).post(change_network).route_layer(middleware::from_fn(this_computer)))
+        .merge(shared)
+        .layer(Extension(guard.clone()))
+        .layer(middleware::from_fn_with_state(guard, protect))
         .with_state(Arc::new(home))
 }
 
-/// Which Host headers the board answers to.
+/// Who may use the board: which Host headers it answers to, and whether other
+/// computers may reach it. Also what this computer does on the network.
 ///
 /// DNS rebinding needs a domain name the attacker controls, so the board only
 /// accepts `localhost`, IP addresses and, when it listens on the network, this
 /// machine's own names. It never accepts other domain names.
 struct Guard {
     port: u16,
-    lan: bool,
-    /// This machine's names, like `pi` and `pi.local`; filled only when `lan`.
-    names: Vec<String>,
+    /// `listen` from config.toml: where the board listens unless shared.
+    listen: IpAddr,
+    /// Changed while the board runs, by its settings and `kanzo share`, `join` and `leave`.
+    net: Mutex<Net>,
+    /// Other computers using the board: when each last asked for something, and its name.
+    guests: Mutex<HashMap<IpAddr, (Instant, Option<String>)>>,
+    /// This machine's names, like `pi` and `pi.local`, found the first time they're needed.
+    names: OnceLock<Vec<String>>,
+    /// Cancelled to listen on the address `net` now asks for.
+    rebind: Mutex<CancellationToken>,
 }
 
+/// How long after its last request a guest still counts: its board asks every 2 seconds
+/// while it's on screen.
+const GUEST_GONE: Duration = Duration::from_secs(30);
+
 impl Guard {
-    fn new(port: u16, lan: bool) -> Self {
-        let mut names = Vec::new();
-        if lan {
+    fn new(port: u16, listen: IpAddr, net: Net) -> Self {
+        Self {
+            port,
+            listen,
+            net: Mutex::new(net),
+            guests: Mutex::default(),
+            names: OnceLock::new(),
+            rebind: Mutex::default(),
+        }
+    }
+
+    fn net(&self) -> Net {
+        self.net.lock().unwrap().clone()
+    }
+
+    /// Whether other computers may use the board.
+    fn lan(&self) -> bool {
+        self.net() == Net::Sharing
+    }
+
+    fn address(&self) -> IpAddr {
+        if self.lan() && self.listen.is_loopback() { Ipv4Addr::UNSPECIFIED.into() } else { self.listen }
+    }
+
+    /// Takes on a change saved by `share::change`, and listens elsewhere if it asks to.
+    fn set(&self, net: Net) {
+        let before = self.address();
+        *self.net.lock().unwrap() = net;
+        if self.address() != before {
+            self.rebind.lock().unwrap().cancel();
+        }
+        if !self.lan() {
+            self.guests.lock().unwrap().clear();
+        }
+    }
+
+    fn guests(&self) -> Vec<share::Guest> {
+        let mut guests = self.guests.lock().unwrap();
+        guests.retain(|_, (seen, _)| seen.elapsed() < GUEST_GONE);
+        let mut list: Vec<share::Guest> =
+            guests.iter().map(|(ip, (_, name))| share::Guest { name: name.clone(), address: *ip }).collect();
+        list.sort_by_key(|g| g.address);
+        list
+    }
+
+    fn status(&self) -> share::Status {
+        share::Status::new(&self.net(), self.port, self.guests())
+    }
+
+    fn names(&self) -> &[String] {
+        self.names.get_or_init(|| {
             let run = |cmd: &str, args: &[&str]| {
                 std::process::Command::new(cmd)
                     .args(args)
@@ -173,6 +274,7 @@ impl Guard {
             };
             // macOS keeps its Bonjour name apart; `hostname` there can be a DHCP address.
             let found = [run("scutil", &["--get", "LocalHostName"]), run("hostname", &[])];
+            let mut names = Vec::new();
             for full in found.into_iter().flatten().filter(|n| !n.is_empty() && n.parse::<IpAddr>().is_err()) {
                 let short = full.split('.').next().unwrap_or_default().to_string();
                 for name in [format!("{short}.local"), full, short] {
@@ -181,8 +283,8 @@ impl Guard {
                     }
                 }
             }
-        }
-        Self { port, lan, names }
+            names
+        })
     }
 
     fn allows(&self, host: &str) -> bool {
@@ -198,14 +300,36 @@ impl Guard {
         if name.eq_ignore_ascii_case("localhost") || ip.is_some_and(|ip| ip.is_loopback()) {
             return true;
         }
-        self.lan && (ip.is_some() || self.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
+        self.lan() && (ip.is_some() || self.names().iter().any(|n| n.eq_ignore_ascii_case(name)))
     }
 }
 
-/// Refuses requests for a Host this board does not answer to, and browser
-/// requests sent from any page other than the board itself. Adds security
-/// headers to every reply.
+/// The other computer a request comes from, if not this one.
+fn guest(req: &Request) -> Option<IpAddr> {
+    req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()).filter(|ip| !ip.is_loopback())
+}
+
+/// Hands the board's requests to the board this computer joined, if it did.
+async fn forward(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
+    match guard.net() {
+        Net::Joined(host) => share::forward(&host, req).await,
+        _ => next.run(req).await,
+    }
+}
+
+/// What this computer does on the network is only for this computer to change.
+async fn this_computer(req: Request, next: Next) -> Response {
+    match guest(&req) {
+        Some(_) => (StatusCode::FORBIDDEN, "only the computer with the board can change its network").into_response(),
+        None => next.run(req).await,
+    }
+}
+
+/// Refuses requests for a Host this board does not answer to, browser requests sent
+/// from any page other than the board itself, and other computers unless the board is
+/// shared. Adds security headers to every reply.
 async fn protect(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
+    let guest = guest(&req);
     let ok = {
         let header = |name| req.headers().get(name).and_then(|h: &HeaderValue| h.to_str().ok());
         let host = header(header::HOST).unwrap_or("");
@@ -215,8 +339,18 @@ async fn protect(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> R
                 && o.as_bytes()[..7].eq_ignore_ascii_case(b"http://")
                 && o.as_bytes()[7..].eq_ignore_ascii_case(host.as_bytes())
         };
-        guard.allows(host) && header(header::ORIGIN).is_none_or(same_origin)
+        guard.allows(host) && header(header::ORIGIN).is_none_or(same_origin) && (guest.is_none() || guard.lan())
     };
+    if let Some(ip) = guest.filter(|_| ok) {
+        let name =
+            req.headers().get(share::COMPUTER_HEADER).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+        let mut guests = guard.guests.lock().unwrap();
+        let guest = guests.entry(ip).or_insert((Instant::now(), None));
+        guest.0 = Instant::now();
+        if name.is_some() {
+            guest.1 = name;
+        }
+    }
     let mut res = if ok {
         next.run(req).await
     } else {
@@ -265,10 +399,13 @@ fn change_token(home: &Home, s: &Store) -> store::Result<String> {
 #[derive(Serialize)]
 struct Changes {
     changes: String,
+    /// Other computers using the board, while it's shared.
+    guests: Option<usize>,
 }
 
-async fn changes(State(home): Shared) -> Response {
-    with_store(home, |h, s| Ok(Changes { changes: change_token(h, s)? })).await
+async fn changes(State(home): Shared, Extension(guard): Extension<Arc<Guard>>) -> Response {
+    let guests = guard.lan().then(|| guard.guests().len());
+    with_store(home, move |h, s| Ok(Changes { changes: change_token(h, s)?, guests })).await
 }
 
 /// Done tasks the board gets unless it asks for all: the newest, which are all it shows.
@@ -577,6 +714,27 @@ async fn save_image(State(home): Shared, headers: HeaderMap, body: Bytes) -> Res
     }
 }
 
+/// What this computer does on the network: shares its board, uses another's, or neither.
+async fn network(Extension(guard): Extension<Arc<Guard>>) -> Response {
+    Json(guard.status()).into_response()
+}
+
+/// Shares the board or stops, or joins another computer's board or leaves it: the
+/// settings window, `kanzo share`, `join` and `leave` all come here while the board runs.
+async fn change_network(
+    State(home): Shared,
+    Extension(guard): Extension<Arc<Guard>>,
+    Json(change): Json<Change>,
+) -> Response {
+    match share::change(&home, change).await {
+        Ok(net) => {
+            guard.set(net);
+            Json(guard.status()).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct SyncRequest {
     /// "local" or "remote", once the board has asked which side to keep.
@@ -661,18 +819,6 @@ async fn update_now(State(home): Shared) -> Response {
     }
 }
 
-/// True when the program on `port` answers like a Kanzo board.
-async fn is_kanzo(port: u16) -> bool {
-    let probe = async {
-        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
-        conn.write_all(b"GET /api/ping HTTP/1.0\r\nHost: localhost\r\n\r\n").await.ok()?;
-        let mut reply = String::new();
-        conn.read_to_string(&mut reply).await.ok()?;
-        Some(reply.ends_with("kanzo"))
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(2), probe).await.ok().flatten().unwrap_or(false)
-}
-
 /// Exits when the console goes away: the service's conhost when the task is stopped, or
 /// the window the board was started in. Windows doesn't stop the program by itself.
 #[cfg(windows)]
@@ -716,7 +862,7 @@ mod tests {
 
     #[test]
     fn hosts() {
-        let local = Guard { port: 4242, lan: false, names: vec![] };
+        let local = Guard::new(4242, Ipv4Addr::LOCALHOST.into(), Net::Private);
         for ok in ["localhost", "localhost:4242", "127.0.0.1:4242", "[::1]:4242", "LOCALHOST:4242"] {
             assert!(local.allows(ok), "{ok}");
         }
@@ -724,12 +870,18 @@ mod tests {
             assert!(!local.allows(bad), "{bad}");
         }
 
-        let lan = Guard { port: 4242, lan: true, names: vec!["pi".into(), "pi.local".into()] };
+        let lan = Guard::new(4242, Ipv4Addr::LOCALHOST.into(), Net::Sharing);
+        lan.names.set(vec!["pi".into(), "pi.local".into()]).unwrap();
         for ok in ["localhost:4242", "192.168.1.5:4242", "[fe80::1]:4242", "pi.local:4242", "pi:4242", "PI.LOCAL."] {
             assert!(lan.allows(ok), "{ok}");
         }
         for bad in ["evil.com:4242", "pi.evil.com:4242", "192.168.1.5:80"] {
             assert!(!lan.allows(bad), "{bad}");
         }
+
+        // Stopping sharing closes the board to other computers again.
+        lan.set(Net::Private);
+        assert!(!lan.allows("192.168.1.5:4242"));
+        assert_eq!(lan.address(), IpAddr::from(Ipv4Addr::LOCALHOST));
     }
 }
