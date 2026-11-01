@@ -36,7 +36,7 @@ For macOS and Linux, including every Raspberry Pi. On Windows, in PowerShell:
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-installer.ps1 | iex"
 ```
 
-Or download [`kanzo-x86_64-pc-windows-msvc.zip`](https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-x86_64-pc-windows-msvc.zip) and put `kanzo.exe` in a folder named `bin` on your `PATH`, like `%USERPROFILE%\.cargo\bin`: the board updates itself only there.
+Or download the Windows zip from the [latest release](https://github.com/emanuele-em/kanzo/releases/latest) and put `kanzo.exe` in a folder named `bin` on your `PATH`, like `%USERPROFILE%\.cargo\bin`: the board updates itself only there.
 
 Every release is signed by GitHub: check a download with `gh attestation verify <file> --repo emanuele-em/kanzo`. Or with Cargo:
 
