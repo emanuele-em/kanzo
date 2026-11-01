@@ -141,16 +141,26 @@ header .repo-link {
 }
 header .repo-link:hover, header .repo-link:focus-visible { background: var(--active); color: var(--text); }
 header .repo-link .icon svg { width: 14px; height: 14px; }
+/* Sharing: a green dot with the number of guests, or the computer whose board this is. */
+/* Share: an icon, green with the number of guests while shared, or with the host once joined. */
+/* The header's icon buttons, as tall and round as New task beside them. */
+#network, #human-only { width: auto; height: 35px; min-width: 35px; padding: 0 8px; justify-content: center; border-radius: 99px; }
+#network { gap: 6px; color: var(--muted); font-size: 13px; }
+#network:hover, #network:focus-visible, #network.open { color: var(--text); }
+#network.on { padding: 0 12px 0 10px; background: color-mix(in srgb, #2f9e44 14%, transparent); color: #2f9e44; font-weight: 500; }
+#network .count {
+  min-width: 18px; padding: 0 5px; border-radius: 99px; background: color-mix(in srgb, currentColor 18%, transparent);
+  font-size: 11.5px; line-height: 18px; text-align: center;
+}
 #new-task { display: inline-flex; align-items: center; gap: 6px; padding-left: 12px; }
 #new-task .icon svg { width: 16px; height: 16px; }
 /* Show only human tasks: a small icon, coloured while the filter is on. */
-#human-only { width: auto; padding: 6px; color: var(--muted); }
+#human-only { color: var(--muted); }
 #human-only:hover, #human-only:focus-visible { color: var(--text); }
 #human-only[aria-pressed="true"] { background: color-mix(in srgb, var(--link) 14%, transparent); color: var(--link); }
 #human-only[aria-pressed="true"]:hover, #human-only[aria-pressed="true"]:focus-visible {
   background: color-mix(in srgb, var(--link) 22%, transparent);
 }
-#human-only .icon svg { width: 16px; height: 16px; }
 .columns {
   flex: 1; min-height: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr);
   gap: 12px; padding: 0 24px 24px; overflow-x: auto;
@@ -368,6 +378,40 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .setting .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .setting .text span { color: var(--muted); font-size: 13px; }
 label.setting { cursor: pointer; }
+/* Joining a board: the address, under the row that offers it. */
+/* A setting that can't change now, like sharing while this computer uses another board. */
+.setting.disabled, .popover form.disabled { opacity: .5; cursor: default; }
+/* The share popover, under its icon: share this board, or join another computer's. */
+.popover {
+  position: fixed; z-index: 30; width: 340px; max-width: calc(100vw - 16px); padding: 16px;
+  display: flex; flex-direction: column; gap: 12px; background: var(--menu);
+  border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
+}
+.popover > .setting:first-child { border-top: 0; padding-top: 0; }
+.popover form { display: flex; flex-direction: column; gap: 8px; }
+.popover .row { display: flex; gap: 8px; }
+.popover .row .field { flex: 1; min-width: 0; }
+.popover .error { margin: 0; color: var(--danger); font-size: 13px; }
+.popover .hint { margin: 0; color: var(--faint); font-size: 12px; }
+/* The addresses other computers join, each copied with a click. */
+#network-addresses { display: flex; flex-direction: column; gap: 6px; }
+.popover .copy {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 0; border-radius: 10px;
+  background: var(--field); color: var(--text); text-align: left;
+}
+.popover .copy .mono { flex: 1; font-size: 13px; }
+.popover .copy .icon { color: var(--muted); }
+.popover .copy:hover .icon, .popover .copy:focus-visible .icon { color: var(--text); }
+.popover .copy .icon svg { width: 16px; height: 16px; }
+/* One solid red in both themes: dark mode's --danger is a light red for text. */
+.btn.danger { background: #dc2626; color: #fff; }
+.btn.danger:hover, .btn.danger:focus-visible { background: #dc2626; opacity: .85; }
+/* The computers using a shared board. */
+.guests { display: flex; flex-direction: column; gap: 8px; }
+.guests .label { color: var(--muted); font-size: 13px; }
+.guest { display: flex; align-items: center; gap: 8px; }
+.guest .dot { width: 7px; height: 7px; background: #2f9e44; }
+.guest .address { margin-left: auto; color: var(--muted); font-size: 13px; }
 .results .label { color: var(--faint); font-size: 12px; padding: 8px 12px 4px; }
 .results .note { color: var(--faint); padding: 14px 12px; }
 .result {
@@ -418,6 +462,7 @@ label.setting { cursor: pointer; }
   <header>
     <div class="info" id="header"></div>
     <button class="ghost" id="human-only" title="Show only human tasks (h)" aria-label="Show only human tasks" aria-pressed="false" hidden><span class="icon" data-icon="human"></span></button>
+    <button class="ghost" id="network" aria-haspopup="dialog" aria-controls="network-menu"></button>
     <button class="btn primary" id="new-task" title="New task (n)" hidden><span class="icon" data-icon="plus"></span>New task</button>
   </header>
   <div class="columns" id="columns"></div>
@@ -496,6 +541,26 @@ label.setting { cursor: pointer; }
       </section>
     </div>
   </div>
+</div>
+<div class="popover" id="network-menu" role="dialog" aria-label="Share" hidden>
+  <label class="setting" id="network-share-row">
+    <span class="text">Share this board<span id="network-share-note"></span></span>
+    <span class="switch"><input type="checkbox" id="network-share" aria-label="Share this board"><span></span></span>
+  </label>
+  <div id="network-addresses" hidden></div>
+  <div class="guests" id="network-guests" hidden></div>
+  <form id="network-join">
+    <div class="setting">
+      <span class="text" id="network-join-text"></span>
+      <button class="btn danger" type="button" id="network-leave">Leave</button>
+    </div>
+    <div class="row" id="network-join-fields">
+      <input class="field" id="join-host" placeholder="192.168.1.18" aria-label="Address of the sharing computer" required autocomplete="off" spellcheck="false">
+      <button class="btn" type="submit" id="join-submit">Join</button>
+    </div>
+  </form>
+  <p class="error" id="network-error" hidden></p>
+  <p class="hint">There are no logins: share only on a network you trust.</p>
 </div>
 <div class="search-dialog" id="project-dialog" hidden>
   <form class="dialog-window" id="new-project" role="dialog" aria-labelledby="project-title">
