@@ -44,7 +44,8 @@ done and human tasks to the user.";
 pub async fn serve(home: Home) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let repos = git_repos(&cwd);
-    let ctx = Ctx { home, cwd: Some(cwd), repos, host: Default::default() };
+    let images = home.dir.join("images");
+    let ctx = Ctx { home, cwd: Some(cwd), repos, images, host: Default::default() };
     let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
@@ -55,7 +56,8 @@ pub async fn serve(home: Home) -> Result<()> {
 /// checks (`web::protect`) guard it, including when it listens on the network, so
 /// rmcp's localhost-only list is turned off here.
 pub fn http_service(home: Home, shutdown: CancellationToken) -> StreamableHttpService<Kanzo, LocalSessionManager> {
-    let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new(), host: Default::default() });
+    let images = home.dir.join("images");
+    let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new(), images, host: Default::default() });
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts().with_cancellation_token(shutdown);
     // rmcp makes a server per session, and for some requests; the tool list is built once.
     let tool_router = Kanzo::tools();
@@ -72,6 +74,9 @@ struct Ctx {
     cwd: Option<PathBuf>,
     /// GitHub repos (`owner/repo`) of the git remotes of `cwd`.
     repos: Vec<String>,
+    /// Where the agent finds the images of tasks: on a computer that joined this board,
+    /// its own folder, which fetches them from here.
+    images: PathBuf,
     /// The board this computer joined, while `kanzo mcp` uses it for the agent.
     host: tokio::sync::Mutex<Option<share::Upstream>>,
 }
@@ -293,6 +298,7 @@ impl Kanzo {
                     .filter(|r| !r.is_empty())
                     .map(String::from)
                     .collect(),
+                images: header(share::IMAGES_HEADER).map_or_else(|| self.ctx.images.clone(), PathBuf::from),
                 host: Default::default(),
             }),
             None => self.ctx.clone(),
@@ -554,7 +560,7 @@ impl ServerHandler for Kanzo {
         {
             let mut upstream = self.ctx.host.lock().await;
             if upstream.as_ref().is_none_or(|u| u.host() != host) {
-                *upstream = Some(share::Upstream::new(host, cwd, &self.ctx.repos));
+                *upstream = Some(share::Upstream::new(host, cwd, &self.ctx.repos, &self.ctx.images));
             }
             let client = context.peer.peer_info().and_then(|p| serde_json::to_value(&*p).ok());
             let upstream = upstream.as_mut().expect("set above");
@@ -599,7 +605,7 @@ fn write_tags(out: &mut String, t: &Task) {
 fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     let comments = store.list_comments(t.id)?;
     let images = store.list_images(t.id)?;
-    let dir = ctx.home.dir.join("images");
+    let dir = &ctx.images;
     let paths = |comment: Option<i64>| -> Vec<String> {
         images.iter().filter(|i| i.comment_id == comment).map(|i| dir.join(&i.file).display().to_string()).collect()
     };

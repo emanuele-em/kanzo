@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -33,6 +33,8 @@ pub const FILE: &str = "network";
 /// project as it would on its own computer.
 pub const FOLDER_HEADER: &str = "x-kanzo-folder";
 pub const REPOS_HEADER: &str = "x-kanzo-repos";
+/// Where a guest's agent finds task images: its own folder, which fetches them from the host.
+pub const IMAGES_HEADER: &str = "x-kanzo-images";
 /// Sent by a guest's board and `kanzo mcp`, so the host can list who's using it.
 pub const COMPUTER_HEADER: &str = "x-kanzo-computer";
 
@@ -348,12 +350,13 @@ pub struct Upstream {
     session: Option<String>,
     folder: String,
     repos: String,
+    images: PathBuf,
 }
 
 impl Upstream {
-    pub fn new(host: String, folder: &Path, repos: &[String]) -> Self {
+    pub fn new(host: String, folder: &Path, repos: &[String], images: &Path) -> Self {
         let folder = folder.display().to_string();
-        Self { host, session: None, folder, repos: repos.join(",") }
+        Self { host, session: None, folder, repos: repos.join(","), images: images.to_path_buf() }
     }
 
     pub fn host(&self) -> &str {
@@ -397,17 +400,44 @@ impl Upstream {
         let text =
             result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>();
         let text = text.join("\n");
+        self.fetch_images(&text).await;
         if result["isError"] == true { Err(text) } else { Ok(text) }
+    }
+
+    /// Images live on the host. The host names them in this computer's images folder, and
+    /// this fetches the ones missing there; names are their content's hash, so a copy never goes stale.
+    async fn fetch_images(&self, text: &str) {
+        let folder = self.images.display().to_string();
+        for (at, _) in text.match_indices(&folder) {
+            let rest = text[at + folder.len()..].trim_start_matches(['/', '\\']);
+            let file: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '.').collect();
+            let path = self.images.join(&file);
+            if !crate::store::valid_image_file(&file) || path.exists() {
+                continue;
+            }
+            let Ok(mut reply) = send(&self.host, "GET", &format!("/images/{file}"), &[], b"").await else { continue };
+            let mut bytes = Vec::new();
+            if reply.status == 200 && reply.body.read_to_end(&mut bytes).await.is_ok() {
+                // Under a temporary name first, so a half-written image never has the real one.
+                let partial = path.with_extension("part");
+                let saved = std::fs::create_dir_all(&self.images).and_then(|()| std::fs::write(&partial, &bytes));
+                if saved.is_ok() {
+                    let _ = std::fs::rename(&partial, &path);
+                }
+            }
+        }
     }
 
     /// Sends one message: the status, and the messages the host answered with, as JSON
     /// or as a stream of events.
     async fn post(&mut self, line: &str) -> io::Result<(u16, Vec<Value>)> {
+        let images = self.images.display().to_string();
         let mut headers = vec![
             ("content-type", "application/json"),
             ("accept", "application/json, text/event-stream"),
             (FOLDER_HEADER, self.folder.as_str()),
             (REPOS_HEADER, self.repos.as_str()),
+            (IMAGES_HEADER, images.as_str()),
             (COMPUTER_HEADER, computer()),
         ];
         if let Some(id) = &self.session {
