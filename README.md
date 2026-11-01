@@ -26,7 +26,8 @@ You never edit a file. Everything is done in one of three places:
 
 ## Install
 
-**Just ask your agent:** *"install Kanzo from github.com/emanuele-em/kanzo."*
+> [!TIP]
+> **Just ask your agent:** *"install Kanzo from github.com/emanuele-em/kanzo."*
 
 ```sh
 curl -LsSf https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-installer.sh | sh
@@ -48,7 +49,8 @@ cargo install kanzo
 
 ## Start
 
-**Just ask your agent:** *"start Kanzo and keep it running at login."*
+> [!TIP]
+> **Just ask your agent:** *"start Kanzo and keep it running at login."*
 
 ```sh
 kanzo
@@ -60,7 +62,8 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 
 ## Connect your agents
 
-**Just ask your agent:** *"add Kanzo as your MCP server,"* then restart it.
+> [!TIP]
+> **Just ask your agent:** *"add Kanzo as your MCP server,"* then restart it.
 
 ```sh
 claude mcp add kanzo --scope user -- kanzo mcp   # Claude Code
@@ -82,7 +85,8 @@ Two ways, neither with any setup: share one board live, or sync it between machi
 
 ### Share it live
 
-**Just ask your agent:** *"share my Kanzo board"* on one computer, and *"join the Kanzo board at 192.168.1.20"* on the others.
+> [!TIP]
+> **Just ask your agent:** *"share my Kanzo board"* on one computer, and *"join the Kanzo board at 192.168.1.20"* on the others.
 
 Several computers, one board, at the same time: everyone sees the same tasks, and every agent works on them.
 
@@ -134,7 +138,8 @@ On a Pi, `kanzo service install` keeps the board running after a restart. There 
 
 ### Sync it between machines
 
-**Just ask your agent:** *"sync my Kanzo board,"* or the first time, *"set up Kanzo sync with github.com/you/kanzo-data."*
+> [!TIP]
+> **Just ask your agent:** *"sync my Kanzo board,"* or the first time, *"set up Kanzo sync with github.com/you/kanzo-data."*
 
 To carry the board between machines you use one at a time, a private git repo you own keeps it in step.
 
@@ -163,7 +168,8 @@ Every command takes `--home <dir>` to use another data folder. Need somewhere to
 
 ## Settings
 
-**Just ask your agent:** *"run Kanzo on port 4300."*
+> [!TIP]
+> **Just ask your agent:** *"run Kanzo on port 4300."*
 
 Everything lives in `~/kanzo`: the board in `kanzo.db`, settings in `config.toml`. You never need to open either; use another folder with `--home` or `KANZO_HOME`.
 
