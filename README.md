@@ -26,6 +26,8 @@ You never edit a file. Everything is done in one of three places:
 
 ## Install
 
+**Just ask your agent:** *"install Kanzo from github.com/emanuele-em/kanzo."*
+
 ```sh
 curl -LsSf https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-installer.sh | sh
 ```
@@ -44,9 +46,9 @@ Every release is signed by GitHub: check a download with `gh attestation verify 
 cargo install kanzo
 ```
 
-**Or just ask your agent:** *"install Kanzo from github.com/emanuele-em/kanzo."*
-
 ## Start
+
+**Just ask your agent:** *"start Kanzo and keep it running at login."*
 
 ```sh
 kanzo
@@ -56,9 +58,9 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 
 `n` adds a task, `/` or `⌘K` searches every project, `Tab` moves to the description, `⌘↵` saves and closes, `Esc` cancels. Mark a task Human and agents leave it to you; the person icon shows only those. Paste or drop an image into a task or a comment to attach it. When a new version is out, the sidebar offers it: one click installs it.
 
-**Or just ask your agent:** *"start Kanzo and keep it running at login."*
-
 ## Connect your agents
+
+**Just ask your agent:** *"add Kanzo as your MCP server,"* then restart it.
 
 ```sh
 claude mcp add kanzo --scope user -- kanzo mcp   # Claude Code
@@ -66,8 +68,6 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 ```
 
 Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `which kanzo`), or use the running board at `http://localhost:4242/mcp`.
-
-**Or just ask your agent:** *"add Kanzo as your MCP server,"* then restart it.
 
 Then ask: *"take the next task from kanzo and do it."* The agent moves the card to `doing` and comments as it works. It finds the right project from the git remote of the repo it works in; link more repos to a project from its ⋯ menu.
 
@@ -81,6 +81,8 @@ Then ask: *"take the next task from kanzo and do it."* The agent moves the card 
 Two ways, neither with any setup: share one board live, or sync it between machines.
 
 ### Share it live
+
+**Just ask your agent:** *"share my Kanzo board"* on one computer, and *"join the Kanzo board at 192.168.1.20"* on the others.
 
 Several computers, one board, at the same time: everyone sees the same tasks, and every agent works on them.
 
@@ -101,8 +103,6 @@ Several computers, one board, at the same time: everyone sees the same tasks, an
 Nothing restarts and nothing needs configuring. Their board shows the shared one, and their agents use it through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
 
 From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`.
-
-**Or just ask your agent:** *"share my Kanzo board"* on one computer, and *"join the Kanzo board at 192.168.1.20"* on the others.
 
 The same two commands work wherever the board lives; only the address changes:
 
@@ -134,6 +134,8 @@ On a Pi, `kanzo service install` keeps the board running after a restart. There 
 
 ### Sync it between machines
 
+**Just ask your agent:** *"sync my Kanzo board,"* or the first time, *"set up Kanzo sync with github.com/you/kanzo-data."*
+
 To carry the board between machines you use one at a time, a private git repo you own keeps it in step.
 
 1. [Create an empty private repo](https://github.com/new?name=kanzo-data&visibility=private) on GitHub, or anywhere git can push.
@@ -141,8 +143,6 @@ To carry the board between machines you use one at a time, a private git repo yo
 3. On each other machine, do the same with the same URL: Kanzo offers to use the board that's already there.
 
 From then on, choose Sync, or run `kanzo sync`, when you switch machines. It commits the board and pulls or pushes it, and it's safe while the board and your agents are running. If both machines changed the board, Kanzo asks which one to keep. To move to another repo, change it in Settings, under Sync.
-
-**Or just ask your agent:** *"sync my Kanzo board,"* or the first time, *"set up Kanzo sync with <your repo URL>."*
 
 ## Commands
 
@@ -163,6 +163,8 @@ Every command takes `--home <dir>` to use another data folder. Need somewhere to
 
 ## Settings
 
+**Just ask your agent:** *"run Kanzo on port 4300."*
+
 Everything lives in `~/kanzo`: the board in `kanzo.db`, settings in `config.toml`. You never need to open either; use another folder with `--home` or `KANZO_HOME`.
 
 ```toml
@@ -170,8 +172,6 @@ port = 4242
 listen = "127.0.0.1"   # sharing opens the board to your network; "0.0.0.0" keeps it open
 mcp_http = true        # MCP at /mcp
 ```
-
-**Or just ask your agent:** *"run Kanzo on port 4300."*
 
 ## Small and fast
 
