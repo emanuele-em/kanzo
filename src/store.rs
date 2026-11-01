@@ -1361,6 +1361,10 @@ mod tests {
             "https://github.com/owner/repo/",
             "https://github.com/owner/repo/tree/main",
             "https://github.com/owner/repo/pull/3",
+            // Gitea, or any other host: only owner/repo counts.
+            "https://gitea.example.com/owner/repo.git",
+            "git@gitea.example.com:owner/repo.git",
+            "ssh://git@gitea.example.com:2222/owner/repo.git",
         ] {
             assert_eq!(repo_from_url(url).as_deref(), Some("owner/repo"), "{url}");
         }

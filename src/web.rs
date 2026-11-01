@@ -49,6 +49,8 @@ pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
         }
         Err(e) => return Err(e).context(format!("cannot listen on {listen} port {port}")),
     };
+    #[cfg(windows)]
+    exit_with_console();
     let guard = Guard::new(port, !listen.is_loopback());
     println!("Kanzo board at {url}, data in {}", home.dir.display());
     if guard.lan {
@@ -636,19 +638,25 @@ async fn update_status(Query(q): Query<UpdateQuery>) -> Response {
     Json(json!({ "current": update::CURRENT, "latest": latest, "available": available })).into_response()
 }
 
-/// Installs the latest release over this program, answers, then starts it in place.
-async fn update_now() -> Response {
-    match tokio::task::spawn_blocking(update::install).await {
-        Ok(Ok(exe)) => {
+/// Installs the latest release over this program, answers, then starts it in place, or
+/// asks the user to restart it where it can't.
+async fn update_now(State(home): Shared) -> Response {
+    // `can_restart` runs schtasks on Windows, so it waits off the async thread too.
+    let dir = home.dir.clone();
+    match tokio::task::spawn_blocking(move || (update::can_restart(&dir), update::install())).await {
+        Ok((false, Ok(_))) => Json(json!({ "restarting": false })).into_response(),
+        Ok((true, Ok(exe))) => {
             tokio::spawn(async move {
                 // Let the answer reach the board first.
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                let e = update::restart(&exe);
-                eprintln!("kanzo: updated, but cannot restart: {e}");
+                // Blocking: on Windows it waits for the service to stop this process.
+                if let Ok(e) = tokio::task::spawn_blocking(move || update::restart(&exe)).await {
+                    eprintln!("kanzo: updated, but cannot restart: {e}");
+                }
             });
             Json(json!({ "restarting": true })).into_response()
         }
-        Ok(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error }))).into_response(),
+        Ok((_, Err(error))) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }
@@ -665,16 +673,39 @@ async fn is_kanzo(port: u16) -> bool {
     tokio::time::timeout(std::time::Duration::from_secs(2), probe).await.ok().flatten().unwrap_or(false)
 }
 
-fn open_browser(url: &str) {
-    if cfg!(target_os = "macos") {
-        if std::process::Command::new("open").arg(url).spawn().is_err() {
-            eprintln!("Open {url} in your browser.");
-        }
-        return;
+/// Exits when the console goes away: the service's conhost when the task is stopped, or
+/// the window the board was started in. Windows doesn't stop the program by itself.
+#[cfg(windows)]
+fn exit_with_console() {
+    unsafe extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
     }
-    // A board without a screen has nothing to open; the URL is already printed.
-    let desktop = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|v| !v.is_empty()));
-    if desktop && std::process::Command::new("xdg-open").arg(url).spawn().is_err() {
+    // SAFETY: room for one process id, as `count` says; it returns 0 without a console.
+    let attached = || unsafe { GetConsoleProcessList(&mut 0, 1) } != 0;
+    if attached() {
+        std::thread::spawn(move || {
+            while attached() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            std::process::exit(0);
+        });
+    }
+}
+
+fn open_browser(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        // A board without a screen has nothing to open; the URL is already printed.
+        let desktop = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|v| !v.is_empty()));
+        if !desktop {
+            return;
+        }
+        "xdg-open"
+    };
+    if std::process::Command::new(opener).arg(url).spawn().is_err() {
         eprintln!("Open {url} in your browser.");
     }
 }

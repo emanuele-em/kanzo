@@ -71,7 +71,7 @@ enum Command {
     },
     /// Install the latest release over this Kanzo, and restart the board's service
     Update,
-    /// Start the board automatically at login (macOS and Linux)
+    /// Start the board automatically at login
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -80,7 +80,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ServiceAction {
-    /// Install and start a service that runs the board at login (LaunchAgent on macOS, systemd on Linux)
+    /// Install and start a service that runs the board at login (LaunchAgent on macOS, systemd on Linux, Task Scheduler on Windows)
     Install,
     /// Stop and remove that service
     Uninstall,
@@ -88,6 +88,11 @@ enum ServiceAction {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cfg!(windows)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        update::remove_old_exes(&exe);
+    }
     // One thread runs all the async work: the board serves one person, and each
     // agent starts its own `kanzo mcp`. Database calls run on a few blocking
     // threads that exit when idle. This keeps kanzo light on small boards.

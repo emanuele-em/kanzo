@@ -114,9 +114,13 @@ impl Home {
             use std::os::unix::fs::MetadataExt;
             fs::metadata(self.db_path()).map(|m| m.ino()).unwrap_or(0)
         }
+        // No inode on Windows; a replaced file has a new modified time. Not the creation
+        // time: NTFS keeps it for a file replaced under the same name.
         #[cfg(not(unix))]
         {
-            0
+            let modified = fs::metadata(self.db_path()).and_then(|m| m.modified()).ok();
+            let since_epoch = modified.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+            since_epoch.map_or(0, |d| d.as_nanos() as u64)
         }
     }
 
