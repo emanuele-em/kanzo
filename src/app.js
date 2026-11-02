@@ -1,4 +1,3 @@
-// The Kanzo board. Plain JavaScript, no build step; served at /app.js.
 "use strict";
 
 // The board runs on browsers back to Safari 13.1, Chrome 80 and Firefox 78. These
@@ -19,30 +18,42 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const STATUS_COLORS = ["#8a8a83", "#3b82f6", "#e8a317", "#2f9e44", "#ae3ec9", "#e8590c"];
 
 const state = {
-  project: "all",        // slug or "all"
-  board: null,           // last /api/board reply
-  changes: null,         // change counter seen last
-  task: null,            // open task id
-  dragging: null,        // id of the card being dragged
-  dropped: false,        // the current drag ended in a drop
-  layout: "",            // key of the rendered column layout
-  allDone: false,        // show every card in the done column
-  menu: null,            // slug of the project whose "⋯" menu is open, or "settings"
-  net: null,             // last /api/network reply; null on a board opened from another computer
-  guests: null,          // other computers using the board, while it's shared
+  project: "all",
+  board: null,
+  changes: null,
+  task: null,
+  dragging: null,
+  dropped: false,
+  layout: "",
+  allDone: false,
+  menu: null,
+  net: null,
+  guests: null,
 };
 
-// ---------- helpers ----------
-
 async function api(method, path, body) {
+  const image = body instanceof Blob;
   const res = await fetch("/api" + path, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
+    headers: body ? { "Content-Type": image ? body.type : "application/json" } : {},
+    body: image || !body ? body : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { data });
   return data;
+}
+
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+// Storage can be off, as in private windows.
+function localStorageGet(k) {
+  try { return localStorage.getItem(k); } catch { return null; }
+}
+
+function localStorageSet(k, v) {
+  try { localStorage.setItem(k, v); } catch {}
 }
 
 function el(tag, attrs = {}, ...children) {
@@ -57,7 +68,7 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-// Line icons (from Lucide, ISC licence), drawn in the text colour.
+// From Lucide, ISC licence.
 const ICONS = {
   newProject: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/>',
   board: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7M12 7v4M16 7v9"/>',
@@ -92,7 +103,6 @@ function icon(name, color) {
 document.querySelectorAll("[data-icon]").forEach((n) => n.replaceWith(icon(n.dataset.icon)));
 
 let toastTimer;
-// Copies a task's key, like api#12, to paste to an agent, or a shared board's address.
 // The clipboard API needs a secure page; a board opened from another device over plain
 // HTTP falls back.
 async function copyKey(text) {
@@ -117,13 +127,12 @@ function toast(message) {
   toastTimer = setTimeout(() => t.remove(), 3500);
 }
 
-// The colours a project can be given; the names match PROJECT_COLORS in store.rs.
+// The names match PROJECT_COLORS in store.rs.
 const PROJECT_COLORS = {
   gray: "#8e8e93", red: "#ef4444", orange: "#f97316", yellow: "#eab308", green: "#22c55e",
   teal: "#14b8a6", blue: "#3b82f6", purple: "#a855f7", pink: "#ec4899",
 };
 
-// The colour picked for a project, or until then one chosen from its slug.
 function projectColorName(slug) {
   const picked = state.board?.projects.find((p) => p.slug === slug)?.color;
   if (PROJECT_COLORS[picked]) return picked;
@@ -137,8 +146,6 @@ function projectColor(slug) {
   return PROJECT_COLORS[projectColorName(slug)];
 }
 
-// How many columns a status is past todo: -1 for backlog, and 0 for a status the board
-// doesn't know.
 function statusStep(status) {
   const { statuses } = state.board;
   const i = statuses.indexOf(status);
@@ -150,9 +157,6 @@ function statusColor(status) {
   return STATUS_COLORS[Math.max(i, 0) % STATUS_COLORS.length];
 }
 
-// A column's status as a small progress circle, as in Linear: dashed for backlog, empty
-// for todo, filling up across the board, a check for done. A shape, so it can't be taken
-// for a project's colour dot.
 function statusIcon(status) {
   const step = statusStep(status), steps = statusStep("done");
   const f = Math.max(step, 0) / steps;
@@ -191,8 +195,6 @@ function timeEl(ts) {
   return el("time", { datetime: ts, title: parseTime(ts).toLocaleString() }, ago(ts));
 }
 
-// ---------- Markdown (small, escapes everything first) ----------
-
 function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -225,7 +227,7 @@ function markdown(src) {
   const lines = escapeHtml(src.replace(/\r\n?/g, "\n")).split("\n");
   const out = [];
   let para = [];
-  let list = null; // { type: "ul" | "ol", items: [] }
+  let list = null;
   const flushPara = () => { if (para.length) out.push(`<p>${inline(para.join("<br>"))}</p>`); para = []; };
   const flushList = () => {
     if (!list) return;
@@ -274,8 +276,6 @@ function markdown(src) {
   return out.join("");
 }
 
-// ---------- board ----------
-
 // Loads can overlap (a poll, a drop, an edit); only the newest one may render,
 // so a slow older reply never undoes what is on screen.
 let boardRequest = 0;
@@ -283,8 +283,6 @@ let boardRequest = 0;
 async function loadBoard() {
   const request = ++boardRequest;
   try {
-    // The server leaves out older done tasks unless asked: the board does not show
-    // them, and the done column only grows. Search needs them all.
     const done = state.allDone ? "&done=all" : "";
     const q = filterQuery();
     const board = await api("GET", "/board?project=" + encodeURIComponent(state.project) + done
@@ -304,7 +302,6 @@ async function loadBoard() {
   }
 }
 
-// The address is #project or #project/task-id, so a task can be linked to.
 function updateHash() {
   const hash = "#" + state.project + (state.task ? "/" + state.task : "");
   if (location.hash !== hash) history.replaceState(null, "", hash);
@@ -319,7 +316,7 @@ function readHash() {
 
 function setProject(slug) {
   state.project = slug;
-  try { localStorage.setItem("kanzo.project", slug); } catch {}
+  localStorageSet("kanzo.project", slug);
   updateHash();
   state.layout = "";
   loadBoard();
@@ -355,15 +352,9 @@ function renderNav() {
   );
 }
 
-// ---------- project menu ----------
-
-// The "⋯" menu of a sidebar project. `state.menu` holds its slug, so the row keeps
-// its highlight while the sidebar is redrawn by polling.
+// `state.menu` holds the slug, so the row keeps its highlight while polling redraws the sidebar.
 function toggleProjectMenu(p, button) {
-  const wasOpen = state.menu === p.slug;
-  closeMenu();
-  if (wasOpen) return;
-  state.menu = p.slug;
+  if (!toggleMenu(p.slug)) return;
   button.closest(".item").classList.add("menu-open");
   const swatches = el("div", { class: "swatches", role: "group", "aria-label": "Color" });
   const drawSwatches = () => swatches.replaceChildren(...Object.entries(PROJECT_COLORS).map(([name, hex]) => {
@@ -373,7 +364,6 @@ function toggleProjectMenu(p, button) {
       current ? icon("check") : null);
   }));
   drawSwatches();
-  // Linked repos, each with an unlink button, and a field to link another.
   const repos = el("div", { class: "repos" });
   const drawRepos = (list, focus) => {
     const input = el("input", { class: "field", placeholder: "Link a repo: owner/repo", "aria-label": "Link a GitHub repo",
@@ -405,9 +395,7 @@ function toggleProjectMenu(p, button) {
   menu.focus();
 }
 
-// Renaming a project, as in ChatGPT: its sidebar row becomes a field. Enter or leaving it
-// saves, Esc cancels. The slug, and so the task keys, stay.
-let renaming = null; // { slug, input }
+let renaming = null;
 
 function startRename(p) {
   closeMenu();
@@ -435,7 +423,6 @@ function startRename(p) {
   input.select();
 }
 
-// Links (POST) or unlinks (DELETE) a repo; returns the project, or null after showing the error.
 async function changeRepo(slug, method, repo) {
   try {
     const p = await api(method, `/projects/${encodeURIComponent(slug)}/repos`, { repo });
@@ -451,6 +438,14 @@ async function pickColor(slug, color) {
   } catch (err) { toast(err.message); }
 }
 
+function toggleMenu(name) {
+  const wasOpen = state.menu === name;
+  closeMenu();
+  if (wasOpen) return false;
+  state.menu = name;
+  return true;
+}
+
 function closeMenu() {
   if (!state.menu) return;
   state.menu = null;
@@ -461,12 +456,10 @@ function closeMenu() {
   $("#network").classList.remove("open");
 }
 
-// A click elsewhere closes the menu; one on a "⋯" or the Settings button is left to toggle it.
+// A click on a menu's own button is left to toggle it.
 document.addEventListener("mousedown", (e) => {
   if (!e.target.closest(".menu, .nav .more, #settings, #network, #network-menu")) closeMenu();
 });
-// A click outside the task panel closes it. Cards are left to open their own task,
-// and the project menu to do its job.
 document.addEventListener("mousedown", (e) => {
   if (state.task && e.button === 0 && !e.target.closest("#panel, .card, .menu, .search-dialog")) closeTask();
 });
@@ -491,12 +484,11 @@ function renderHeader() {
                      onclick: () => setFilters(savedFilters().filter((_, j) => j !== i)) }, icon("close")))));
   $("#human-only").setAttribute("aria-pressed", String(isHumanOnly()));
   if (!projects.length) { header.replaceChildren(); return; }
-  // Plain words for what each piece is: how much is open, and the repos on GitHub.
-  const open = (n) => `${n} open task${n === 1 ? "" : "s"}`;
+  const open = (n) => plural(n, "open task");
   if (!p) {
     const count = projects.reduce((n, p) => n + p.open, 0);
     header.replaceChildren(el("h1", {}, "All projects"),
-      el("span", { class: "sub" }, `${open(count)} in ${projects.length} project${projects.length === 1 ? "" : "s"}`));
+      el("span", { class: "sub" }, `${open(count)} in ${plural(projects.length, "project")}`));
     return;
   }
   header.replaceChildren(
@@ -508,7 +500,7 @@ function renderHeader() {
 }
 
 async function deleteProject(p) {
-  const tasks = p.total ? ` and its ${p.total} task${p.total > 1 ? "s" : ""}, with their comments` : "";
+  const tasks = p.total ? ` and its ${plural(p.total, "task")}, with their comments` : "";
   if (!confirm(`Delete project ${p.slug}${tasks}? This cannot be undone.`)) return;
   try {
     await api("DELETE", `/projects/${encodeURIComponent(p.slug)}`);
@@ -560,7 +552,6 @@ function renderColumns() {
   for (const status of statuses) {
     const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
     const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
-    // Older done tasks the server left out (see loadBoard).
     const last = status === statuses[statuses.length - 1];
     const hidden = last && !state.allDone ? state.board.done_hidden || 0 : 0;
     // Filtered, the server's count of older done tasks says nothing about human ones.
@@ -576,16 +567,12 @@ function renderColumns() {
   highlight("filter", columns, words);
 }
 
-// The filter box keeps on the board only the tasks search finds (see loadBoard): search
-// shows one to open, the filter all of them in their columns.
-// Enter keeps what's typed as a chip beside the box, and each browser remembers them;
-// a task must match every chip and the text still in the box.
 function savedFilters() {
   try { return JSON.parse(localStorageGet("kanzo.filters")) || []; } catch { return []; }
 }
 
 function setFilters(filters) {
-  try { localStorage.setItem("kanzo.filters", JSON.stringify(filters)); } catch {}
+  localStorageSet("kanzo.filters", JSON.stringify(filters));
   loadBoard();
 }
 
@@ -597,8 +584,6 @@ function wordsOf(query) {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
 
-// Paints the words found in the titles, descriptions and tags under `root`, for search and
-// the filter. The CSS Custom Highlight API does it without adding an element per match.
 function highlight(name, root, words) {
   if (!window.Highlight) return;
   const re = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi");
@@ -615,7 +600,6 @@ function highlight(name, root, words) {
   CSS.highlights.set(name, new Highlight(...ranges));
 }
 
-// A task's description line and tags: on cards and in search.
 function summary(t) {
   return [
     t.description ? el("span", { class: "desc" }, plainText(t.description)) : null,
@@ -623,24 +607,21 @@ function summary(t) {
   ];
 }
 
-// The board can show only human tasks; off at first, and each browser remembers the choice.
 function isHumanOnly() {
   return localStorageGet("kanzo.humanOnly") === "1";
 }
 
 function setHumanOnly(humanOnly) {
-  try { localStorage.setItem("kanzo.humanOnly", humanOnly ? "1" : "0"); } catch {}
+  localStorageSet("kanzo.humanOnly", humanOnly ? "1" : "0");
   render();
 }
 
-// Backlog and done, which only grows, start collapsed to a thin strip, as in Trello or
-// Linear, and each browser remembers the choice. Cards can still be dropped on a strip.
 function isCollapsed(status) {
   return localStorageGet(`kanzo.${status}Collapsed`) !== "0";
 }
 
 function setCollapsed(status, collapsed) {
-  try { localStorage.setItem(`kanzo.${status}Collapsed`, collapsed ? "1" : "0"); } catch {}
+  localStorageSet(`kanzo.${status}Collapsed`, collapsed ? "1" : "0");
   showCollapsed();
 }
 
@@ -664,7 +645,6 @@ function showCollapsed() {
   columns.style.gridTemplateColumns = cols.map((c) => (c.classList.contains("collapsed") ? "48px" : "minmax(260px, 1fr)")).join(" ");
 }
 
-// A description as one line of plain text for a card: Markdown markers dropped, lines joined.
 function plainText(md) {
   return md.split("\n")
     .map((l) => l.replace(/^\s*(#{1,6}|>|[-*+]|\d+[.)])\s+/, "").replace(/^\[[ xX]\]\s+/, ""))
@@ -680,7 +660,6 @@ function card(t, showProject) {
                            onclick: () => openTask(t.id) },
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
-      // On "All projects" a dot in the project's colour tells the projects apart.
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
       el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
@@ -702,7 +681,6 @@ function card(t, showProject) {
   return node;
 }
 
-// The whole column takes drops; cards land in its list.
 function wireDrop(col, list, status) {
   const line = el("div", { class: "drop-line" });
   const cardAfter = (y) => {
@@ -738,17 +716,8 @@ function wireDrop(col, list, status) {
   });
 }
 
-function localStorageGet(k) {
-  try { return localStorage.getItem(k); } catch { return null; }
-}
-
-// ---------- new task ----------
-
-// New task creates the task in todo at once and opens it like any other, with its title
-// selected to type over; its Status field moves it elsewhere. Closed untouched, it is
-// deleted again.
 const NEW_TITLE = "New task";
-let fresh = null; // id of the task just added, until something in it is saved
+let fresh = null;
 
 async function newTask() {
   const { projects } = state.board;
@@ -773,12 +742,9 @@ function dropFresh() {
   api("DELETE", `/tasks/${id}`).then(loadBoard, () => {});
 }
 
-// Leaving the page also counts as closing the task.
 window.addEventListener("pagehide", () => {
   if (fresh) fetch(`/api/tasks/${fresh}`, { method: "DELETE", keepalive: true });
 });
-
-// ---------- new project ----------
 
 function showNewProject() {
   $("#project-dialog").hidden = false;
@@ -802,8 +768,6 @@ $("#filter").addEventListener("keydown", (e) => {
 });
 $("#new-project-toggle").addEventListener("click", showNewProject);
 $("#new-project-cancel").addEventListener("click", hideNewProject);
-$("#project-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "project-dialog") hideNewProject(); });
-$("#project-dialog").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); hideNewProject(); } });
 $("#new-project").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
@@ -814,9 +778,6 @@ $("#new-project").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message); }
 });
 
-// ---------- task panel ----------
-
-// Every field is editable in place and saves when it loses focus.
 const panel = $("#panel");
 let panelTask = null;
 
@@ -910,7 +871,6 @@ async function deleteComment(c) {
   } catch (err) { toast(err.message); }
 }
 
-// The project tag doubles as a picker that moves the task to another project.
 function renderProjectPick(task) {
   const projects = state.board ? state.board.projects.map((p) => p.slug) : [];
   if (!projects.includes(task.project)) projects.push(task.project);
@@ -918,14 +878,13 @@ function renderProjectPick(task) {
     ...projects.map((slug) => el("option", { value: slug }, slug)));
   select.value = task.project;
   select.addEventListener("change", () => {
-    try { localStorage.setItem("kanzo.newTaskProject", select.value); } catch {}
+    localStorageSet("kanzo.newTaskProject", select.value);
     patchTask({ project: select.value });
   });
   $("#p-project").replaceChildren(el("label", { class: "tag project-pick" },
     el("span", { class: "dot", style: `background:${projectColor(task.project)}` }), select));
 }
 
-// Textareas grow with their text instead of scrolling.
 function fit(t) {
   if (t.tagName !== "TEXTAREA") return;
   t.style.height = "auto";
@@ -942,7 +901,6 @@ async function patchTask(fields) {
   } catch (e) { toast(e.message); refreshTask(); }
 }
 
-// Escape undoes the field's edit; on a task just added and not saved yet, it drops the task.
 function cancelField(e, saved) {
   e.stopPropagation();
   if (fresh && fresh === state.task) { closeTask(); return; }
@@ -955,10 +913,8 @@ $("#p-close").addEventListener("click", closeTask);
 $("#p-key").addEventListener("click", () => { if (panelTask) copyKey(key(panelTask)); });
 for (const field of [$("#p-title"), $("#p-desc")]) field.addEventListener("input", () => fit(field));
 
-// ⌘↵ in the title or description saves and closes.
 $("#p-title").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); closeTask(); }
-  // The title is one line: Enter, like Tab, goes on to the description.
   else if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) { e.preventDefault(); editDesc(); }
   else if (e.key === "Escape") cancelField(e, panelTask ? panelTask.title : "");
 });
@@ -978,7 +934,6 @@ $("#p-desc").addEventListener("blur", (e) => {
   showDesc();
 });
 
-// The description shows rendered, like a comment, and turns into its textarea to edit.
 // Empty, the textarea stays, so its placeholder has something to click.
 function showDesc() {
   const desc = $("#p-desc"), view = $("#p-desc-view");
@@ -1003,11 +958,7 @@ $("#p-desc-view").addEventListener("focus", editDesc);
 $("#p-status").addEventListener("change", (e) => patchTask({ status: e.target.value }));
 $("#p-human").addEventListener("change", (e) => patchTask({ human: e.target.checked }));
 
-// ---------- images ----------
-
-// Pasting or dropping an image attaches it, as in ChatGPT: to the task from the title or
-// the description, to the comment being written from the comment box. Text is left alone.
-let pending = []; // images waiting in the comment box, by file name
+let pending = [];
 
 function imagesIn(transfer) {
   if (!transfer) return [];
@@ -1016,10 +967,7 @@ function imagesIn(transfer) {
 }
 
 async function uploadImage(image) {
-  const res = await fetch("/api/images", { method: "POST", headers: { "Content-Type": image.type }, body: image });
-  const reply = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(reply.error || res.statusText);
-  return reply.file;
+  return (await api("POST", "/images", image)).file;
 }
 
 async function attachImages(images, toComment) {
@@ -1040,7 +988,6 @@ async function attachImages(images, toComment) {
   } catch (err) { toast(err.message); }
 }
 
-// A thumbnail that opens the full image; with `onRemove`, an × to take it off.
 function thumb(file, onRemove) {
   return el("div", { class: "thumb" },
     el("a", { href: `/images/${file}`, target: "_blank", rel: "noopener" }, el("img", { src: `/images/${file}`, alt: "Attached image" })),
@@ -1076,7 +1023,6 @@ for (const [zone, toComment] of [[$("#p-desc").closest(".section"), false], [$("
   });
 }
 
-// Tags are typed comma-separated and tidied the way the server stores them.
 const cleanTags = (text) => [...new Set(text.split(",").map((t) => t.trim().replace(/\s+/g, " ").toLowerCase()).filter(Boolean))];
 $("#p-tags").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
@@ -1104,7 +1050,6 @@ $("#p-comment-form").addEventListener("submit", async (e) => {
     loadBoard();
   } catch (err) { toast(err.message); }
 });
-// The send button is live only once there is something to send.
 $("#p-comment").addEventListener("input", (e) => { $("#p-send").disabled = !e.target.value.trim() && !pending.length; fit(e.target); });
 $("#p-comment").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#p-comment-form").requestSubmit(); }
@@ -1112,7 +1057,7 @@ $("#p-comment").addEventListener("keydown", (e) => {
 
 $("#p-delete").addEventListener("click", async () => {
   if (!panelTask) return;
-  const extra = panelTask.comments ? ` and its ${panelTask.comments} comment${panelTask.comments > 1 ? "s" : ""}` : "";
+  const extra = panelTask.comments ? ` and its ${plural(panelTask.comments, "comment")}` : "";
   if (!confirm(`Delete ${key(panelTask)}${extra}? This cannot be undone.`)) return;
   try {
     if (fresh === panelTask.id) fresh = null;
@@ -1122,10 +1067,6 @@ $("#p-delete").addEventListener("click", async () => {
   } catch (err) { toast(err.message); }
 });
 
-// ---------- search ----------
-
-// The search window, as in ChatGPT: tasks of every project, found by the server, open
-// ones first. Arrows pick, Enter opens, Esc closes. Without words it shows the latest changes.
 let results = [], selected = 0, searchRequest = 0, searchTimer;
 
 function openSearch() {
@@ -1171,7 +1112,6 @@ function select(i) {
   rows[selected].scrollIntoView({ block: "nearest" });
 }
 
-// Opens the task, in its own project unless the board shows all of them.
 function pick(t) {
   closeSearch();
   if (state.project !== "all" && state.project !== t.project) setProject(t.project);
@@ -1183,29 +1123,20 @@ $("#search").addEventListener("input", () => { clearTimeout(searchTimer); search
 $("#search").addEventListener("keydown", (e) => {
   if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); select(selected + (e.key === "ArrowDown" ? 1 : -1)); }
   else if (e.key === "Enter" && results[selected]) { e.preventDefault(); pick(results[selected]); }
-  else if (e.key === "Escape") { e.stopPropagation(); closeSearch(); }
 });
-$("#search-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "search-dialog") closeSearch(); });
-
-// ---------- keyboard, polling, start ----------
 
 document.addEventListener("keydown", (e) => {
   const typing = e.target.closest("input, textarea, select");
+  const plain = !typing && !e.metaKey && !e.ctrlKey;
   if (e.key === "Escape" && state.menu) { closeMenu(); return; }
   if (e.key === "Escape" && state.task && !typing) closeTask();
-  if ((e.key === "/" && !typing && !e.metaKey && !e.ctrlKey) || (e.key === "k" && (e.metaKey || e.ctrlKey))) {
+  if ((e.key === "/" && plain) || (e.key === "k" && (e.metaKey || e.ctrlKey))) {
     e.preventDefault();
     openSearch();
   }
-  if (e.key === "n" && !typing && !e.metaKey && !e.ctrlKey) {
-    if (!$("#new-task").hidden) { e.preventDefault(); newTask(); }
-  }
-  if (e.key === "f" && !typing && !e.metaKey && !e.ctrlKey) {
-    if (!$("#filter").hidden) { e.preventDefault(); $("#filter").focus(); }
-  }
-  if (e.key === "h" && !typing && !e.metaKey && !e.ctrlKey) {
-    if (!$("#human-only").hidden) { e.preventDefault(); setHumanOnly(!isHumanOnly()); }
-  }
+  if (e.key === "n" && plain && !$("#new-task").hidden) { e.preventDefault(); newTask(); }
+  if (e.key === "f" && plain && !$("#filter").hidden) { e.preventDefault(); $("#filter").focus(); }
+  if (e.key === "h" && plain && !$("#human-only").hidden) { e.preventDefault(); setHumanOnly(!isHumanOnly()); }
 });
 
 window.addEventListener("hashchange", () => {
@@ -1215,7 +1146,6 @@ window.addEventListener("hashchange", () => {
   else if (!task && state.task) closeTask();
 });
 
-// Agents change the board through `kanzo mcp`; a cheap counter tells us when.
 async function poll() {
   if (document.hidden) return schedulePoll();
   try {
@@ -1224,7 +1154,6 @@ async function poll() {
     if (guests !== state.guests) {
       state.guests = guests;
       renderNetwork();
-      // Who's connected changed: the settings list them.
       if (state.menu === "network") loadNetwork();
     }
     if (changes !== state.changes) {
@@ -1247,10 +1176,6 @@ function schedulePoll() {
 }
 schedulePoll();
 
-// ---------- sync ----------
-
-// Sync runs `kanzo sync`: it commits the board and pulls or pushes it through the data
-// folder's git remote. When both machines changed it, the board asks which to keep.
 let syncing = false;
 
 async function syncNow(keep) {
@@ -1259,12 +1184,12 @@ async function syncNow(keep) {
   toast("Syncing…");
   let diverged = null;
   try {
-    const res = await fetch("/api/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keep }) });
-    const reply = await res.json().catch(() => ({}));
-    if (res.ok) { toast(reply.message); loadBoard(); }
-    else if (reply.diverged) diverged = reply;
-    else toast(reply.error || res.statusText);
-  } catch (err) { toast(err.message); }
+    toast((await api("POST", "/sync", { keep })).message);
+    loadBoard();
+  } catch (err) {
+    if (err.data?.diverged) diverged = err.data;
+    else toast(err.message);
+  }
   syncing = false;
   if (diverged) chooseSide(diverged);
 }
@@ -1272,7 +1197,6 @@ async function syncNow(keep) {
 function chooseSide({ first }) {
   const repo = repoName(syncRemote);
   if (first) {
-    // A repo another machine already syncs with: most likely, this machine is joining it.
     if (confirm(`${repo} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.`)) syncNow("remote");
     else if (confirm(`Replace the board in ${repo} with this machine's board instead?`)) syncNow("local");
     return;
@@ -1281,10 +1205,8 @@ function chooseSide({ first }) {
   else if (confirm("Take the other machine's board instead? This machine's board is kept in kanzo.db.bak.")) syncNow("remote");
 }
 
-// The repo the board syncs with; null before it's set up.
 let syncRemote = null;
 
-// "you/kanzo-data" from any of its URLs.
 function repoName(url) {
   return (url || "").replace(/\.git$/, "").split(/[/:]/).filter(Boolean).slice(-2).join("/");
 }
@@ -1294,7 +1216,6 @@ async function loadSyncRemote() {
   return syncRemote;
 }
 
-// Sync asks for a repo, in Settings, the first time.
 async function sync() {
   closeMenu();
   if (await loadSyncRemote()) syncNow();
@@ -1307,17 +1228,9 @@ $("#sync-form").addEventListener("submit", async (e) => {
   save.disabled = true;
   save.textContent = "Checking…";
   try {
-    const res = await fetch("/api/sync", { method: "PUT", headers: { "Content-Type": "application/json" },
-                                           body: JSON.stringify({ url: $("#sync-url").value }) });
-    const reply = await res.json().catch(() => ({}));
-    if (res.ok) {
-      syncRemote = reply.remote;
-      closeSettings();
-      syncNow();
-    } else {
-      $("#sync-error").textContent = reply.error || res.statusText;
-      $("#sync-error").hidden = false;
-    }
+    syncRemote = (await api("PUT", "/sync", { url: $("#sync-url").value })).remote;
+    closeSettings();
+    syncNow();
   } catch (err) {
     $("#sync-error").textContent = err.message;
     $("#sync-error").hidden = false;
@@ -1326,10 +1239,6 @@ $("#sync-form").addEventListener("submit", async (e) => {
   save.textContent = "Save and sync";
 });
 
-// ---------- network ----------
-
-// Sharing the board with other computers on the network, or showing another computer's
-// board: `kanzo share` and `kanzo join`, from the board.
 async function loadNetwork() {
   let net = null;
   try { net = await api("GET", "/network"); } catch {}
@@ -1343,8 +1252,6 @@ function setNet(net) {
   renderNetwork();
 }
 
-// The share icon in the header: "Shared" with how many computers use the board, on the
-// computer that shares it and on those that joined it.
 function renderNetwork() {
   const net = state.net;
   const button = $("#network");
@@ -1354,7 +1261,7 @@ function renderNetwork() {
   const host = net?.host?.replace(/:4242$/, "") || location.hostname;
   const n = state.guests;
   const shared = hosted || n != null;
-  const computers = n == null ? "" : `: ${n} computer${n === 1 ? "" : "s"} connected`;
+  const computers = n == null ? "" : `: ${plural(n, "computer")} connected`;
   button.replaceChildren(icon("share"), ...(shared ? ["Shared"] : []), ...(shared && n != null ? [el("span", { class: "count" }, String(n))] : []));
   button.classList.toggle("on", shared);
   button.title = hosted ? `Shared by ${host}${computers}` : shared ? `Shared on your network${computers}` : "Share this board, or join another";
@@ -1364,8 +1271,6 @@ function renderNetwork() {
 // While a change is on its way, the popover keeps showing it.
 let networkBusy = false;
 
-// Sharing and joining: a board is shared or joined, never both, so while one is on the
-// other is greyed out with the reason.
 function renderNetworkMenu() {
   if (networkBusy) return;
   const net = state.net;
@@ -1407,10 +1312,7 @@ function renderNetworkMenu() {
 }
 
 function toggleNetworkMenu() {
-  const wasOpen = state.menu === "network";
-  closeMenu();
-  if (wasOpen) return;
-  state.menu = "network";
+  if (!toggleMenu("network")) return;
   const button = $("#network");
   button.classList.add("open");
   $("#network-error").hidden = true;
@@ -1423,8 +1325,7 @@ function toggleNetworkMenu() {
   loadNetwork();
 }
 
-// Sends a change to this computer's board. Joining or leaving shows another board, so
-// the page reloads.
+// Joining or leaving shows another board, so the page reloads.
 async function changeNetwork(change) {
   $("#network-error").hidden = true;
   networkBusy = true;
@@ -1460,15 +1361,8 @@ $("#network-join").addEventListener("submit", async (e) => {
   submit.textContent = "Join";
 });
 
-// ---------- menu and settings ----------
-
-// The Settings button at the bottom of the sidebar opens a menu, as in Claude: Settings,
-// Check for updates and Sync.
 function toggleSettingsMenu() {
-  const wasOpen = state.menu === "settings";
-  closeMenu();
-  if (wasOpen || !state.board) return;
-  state.menu = "settings";
+  if (!state.board || !toggleMenu("settings")) return;
   const button = $("#settings");
   button.classList.add("open");
   const menu = el("div", { class: "menu", role: "menu", tabindex: "-1" },
@@ -1486,7 +1380,6 @@ function toggleSettingsMenu() {
 
 $("#settings").addEventListener("click", toggleSettingsMenu);
 
-// The settings window, as in Claude's: categories on the left, their settings on the right.
 function openSettings(section = "board") {
   closeMenu();
   $("#settings-backlog").checked = state.board?.statuses.includes("backlog") ?? false;
@@ -1514,8 +1407,11 @@ $("#settings-nav").addEventListener("click", (e) => {
   if (b) showSection(b.dataset.section);
 });
 $("#settings-close").addEventListener("click", closeSettings);
-$("#settings-dialog").addEventListener("mousedown", (e) => { if (e.target.id === "settings-dialog") closeSettings(); });
-$("#settings-dialog").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closeSettings(); } });
+for (const [dialog, close] of [[$("#project-dialog"), hideNewProject], [$("#search-dialog"), closeSearch],
+                               [$("#settings-dialog"), closeSettings]]) {
+  dialog.addEventListener("mousedown", (e) => { if (e.target === dialog) close(); });
+  dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
+}
 $("#settings-backlog").addEventListener("change", async (e) => {
   const box = e.target;
   try {
@@ -1525,11 +1421,6 @@ $("#settings-backlog").addEventListener("change", async (e) => {
 });
 $("#settings-update").addEventListener("click", checkForUpdates);
 
-// ---------- update ----------
-
-// Kanzo checks GitHub for a newer release once a day and offers it at the bottom of the
-// sidebar; its menu asks right away. Installing replaces the running board and
-// restarts it, and the page reloads once it's back.
 async function checkUpdate() {
   try {
     showUpdate(await api("GET", "/update"));
@@ -1596,7 +1487,6 @@ setInterval(checkUpdate, 24 * 60 * 60 * 1000);
 loadSyncRemote();
 loadNetwork();
 
-// Relative times ("5m ago") drift; refresh them now and then.
 setInterval(() => {
   document.querySelectorAll("time[datetime]").forEach((t) => { t.textContent = ago(t.getAttribute("datetime")); });
 }, 60000);

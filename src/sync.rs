@@ -1,5 +1,3 @@
-//! `kanzo sync`: keep the data folder in step with its git remote, one machine at a time.
-
 use std::path::Path;
 use std::process::Command;
 
@@ -13,8 +11,6 @@ pub enum Keep {
     Remote,
 }
 
-/// The error when both sides changed the board: the caller asks which one to keep.
-/// `first` when this is the first sync with that repo, which already holds a board.
 #[derive(Debug)]
 pub struct Diverged {
     pub message: String,
@@ -29,15 +25,10 @@ impl std::fmt::Display for Diverged {
 
 impl std::error::Error for Diverged {}
 
-/// The URL of the repo the board syncs with, or `None` before it's set up.
 pub fn remote_url(home: &Home) -> Option<String> {
     remote(&home.dir).ok()?.map(|(_, url)| url)
 }
 
-/// Points the board at the git repo `url`, once this machine can reach it: the first
-/// time, it makes the data folder a git repo; later, it replaces the old repo, and the
-/// next sync asks which board to keep if the new one already holds one. `owner/repo`
-/// is short for that repo on GitHub. Returns the URL saved.
 pub fn set_remote(home: &Home, url: &str, prompt: bool) -> Result<String> {
     let dir = &home.dir;
     let url = url.trim().trim_end_matches('/');
@@ -79,7 +70,6 @@ pub fn set_remote(home: &Home, url: &str, prompt: bool) -> Result<String> {
     Ok(url)
 }
 
-/// The line of git's error that says what went wrong, in a few words.
 fn reason(error: &str) -> String {
     let lines: Vec<&str> = error.lines().map(str::trim).collect();
     if error.contains("terminal prompts disabled") {
@@ -96,8 +86,7 @@ fn reason(error: &str) -> String {
     line.trim_start_matches("ERROR:").trim_start_matches("fatal:").trim().to_string()
 }
 
-/// The URLs `url` may mean: itself, or for `owner/repo` that repo on GitHub, by SSH and
-/// then HTTPS, as either may be the one this machine can push with.
+/// SSH and HTTPS for `owner/repo`, as either may be the one this machine can push with.
 fn candidates(url: &str) -> Vec<String> {
     let short = url.strip_prefix("github.com/").unwrap_or(url);
     let shorthand = !short.contains(':')
@@ -111,32 +100,19 @@ fn candidates(url: &str) -> Vec<String> {
     vec![format!("git@github.com:{repo}.git"), format!("https://github.com/{repo}.git")]
 }
 
-/// The remote the board syncs with, `origin` or the only one there is, and its URL;
-/// `None` before sync is set up. One `git remote -v` gives both.
 fn remote(dir: &Path) -> Result<Option<(String, String)>> {
     if !dir.join(".git").exists() {
         return Ok(None);
     }
     let out = git(dir, false, &["remote", "-v"])?;
-    let mut found = None;
-    for line in out.lines() {
-        let Some((name, url)) = line.split_once('\t').and_then(|(n, rest)| Some((n, rest.strip_suffix(" (fetch)")?)))
-        else {
-            continue;
-        };
-        if name == "origin" || found.is_none() {
-            found = Some((name.to_string(), url.to_string()));
-        }
-        if name == "origin" {
-            break;
-        }
-    }
-    Ok(found)
+    let mut remotes: Vec<(&str, &str)> = out
+        .lines()
+        .filter_map(|line| line.split_once('\t').and_then(|(n, rest)| Some((n, rest.strip_suffix(" (fetch)")?))))
+        .collect();
+    remotes.sort_by_key(|(name, _)| *name != "origin");
+    Ok(remotes.first().map(|(name, url)| (name.to_string(), url.to_string())))
 }
 
-/// Commits the board, then pulls or pushes it, and says what it did. With `prompt`
-/// false, as from the board's button, git never waits for a password; a missing
-/// credential fails with git's message instead.
 pub fn sync(home: &Home, keep: Option<Keep>, prompt: bool) -> Result<String> {
     let dir = &home.dir;
     let git = |args: &[&str]| git(dir, prompt, args);
@@ -160,7 +136,7 @@ pub fn sync(home: &Home, keep: Option<Keep>, prompt: bool) -> Result<String> {
         if lock.is_some() { String::new() } else { format!("\n{NO_LOCKS}") }
     };
     if !git_ok(&["diff", "--cached", "--quiet"]) {
-        let message = format!("kanzo sync from {}", hostname());
+        let message = format!("kanzo sync from {}", crate::home::hostname());
         // A machine where git doesn't know the user yet still syncs.
         let named = git_ok(&["config", "user.email"]);
         let anonymous = ["-c", "user.name=Kanzo", "-c", "user.email=kanzo@localhost"];
@@ -251,8 +227,6 @@ pub fn sync(home: &Home, keep: Option<Keep>, prompt: bool) -> Result<String> {
     Ok(format!("{done}{note}"))
 }
 
-/// Lets `pull` replace kanzo.db while no connection is open, then brings it up to date
-/// before any can open it. A migration that fails rolls back, leaving the board as pulled.
 fn replace<T>(home: &Home, pull: impl FnOnce() -> Result<T>) -> Result<()> {
     let _lock = home.lock_exclusive()?;
     // Rolls back a write a crashed process left in kanzo.db-journal, which SQLite
@@ -263,49 +237,27 @@ fn replace<T>(home: &Home, pull: impl FnOnce() -> Result<T>) -> Result<()> {
     Ok(())
 }
 
-/// Git in `dir`; without `prompt` it fails rather than ask for a password or passphrase.
 fn command(dir: &Path, prompt: bool, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(dir).args(args);
+    cmd.current_dir(dir).args(args);
     if !prompt {
         cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
     cmd
 }
 
-/// Runs git in `dir` and returns its trimmed output, or fails with git's own message.
 fn git(dir: &Path, prompt: bool, args: &[&str]) -> Result<String> {
-    let out = command(dir, prompt, args).output().context("cannot run git; is it installed?")?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!("git {} failed:\n{}", args.join(" "), err.trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    crate::home::output(&mut command(dir, prompt, args))
 }
 
 fn git_ok(dir: &Path, prompt: bool, args: &[&str]) -> bool {
-    command(dir, prompt, args).output().is_ok_and(|o| o.status.success())
-}
-
-/// The machine's name for commit messages, like "Ada's MacBook Air".
-pub fn hostname() -> String {
-    let run = |cmd: &str, args: &[&str]| {
-        Command::new(cmd)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|h| !h.is_empty())
-    };
-    run("scutil", &["--get", "ComputerName"]).or_else(|| run("hostname", &[])).unwrap_or_else(|| "unknown".into())
+    git(dir, prompt, args).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A machine's data folder, syncing with the bare repo `remote`.
     fn machine(dir: &Path, remote: &Path) -> Home {
         let home = Home::open(dir.to_path_buf()).unwrap();
         set_remote(&home, remote.to_str().unwrap(), false).unwrap();
@@ -337,7 +289,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (_, b) = two_machines(tmp.path());
         assert!(b.store().unwrap().list_projects().unwrap().is_empty());
-        // The old board is in kanzo.db.bak, and in the commit sync made before resetting.
         let bak = Store::open(&b.dir.join("kanzo.db.bak"), None).unwrap();
         assert_eq!(bak.list_projects().unwrap()[0].slug, "local");
         let old = git(&b.dir, false, &["log", "-1", "--format=%s", "HEAD@{1}"]).unwrap();

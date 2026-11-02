@@ -112,9 +112,8 @@ fn main() -> ExitCode {
     {
         update::remove_old_exes(&exe);
     }
-    // One thread runs all the async work: the board serves one person, and each
-    // agent starts its own `kanzo mcp`. Database calls run on a few blocking
-    // threads that exit when idle. This keeps kanzo light on small boards.
+    // The board serves one person and each agent starts its own `kanzo mcp`, so one async
+    // thread is enough, and blocking threads exit when idle: this keeps kanzo light on small boards.
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(8)
@@ -140,12 +139,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         _ => Home::resolve(cli.home)?,
     };
     let mut home = Home::open(dir)?;
-    // `--port` reaches the board on that port, for `kanzo share` and the others too.
     if let Some(port) = cli.port {
         home.config.port = port;
     }
     match cli.command {
-        None => web::serve(home, cli.port, !cli.no_open).await,
+        None => web::serve(home, !cli.no_open).await,
         Some(Command::Mcp) => mcp::serve(home).await,
         Some(Command::Init { .. }) => {
             println!("Kanzo data folder ready at {}", home.dir.display());
@@ -171,30 +169,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 OnOff::On => share::Change::On,
                 OnOff::Off => share::Change::Off,
             });
-            let (status, running) = share::request(&home, change).await?;
-            // Sharing with no board running starts one, already shared.
-            if matches!(state, Some(OnOff::On)) && !running {
-                return web::serve(home, cli.port, !cli.no_open).await;
-            }
-            println!("{}", status.message());
-            Ok(())
+            network(home, change, !cli.no_open).await
         }
-        Some(Command::Join { host }) => {
-            println!("{}", share::request(&home, Some(share::Change::Join(host))).await?.0.message());
-            Ok(())
-        }
-        Some(Command::Leave) => {
-            println!("{}", share::request(&home, Some(share::Change::Leave)).await?.0.message());
-            Ok(())
-        }
+        Some(Command::Join { host }) => network(home, Some(share::Change::Join(host)), !cli.no_open).await,
+        Some(Command::Leave) => network(home, Some(share::Change::Leave), !cli.no_open).await,
         Some(Command::Service { action: ServiceAction::Install }) => service::install(&home),
         Some(Command::Service { action: ServiceAction::Uninstall }) => service::uninstall(),
         Some(Command::Update) => unreachable!("handled above"),
     }
 }
 
-/// `kanzo update`: installs the latest release over this program, then restarts the
-/// board's service, if there is one, so it runs the new version too.
 fn update_kanzo() -> anyhow::Result<()> {
     let Some(latest) = update::latest(true) else {
         anyhow::bail!("can't reach GitHub to check for updates");
@@ -210,5 +194,15 @@ fn update_kanzo() -> anyhow::Result<()> {
     } else {
         println!("Updated to {latest}.");
     }
+    Ok(())
+}
+
+async fn network(home: Home, change: Option<share::Change>, open: bool) -> anyhow::Result<()> {
+    let sharing = matches!(change, Some(share::Change::On));
+    let (status, running) = share::request(&home, change).await?;
+    if sharing && !running {
+        return web::serve(home, open).await;
+    }
+    println!("{}", status.message());
     Ok(())
 }

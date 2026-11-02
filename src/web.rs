@@ -1,5 +1,3 @@
-//! `kanzo`: the board page, the small JSON API behind it, and MCP over HTTP at `/mcp`.
-
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,18 +22,16 @@ use crate::store::{self, Error, ImagesOf, Store, TaskPatch};
 use crate::{sync, update};
 
 const INDEX: &str = include_str!("index.html");
-/// The largest image the board takes from a paste.
 const IMAGE_LIMIT: usize = 25 * 1024 * 1024;
 const APP_JS: &str = include_str!("app.js");
 const LOGO: &[u8] = include_bytes!("logo.png");
 
-/// Scripts only from this server, so even a bug in the Markdown renderer cannot run
-/// injected script; requests only back to this server.
+/// Scripts only from this server, so even a bug in the Markdown renderer cannot run injected script.
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
                    connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
-    let port = port.unwrap_or(home.config.port);
+pub async fn serve(home: Home, open: bool) -> Result<()> {
+    let port = home.config.port;
     let guard = Arc::new(Guard::new(port, home.config.listen, Net::load(&home)));
     let url = format!("http://localhost:{port}");
     let listener = match TcpListener::bind(SocketAddr::new(guard.address(), port)).await {
@@ -92,8 +88,6 @@ pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
         stop_signal().await;
         stopper.cancel();
     });
-    // Sharing turns on and off while the board runs: it stops taking connections on one
-    // address and listens on the other. Connections already open finish as usual.
     let mut listener = listener;
     loop {
         let rebind = shutdown.child_token();
@@ -117,7 +111,7 @@ pub async fn serve(home: Home, port: Option<u16>, open: bool) -> Result<()> {
     Ok(())
 }
 
-/// Binds once the old listener has let go of the port, which takes a moment.
+/// The old listener takes a moment to let go of the port.
 async fn listen_again(ip: IpAddr, port: u16) -> std::io::Result<TcpListener> {
     for _ in 0..100 {
         match TcpListener::bind(SocketAddr::new(ip, port)).await {
@@ -128,7 +122,6 @@ async fn listen_again(ip: IpAddr, port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(SocketAddr::new(ip, port)).await
 }
 
-/// Ctrl-C, or SIGTERM from launchd or systemd stopping the service.
 async fn stop_signal() {
     #[cfg(unix)]
     {
@@ -150,7 +143,6 @@ async fn stop_signal() {
 }
 
 fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router {
-    // The board itself: on a computer that joined another's board, it comes from there.
     let mut shared = Router::new();
     if home.config.mcp_http {
         shared = shared.nest_service("/mcp", crate::mcp::http_service(home.clone(), shutdown));
@@ -174,7 +166,6 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/sync", get(sync_status).post(sync_now).put(sync_repo))
         .route("/api/settings", patch(update_settings))
         .route_layer(middleware::from_fn_with_state(guard.clone(), forward));
-    // This computer's own: the page, its version, and what it does on the network.
     Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
@@ -188,28 +179,18 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .with_state(Arc::new(home))
 }
 
-/// Who may use the board: which Host headers it answers to, and whether other
-/// computers may reach it. Also what this computer does on the network.
-///
-/// DNS rebinding needs a domain name the attacker controls, so the board only
-/// accepts `localhost`, IP addresses and, when it listens on the network, this
-/// machine's own names. It never accepts other domain names.
+/// DNS rebinding needs a domain name the attacker controls, so the board only accepts
+/// `localhost`, IP addresses and, when it listens on the network, this machine's own names.
 struct Guard {
     port: u16,
-    /// `listen` from config.toml: where the board listens unless shared.
     listen: IpAddr,
-    /// Changed while the board runs, by its settings and `kanzo share`, `join` and `leave`.
     net: Mutex<Net>,
-    /// Other computers using the board: when each last asked for something, and its name.
     guests: Mutex<HashMap<IpAddr, (Instant, Option<String>)>>,
-    /// This machine's names, like `pi` and `pi.local`, found the first time they're needed.
     names: OnceLock<Vec<String>>,
-    /// Cancelled to listen on the address `net` now asks for.
     rebind: Mutex<CancellationToken>,
 }
 
-/// How long after its last request a guest still counts: its board asks every 2 seconds
-/// while it's on screen.
+/// A guest's board asks every 2 seconds while it's on screen.
 const GUEST_GONE: Duration = Duration::from_secs(30);
 
 impl Guard {
@@ -228,7 +209,6 @@ impl Guard {
         self.net.lock().unwrap().clone()
     }
 
-    /// Whether other computers may use the board.
     fn lan(&self) -> bool {
         self.net() == Net::Sharing
     }
@@ -237,7 +217,6 @@ impl Guard {
         if self.lan() && self.listen.is_loopback() { Ipv4Addr::UNSPECIFIED.into() } else { self.listen }
     }
 
-    /// Takes on a change saved by `share::change`, and listens elsewhere if it asks to.
     fn set(&self, net: Net) {
         let before = self.address();
         *self.net.lock().unwrap() = net;
@@ -264,16 +243,11 @@ impl Guard {
 
     fn names(&self) -> &[String] {
         self.names.get_or_init(|| {
-            let run = |cmd: &str, args: &[&str]| {
-                std::process::Command::new(cmd)
-                    .args(args)
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase())
-            };
+            use std::process::Command;
+            let run = |cmd: &mut Command| crate::home::output(cmd).ok().map(|n| n.to_ascii_lowercase());
             // macOS keeps its Bonjour name apart; `hostname` there can be a DHCP address.
-            let found = [run("scutil", &["--get", "LocalHostName"]), run("hostname", &[])];
+            let found =
+                [run(Command::new("scutil").args(["--get", "LocalHostName"])), run(&mut Command::new("hostname"))];
             let mut names = Vec::new();
             for full in found.into_iter().flatten().filter(|n| !n.is_empty() && n.parse::<IpAddr>().is_err()) {
                 let short = full.split('.').next().unwrap_or_default().to_string();
@@ -304,12 +278,10 @@ impl Guard {
     }
 }
 
-/// The other computer a request comes from, if not this one.
 fn guest(req: &Request) -> Option<IpAddr> {
     req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()).filter(|ip| !ip.is_loopback())
 }
 
-/// Hands the board's requests to the board this computer joined, if it did.
 async fn forward(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
     match guard.net() {
         Net::Joined(host) => share::forward(&host, req).await,
@@ -317,7 +289,6 @@ async fn forward(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> R
     }
 }
 
-/// What this computer does on the network is only for this computer to change.
 async fn this_computer(req: Request, next: Next) -> Response {
     match guest(&req) {
         Some(_) => (StatusCode::FORBIDDEN, "only the computer with the board can change its network").into_response(),
@@ -325,15 +296,11 @@ async fn this_computer(req: Request, next: Next) -> Response {
     }
 }
 
-/// Refuses requests for a Host this board does not answer to, browser requests sent
-/// from any page other than the board itself, and other computers unless the board is
-/// shared. Adds security headers to every reply.
 async fn protect(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
     let guest = guest(&req);
     let ok = {
         let header = |name| req.headers().get(name).and_then(|h: &HeaderValue| h.to_str().ok());
         let host = header(header::HOST).unwrap_or("");
-        // The Origin a page from this board sends: http:// and the same host.
         let same_origin = |o: &str| {
             o.len() == host.len() + 7
                 && o.as_bytes()[..7].eq_ignore_ascii_case(b"http://")
@@ -366,20 +333,14 @@ async fn protect(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> R
 
 type Shared = State<Arc<Home>>;
 
-/// Runs `f` with a fresh connection on a blocking thread and answers with JSON.
 async fn with_store<T: Serialize + Send + 'static>(
     home: Arc<Home>,
     f: impl FnOnce(&Home, &Store) -> store::Result<T> + Send + 'static,
 ) -> Response {
-    let outcome = tokio::task::spawn_blocking(move || {
-        let store = home.store()?;
-        f(&home, &store)
-    })
-    .await;
-    let error = match outcome {
+    let error = match blocking(move || f(&home, &home.store()?)).await {
         Ok(Ok(v)) => return Json(v).into_response(),
         Ok(Err(e)) => e,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => return e.into_response(),
     };
     let code = match error {
         Error::NotFound(_) => StatusCode::NOT_FOUND,
@@ -387,11 +348,28 @@ async fn with_store<T: Serialize + Send + 'static>(
         Error::Busy(_) => StatusCode::SERVICE_UNAVAILABLE,
         Error::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (code, Json(json!({ "error": error.to_string() }))).into_response()
+    fail(code, error).into_response()
 }
 
-/// What the page compares to see if anything changed: the change counter, plus
-/// the database file's identity so a board pulled by `kanzo sync` always reloads.
+type Reply = Result<Response, Fail>;
+
+pub struct Fail(StatusCode, String);
+
+pub fn fail(code: StatusCode, error: impl std::fmt::Display) -> Fail {
+    Fail(code, error.to_string())
+}
+
+impl IntoResponse for Fail {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, Fail> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+/// The database file's identity is part of it so a board pulled by `kanzo sync` always reloads.
 fn change_token(home: &Home, s: &Store) -> store::Result<String> {
     Ok(format!("{}-{}", s.changes()?, home.db_identity()))
 }
@@ -399,7 +377,6 @@ fn change_token(home: &Home, s: &Store) -> store::Result<String> {
 #[derive(Serialize)]
 struct Changes {
     changes: String,
-    /// Other computers using the board, while it's shared.
     guests: Option<usize>,
 }
 
@@ -408,21 +385,17 @@ async fn changes(State(home): Shared, Extension(guard): Extension<Arc<Guard>>) -
     with_store(home, move |h, s| Ok(Changes { changes: change_token(h, s)?, guests })).await
 }
 
-/// Done tasks the board gets unless it asks for all: the newest, which are all it shows.
 /// The done column only grows, and every change reloads the board.
 const DONE_SHOWN: usize = 50;
 
 #[derive(Deserialize)]
 struct BoardQuery {
     project: Option<String>,
-    /// "all" for every done task.
     done: Option<String>,
-    /// The filter: only the tasks that search finds.
     #[serde(default)]
     q: String,
 }
 
-/// The whole board, serialized straight from the store's rows.
 #[derive(Serialize)]
 struct Board {
     changes: String,
@@ -463,7 +436,6 @@ struct SearchQuery {
     q: String,
 }
 
-/// Tasks of every project matching the search, for the search window.
 async fn search(State(home): Shared, Query(q): Query<SearchQuery>) -> Response {
     with_store(home, move |_, s| s.search(&q.q, Some(30))).await
 }
@@ -537,7 +509,6 @@ async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
     .await
 }
 
-/// Board settings, kept in kanzo.db so they sync with the board.
 #[derive(Deserialize)]
 struct Settings {
     backlog: bool,
@@ -607,7 +578,6 @@ async fn delete_task(State(home): Shared, Path(id): Path<i64>) -> Response {
 struct NewComment {
     #[serde(default)]
     body: String,
-    /// Files saved by `/api/images`, attached to the comment.
     #[serde(default)]
     images: Vec<String>,
 }
@@ -635,36 +605,31 @@ async fn attach_image(State(home): Shared, Path(id): Path<i64>, Json(a): Json<At
     .await
 }
 
-/// Removes an image from its task or comment, and its file once nothing uses it.
 async fn delete_image(State(home): Shared, Path(id): Path<i64>) -> Response {
     with_store(home, move |h, s| h.deleting_images(s, ImagesOf::Image(id), || s.delete_image(id))).await
 }
 
-/// Fails unless `file` is an image saved by `/api/images`.
 fn image_saved(home: &Home, file: &str) -> store::Result<()> {
-    if store::valid_image_file(file) && home.dir.join("images").join(file).is_file() {
+    if store::valid_image_file(file) && home.images().join(file).is_file() {
         Ok(())
     } else {
         Err(Error::Invalid(format!("no saved image {file:?}; paste it again")))
     }
 }
 
-/// An attached image. Its name is its content's hash, so it never changes and can be cached for good.
+/// Named by its content's hash, so it never changes and can be cached for good.
 async fn image_file(State(home): Shared, Path(file): Path<String>) -> Response {
-    let mime = match file.rsplit_once('.').map(|(_, ext)| ext) {
-        Some("png") => "image/png",
-        Some("jpg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        _ => return StatusCode::NOT_FOUND.into_response(),
+    let ext = file.rsplit_once('.').map(|(_, ext)| ext);
+    let Some((_, mime)) = store::IMAGE_TYPES.iter().find(|(e, _)| Some(*e) == ext) else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     if !store::valid_image_file(&file) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let path = home.dir.join("images").join(&file);
+    let path = home.images().join(&file);
     match tokio::task::spawn_blocking(move || std::fs::read(path)).await {
         Ok(Ok(bytes)) => {
-            ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], bytes)
+            ([(header::CONTENT_TYPE, *mime), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], bytes)
                 .into_response()
         }
         _ => StatusCode::NOT_FOUND.into_response(),
@@ -675,59 +640,34 @@ async fn delete_comment(State(home): Shared, Path(id): Path<i64>) -> Response {
     with_store(home, move |h, s| h.deleting_images(s, ImagesOf::Comment(id), || s.delete_comment(id))).await
 }
 
-/// Saves a pasted or dropped image in the data folder's `images/` and answers with its
-/// file name and path; the board then attaches it to a task or a comment. Files are
-/// named by their content, so the same image saved twice is stored once.
-async fn save_image(State(home): Shared, headers: HeaderMap, body: Bytes) -> Response {
-    let ext = match headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) {
-        Some("image/png") => "png",
-        Some("image/jpeg") => "jpg",
-        Some("image/gif") => "gif",
-        Some("image/webp") => "webp",
-        _ => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "paste a PNG, JPEG, GIF or WebP image" })))
-                .into_response();
-        }
+async fn save_image(State(home): Shared, headers: HeaderMap, body: Bytes) -> Reply {
+    let mime = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+    let Some((ext, _)) = store::IMAGE_TYPES.iter().find(|(_, m)| Some(*m) == mime) else {
+        return Err(fail(StatusCode::BAD_REQUEST, "paste a PNG, JPEG, GIF or WebP image"));
     };
     if body.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "the image is empty" }))).into_response();
+        return Err(fail(StatusCode::BAD_REQUEST, "the image is empty"));
     }
-    let saved = tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+    let path = blocking(move || -> std::io::Result<std::path::PathBuf> {
         use std::hash::{Hash, Hasher};
-        let dir = home.dir.join("images");
-        std::fs::create_dir_all(&dir)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         body.hash(&mut hasher);
-        let path = dir.join(format!("{:016x}.{ext}", hasher.finish()));
+        let path = home.images().join(format!("{:016x}.{ext}", hasher.finish()));
         if !path.exists() {
-            // Write to a temporary name first, so a half-written image never has the real one.
-            let partial = path.with_extension("part");
-            std::fs::write(&partial, &body)?;
-            std::fs::rename(&partial, &path)?;
+            crate::home::write_whole(&path, &body)?;
         }
         Ok(path)
     })
-    .await;
-    match saved {
-        Ok(Ok(path)) => {
-            let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-            Json(json!({ "file": file, "path": path.display().to_string() })).into_response()
-        }
-        Ok(Err(e)) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("cannot save the image: {e}") })))
-                .into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-    }
+    .await?
+    .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot save the image: {e}")))?;
+    let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(Json(json!({ "file": file, "path": path.display().to_string() })).into_response())
 }
 
-/// What this computer does on the network: shares its board, uses another's, or neither.
 async fn network(Extension(guard): Extension<Arc<Guard>>) -> Response {
     Json(guard.status()).into_response()
 }
 
-/// Shares the board or stops, or joins another computer's board or leaves it: the
-/// settings window, `kanzo share`, `join` and `leave` all come here while the board runs.
 async fn change_network(
     State(home): Shared,
     Extension(guard): Extension<Arc<Guard>>,
@@ -738,39 +678,35 @@ async fn change_network(
             guard.set(net);
             Json(guard.status()).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        Err(e) => fail(StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
 
 #[derive(Deserialize)]
 struct SyncRequest {
-    /// "local" or "remote", once the board has asked which side to keep.
     #[serde(default)]
     keep: Option<String>,
 }
 
-/// The board's sync button: the same as `kanzo sync`, without git ever prompting. When
-/// both sides changed, answers 409 with `diverged`, and the board asks which side to keep.
-async fn sync_now(State(home): Shared, Json(r): Json<SyncRequest>) -> Response {
+async fn sync_now(State(home): Shared, Json(r): Json<SyncRequest>) -> Reply {
     let keep = match r.keep.as_deref() {
         Some("local") => Some(sync::Keep::Local),
         Some("remote") => Some(sync::Keep::Remote),
         _ => None,
     };
-    match tokio::task::spawn_blocking(move || sync::sync(&home, keep, false)).await {
-        Ok(Ok(message)) => Json(json!({ "message": message })).into_response(),
-        Ok(Err(e)) => match e.downcast_ref::<sync::Diverged>() {
+    let synced = blocking(move || sync::sync(&home, keep, false)).await?;
+    Ok(match synced {
+        Ok(message) => Json(json!({ "message": message })).into_response(),
+        Err(e) => match e.downcast_ref::<sync::Diverged>() {
             Some(d) => (StatusCode::CONFLICT, Json(json!({ "error": d.message, "diverged": true, "first": d.first })))
                 .into_response(),
-            None => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+            None => fail(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
         },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-    }
+    })
 }
 
-/// The repo the board syncs with, `null` before sync is set up.
 async fn sync_status(State(home): Shared) -> Response {
-    let remote = tokio::task::spawn_blocking(move || sync::remote_url(&home)).await.ok().flatten();
+    let remote = blocking(move || sync::remote_url(&home)).await.ok().flatten();
     Json(json!({ "remote": remote })).into_response()
 }
 
@@ -779,55 +715,45 @@ struct SyncRepo {
     url: String,
 }
 
-/// Sets up sync with a repo, or moves it to another one.
-async fn sync_repo(State(home): Shared, Json(r): Json<SyncRepo>) -> Response {
-    match tokio::task::spawn_blocking(move || sync::set_remote(&home, &r.url, false)).await {
-        Ok(Ok(remote)) => Json(json!({ "remote": remote })).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("{e:#}") }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-    }
+async fn sync_repo(State(home): Shared, Json(r): Json<SyncRepo>) -> Reply {
+    let remote = blocking(move || sync::set_remote(&home, &r.url, false))
+        .await?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    Ok(Json(json!({ "remote": remote })).into_response())
 }
 
 #[derive(Deserialize)]
 struct UpdateQuery {
-    /// Present to check GitHub now rather than reuse today's answer.
     now: Option<String>,
 }
 
-/// This version, the latest release (`null` when GitHub can't be reached) and, when
-/// that one is newer, `available`.
 async fn update_status(Query(q): Query<UpdateQuery>) -> Response {
     let now = q.now.is_some();
-    let latest = tokio::task::spawn_blocking(move || update::latest(now)).await.ok().flatten();
+    let latest = blocking(move || update::latest(now)).await.ok().flatten();
     let available = latest.clone().filter(|v| update::newer(v));
     Json(json!({ "current": update::CURRENT, "latest": latest, "available": available })).into_response()
 }
 
-/// Installs the latest release over this program, answers, then starts it in place, or
-/// asks the user to restart it where it can't.
-async fn update_now(State(home): Shared) -> Response {
+async fn update_now(State(home): Shared) -> Reply {
     // `can_restart` runs schtasks on Windows, so it waits off the async thread too.
     let dir = home.dir.clone();
-    match tokio::task::spawn_blocking(move || (update::can_restart(&dir), update::install())).await {
-        Ok((false, Ok(_))) => Json(json!({ "restarting": false })).into_response(),
-        Ok((true, Ok(exe))) => {
-            tokio::spawn(async move {
-                // Let the answer reach the board first.
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                // Blocking: on Windows it waits for the service to stop this process.
-                if let Ok(e) = tokio::task::spawn_blocking(move || update::restart(&exe)).await {
-                    eprintln!("kanzo: updated, but cannot restart: {e}");
-                }
-            });
-            Json(json!({ "restarting": true })).into_response()
-        }
-        Ok((_, Err(error))) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    let (restart, installed) = blocking(move || (update::can_restart(&dir), update::install())).await?;
+    let exe = installed.map_err(|error| fail(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    if restart {
+        tokio::spawn(async move {
+            // Let the answer reach the board first.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            // Blocking: on Windows it waits for the service to stop this process.
+            if let Ok(e) = tokio::task::spawn_blocking(move || update::restart(&exe)).await {
+                eprintln!("kanzo: updated, but cannot restart: {e}");
+            }
+        });
     }
+    Ok(Json(json!({ "restarting": restart })).into_response())
 }
 
-/// Exits when the console goes away: the service's conhost when the task is stopped, or
-/// the window the board was started in. Windows doesn't stop the program by itself.
+/// Windows doesn't stop the program when its console goes away: the service's conhost
+/// when the task is stopped, or the window the board was started in.
 #[cfg(windows)]
 fn exit_with_console() {
     unsafe extern "system" {
@@ -838,7 +764,7 @@ fn exit_with_console() {
     if attached() {
         std::thread::spawn(move || {
             while attached() {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(Duration::from_secs(1));
             }
             std::process::exit(0);
         });
@@ -851,7 +777,6 @@ fn open_browser(url: &str) {
     } else if cfg!(windows) {
         "explorer"
     } else {
-        // A board without a screen has nothing to open; the URL is already printed.
         let desktop = ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|v| !v.is_empty()));
         if !desktop {
             return;
@@ -886,7 +811,6 @@ mod tests {
             assert!(!lan.allows(bad), "{bad}");
         }
 
-        // Stopping sharing closes the board to other computers again.
         lan.set(Net::Private);
         assert!(!lan.allows("192.168.1.5:4242"));
         assert_eq!(lan.address(), IpAddr::from(Ipv4Addr::LOCALHOST));

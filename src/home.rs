@@ -1,12 +1,11 @@
-//! The data folder: where it is, what it holds, and the settings in `config.toml`.
-
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::store::{self, ImagesOf, Store};
@@ -42,7 +41,6 @@ kanzo.lock
 .DS_Store
 ";
 
-/// How long an operation waits for `kanzo sync` before giving up with "busy".
 const LOCK_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
 
 pub const NO_LOCKS: &str = "This folder doesn't support file locks: don't sync while agents are working.";
@@ -52,8 +50,7 @@ pub const NO_LOCKS: &str = "This folder doesn't support file locks: don't sync w
 pub struct Config {
     pub port: u16,
     pub listen: IpAddr,
-    /// Before 0.2 this set the columns; they're fixed now, with an optional backlog
-    /// switched on from the board. Still read, so older files keep working.
+    /// Before 0.2 this set the columns. Still read, so older files keep working.
     #[serde(rename = "statuses")]
     _statuses: Option<toml::Value>,
     pub mcp_http: bool,
@@ -65,7 +62,6 @@ impl Default for Config {
     }
 }
 
-/// An opened data folder.
 #[derive(Debug, Clone)]
 pub struct Home {
     pub dir: PathBuf,
@@ -73,7 +69,6 @@ pub struct Home {
 }
 
 impl Home {
-    /// `--home`, then `KANZO_HOME`, then `~/kanzo`.
     pub fn resolve(flag: Option<PathBuf>) -> Result<PathBuf> {
         if let Some(dir) = flag {
             return Ok(dir);
@@ -85,7 +80,6 @@ impl Home {
         Ok(home.join("kanzo"))
     }
 
-    /// Opens the data folder, creating it and its files on first use.
     pub fn open(dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let dir = dir.canonicalize().unwrap_or(dir);
@@ -124,10 +118,8 @@ impl Home {
         }
     }
 
-    /// Opens a fresh connection. Callers keep it for one operation only, so a
-    /// database replaced by `kanzo sync` is picked up on the next one. It holds
-    /// a shared lock on `kanzo.lock`, so sync can wait for it to finish; while
-    /// sync holds the lock, this waits up to `LOCK_WAIT` and then reports busy.
+    /// Callers keep it for one operation only, so a database replaced by `kanzo sync`
+    /// is picked up on the next one. The shared lock lets sync wait for it to finish.
     pub fn store(&self) -> store::Result<Store> {
         let lock = self.lock_file().map_err(|e| store::Error::Invalid(format!("{e:#}")))?;
         let deadline = Instant::now() + LOCK_WAIT;
@@ -153,8 +145,11 @@ impl Home {
         Store::open(&self.db_path(), lock)
     }
 
-    /// Runs `delete`, then deletes the image files of `of` that nothing uses any more:
-    /// the same image can be attached in several places, and is stored once.
+    pub fn images(&self) -> PathBuf {
+        self.dir.join("images")
+    }
+
+    /// The same image can be attached in several places, and is stored once.
     pub fn deleting_images<T>(
         &self,
         store: &Store,
@@ -164,13 +159,11 @@ impl Home {
         let files = store.image_files(of)?;
         let deleted = delete()?;
         for file in store.unused_images(files)? {
-            let _ = fs::remove_file(self.dir.join("images").join(file));
+            let _ = fs::remove_file(self.images().join(file));
         }
         Ok(deleted)
     }
 
-    /// Blocks until no connection is open, and keeps new ones out until the file is dropped.
-    /// `None` when the filesystem has no locks.
     pub fn lock_exclusive(&self) -> Result<Option<File>> {
         let lock = self.lock_file()?;
         match lock.lock() {
@@ -207,6 +200,35 @@ fn write_if_missing(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn output(cmd: &mut Command) -> Result<String> {
+    let line: Vec<_> = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect();
+    let line = line.join(" ");
+    let out = cmd
+        .output()
+        .with_context(|| format!("cannot run {}; is it installed?", line.split(' ').next().unwrap_or_default()))?;
+    if !out.status.success() {
+        bail!("{line} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+pub fn hostname() -> String {
+    let name = |cmd: &mut Command| output(cmd).ok().filter(|n| !n.is_empty());
+    name(Command::new("scutil").args(["--get", "ComputerName"]))
+        .or_else(|| name(&mut Command::new("hostname")))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+pub fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    // A half-written file never takes the real name.
+    let partial = path.with_extension("part");
+    fs::write(&partial, bytes)?;
+    fs::rename(&partial, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,7 +261,6 @@ mod tests {
         let lock = home.lock_exclusive().unwrap();
         assert!(matches!(home.store(), Err(store::Error::Busy(_))));
 
-        // An operation started during a replacement waits, then goes on once it's done.
         let waiting = std::thread::spawn({
             let home = home.clone();
             move || home.store().map(|s| s.statuses().len())

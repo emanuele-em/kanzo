@@ -1,9 +1,3 @@
-//! Sharing the board on your network: `kanzo share on|off`, `kanzo join <host>` and `kanzo leave`.
-//!
-//! A shared board listens on the network as well as on this computer. A computer that
-//! joined one keeps its own board as a window onto it: the board hands the page's
-//! requests to the host (`forward`), and `kanzo mcp` hands it agents' tool calls (`Upstream`).
-
 use std::fmt::Write as _;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -12,7 +6,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use axum::Json;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
@@ -25,17 +18,11 @@ use tokio_util::io::ReaderStream;
 
 use crate::home::{DEFAULT_PORT, Home};
 
-/// The file in the data folder that says what this computer does on the network:
-/// `share`, or `join <host:port>`; none for neither. `kanzo sync` leaves it out.
 pub const FILE: &str = "network";
 
-/// Sent by `kanzo mcp` on a guest with every message, so the host finds the agent's
-/// project as it would on its own computer.
 pub const FOLDER_HEADER: &str = "x-kanzo-folder";
 pub const REPOS_HEADER: &str = "x-kanzo-repos";
-/// Where a guest's agent finds task images: its own folder, which fetches them from the host.
 pub const IMAGES_HEADER: &str = "x-kanzo-images";
-/// Sent by a guest's board and `kanzo mcp`, so the host can list who's using it.
 pub const COMPUTER_HEADER: &str = "x-kanzo-computer";
 
 /// Larger than any image the board takes.
@@ -45,7 +32,6 @@ const BODY_LIMIT: usize = 32 * 1024 * 1024;
 pub enum Net {
     Private,
     Sharing,
-    /// Using another computer's board, at `host:port`.
     Joined(String),
 }
 
@@ -74,8 +60,6 @@ impl Net {
     }
 }
 
-/// What the board's settings, `kanzo share`, `kanzo join` and `kanzo leave` ask for,
-/// as the board's `/api/network` takes it: `{"action": "join", "host": "192.168.0.12"}`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", content = "host", rename_all = "lowercase")]
 pub enum Change {
@@ -85,8 +69,6 @@ pub enum Change {
     Leave,
 }
 
-/// Checks `change` against what this computer does now, and saves the outcome. The
-/// running board calls this, then listens as it says; without one, the next board does.
 pub async fn change(home: &Home, change: Change) -> Result<Net, String> {
     let now = Net::load(home);
     let next = match (change, &now) {
@@ -119,7 +101,6 @@ pub async fn change(home: &Home, change: Change) -> Result<Net, String> {
     Ok(next)
 }
 
-/// `192.168.0.12` or `mac-mini.local` as `host:port`, with Kanzo's port unless one is given.
 fn address(host: &str) -> Result<String, String> {
     let host = host.trim().trim_start_matches("http://").trim_end_matches('/');
     if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)) {
@@ -138,22 +119,16 @@ fn address(host: &str) -> Result<String, String> {
     Ok(full)
 }
 
-/// What this computer does on the network, as `/api/network` answers.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Status {
     state: State,
-    /// Once joined, the host's address.
     host: Option<String>,
-    /// While sharing, this computer's addresses for `kanzo join`, one per network it is on.
     addresses: Vec<String>,
-    /// While sharing, the other computers using the board now.
     guests: Vec<Guest>,
 }
 
-/// Another computer using this board.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Guest {
-    /// Like "Ada's MacBook Air"; `None` for a browser opened straight at this board.
     pub name: Option<String>,
     pub address: IpAddr,
 }
@@ -206,8 +181,7 @@ impl Status {
     }
 }
 
-/// This computer's addresses, as others pass them to `kanzo join`: one per network it is
-/// on, like the home network and a VPN. Which one works depends on where the other computer is.
+/// One per network, like the home network and a VPN: which one works depends on where the other computer is.
 fn addresses(port: u16) -> Vec<String> {
     let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
     interfaces
@@ -217,9 +191,6 @@ fn addresses(port: u16) -> Vec<String> {
         .collect()
 }
 
-/// Asks the running board for `change`, which then takes effect at once, or only for its
-/// state; with no board running, saves the change for the next one. Also says whether a
-/// board is running.
 pub async fn request(home: &Home, change: Option<Change>) -> Result<(Status, bool)> {
     let port = home.config.port;
     let (method, body) = match &change {
@@ -250,8 +221,7 @@ pub async fn request(home: &Home, change: Option<Change>) -> Result<(Status, boo
     }
 }
 
-/// One HTTP reply. Requests are HTTP/1.0, so the body is all that comes until the host
-/// closes the connection, with no chunks to decode.
+/// Requests are HTTP/1.0, so the body is all that comes until the host closes the connection, with no chunks to decode.
 struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
@@ -291,7 +261,6 @@ async fn send(host: &str, method: &str, path: &str, headers: &[(&str, &str)], bo
     Ok(Reply { status, headers, body: reader })
 }
 
-/// True when `host` answers like a Kanzo board.
 pub async fn is_kanzo(host: &str) -> bool {
     let probe = async {
         let mut reply = send(host, "GET", "/api/ping", &[], b"").await.ok()?;
@@ -302,17 +271,15 @@ pub async fn is_kanzo(host: &str) -> bool {
     tokio::time::timeout(Duration::from_secs(2), probe).await.ok().flatten().unwrap_or(false)
 }
 
-/// This computer's name, as guests send it.
 fn computer() -> &'static str {
     static NAME: OnceLock<String> = OnceLock::new();
-    NAME.get_or_init(crate::sync::hostname)
+    NAME.get_or_init(crate::home::hostname)
 }
 
 fn unreachable(host: &str) -> String {
     format!("The shared board at {host} isn't reachable; run kanzo leave to use this computer's board.")
 }
 
-/// Hands one of the page's requests to the board this computer joined, and streams back its reply.
 pub async fn forward(host: &str, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let Ok(body) = axum::body::to_bytes(body, BODY_LIMIT).await else {
@@ -329,7 +296,7 @@ pub async fn forward(host: &str, req: Request) -> Response {
     headers.push((COMPUTER_HEADER, computer()));
     let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
     let Ok(reply) = send(host, parts.method.as_str(), path, &headers, &body).await else {
-        return (StatusCode::BAD_GATEWAY, Json(json!({ "error": unreachable(host) }))).into_response();
+        return crate::web::fail(StatusCode::BAD_GATEWAY, unreachable(host)).into_response();
     };
     let mut res = Response::new(Body::from_stream(ReaderStream::new(reply.body)));
     *res.status_mut() = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -343,8 +310,6 @@ pub async fn forward(host: &str, req: Request) -> Response {
     res
 }
 
-/// `kanzo mcp`'s session with the board this computer joined, for one agent: its tool
-/// calls go there, with the agent's folder so the host finds the project.
 pub struct Upstream {
     host: String,
     session: Option<String>,
@@ -363,8 +328,6 @@ impl Upstream {
         &self.host
     }
 
-    /// Calls the tool `name` on the host, as the agent `client` (its `initialize`
-    /// parameters, so comments keep its name). Answers its text, or its error.
     pub async fn call(
         &mut self,
         client: Option<Value>,
@@ -404,8 +367,7 @@ impl Upstream {
         if result["isError"] == true { Err(text) } else { Ok(text) }
     }
 
-    /// Images live on the host. The host names them in this computer's images folder, and
-    /// this fetches the ones missing there; names are their content's hash, so a copy never goes stale.
+    /// Names are their content's hash, so a copy never goes stale.
     async fn fetch_images(&self, text: &str) {
         let folder = self.images.display().to_string();
         for (at, _) in text.match_indices(&folder) {
@@ -418,18 +380,11 @@ impl Upstream {
             let Ok(mut reply) = send(&self.host, "GET", &format!("/images/{file}"), &[], b"").await else { continue };
             let mut bytes = Vec::new();
             if reply.status == 200 && reply.body.read_to_end(&mut bytes).await.is_ok() {
-                // Under a temporary name first, so a half-written image never has the real one.
-                let partial = path.with_extension("part");
-                let saved = std::fs::create_dir_all(&self.images).and_then(|()| std::fs::write(&partial, &bytes));
-                if saved.is_ok() {
-                    let _ = std::fs::rename(&partial, &path);
-                }
+                let _ = crate::home::write_whole(&path, &bytes);
             }
         }
     }
 
-    /// Sends one message: the status, and the messages the host answered with, as JSON
-    /// or as a stream of events.
     async fn post(&mut self, line: &str) -> io::Result<(u16, Vec<Value>)> {
         let images = self.images.display().to_string();
         let mut headers = vec![
@@ -492,7 +447,6 @@ mod tests {
         assert_eq!(apply(Change::Off).unwrap(), Net::Joined("192.168.0.12:4242".into()));
         assert_eq!(apply(Change::Leave).unwrap(), Net::Private);
 
-        // A board config.toml opens to the network is shared, and can't join another.
         std::fs::write(tmp.path().join("config.toml"), "listen = \"0.0.0.0\"\n").unwrap();
         let home = Home::open(tmp.path().to_path_buf()).unwrap();
         assert_eq!(Net::load(&home), Net::Sharing);
