@@ -212,7 +212,7 @@ mark { background: color-mix(in srgb, var(--link) 25%, transparent); color: inhe
 .card .num:hover, #p-key:hover { color: var(--text); }
 #p-key { cursor: copy; }
 .card .num .dot { width: 6px; height: 6px; }
-.card .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.card .tags, .result .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .card .human-mark { flex: none; margin-top: 1px; color: var(--muted); display: inline-flex; }
 .card .human-mark .icon svg { width: 15px; height: 15px; }
 /* An on/off switch, for the Human field. */
@@ -228,8 +228,8 @@ mark { background: color-mix(in srgb, var(--link) 25%, transparent); color: inhe
 .switch input:checked + span { background: #3b82f6; }
 .switch input:checked + span::after { transform: translateX(14px); }
 .switch input:focus-visible + span { box-shadow: 0 0 0 2px var(--hover); }
-.card .desc {
-  margin-top: 2px; color: var(--muted); font-size: 13px;
+.card .desc, .result .desc {
+  display: block; margin-top: 2px; color: var(--muted); font-size: 13px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tag {
@@ -424,12 +424,17 @@ label.setting { cursor: pointer; }
 .results .label { color: var(--faint); font-size: 12px; padding: 8px 12px 4px; }
 .results .note { color: var(--faint); padding: 14px 12px; }
 .result {
-  display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 0; border-radius: 10px;
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 10px 12px; border: 0; border-radius: 10px;
   background: none; text-align: left;
 }
 .result.selected { background: var(--hover); }
-.result .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.result .meta { flex: none; display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 12px; }
+.result.selected .tag { background: var(--active); }
+.result .dot { margin-top: 6px; }
+.result .body { flex: 1; min-width: 0; }
+.result .title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result .meta { flex: none; display: flex; align-items: center; gap: 8px; margin-top: 2px; color: var(--faint); font-size: 12px; }
+.result .comments { display: inline-flex; align-items: center; gap: 4px; }
+.result .comments .icon svg { width: 13px; height: 13px; }
 
 .toast {
   white-space: pre-line; max-width: min(640px, calc(100vw - 32px));

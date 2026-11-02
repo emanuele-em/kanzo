@@ -79,6 +79,7 @@ const ICONS = {
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  comment: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>',
 };
 
@@ -583,6 +584,15 @@ function marked(text, words) {
   return text.split(re).map((part, i) => (i % 2 ? el("mark", {}, part) : part));
 }
 
+// A task's description line and tags, with the words found marked: on cards and in search.
+// A tag lays out its parts with a gap, so its text stays one part.
+function summary(t, words) {
+  return [
+    t.description ? el("span", { class: "desc" }, marked(plainText(t.description), words)) : null,
+    t.tags.length ? el("span", { class: "tags" }, t.tags.map((tag) => el("span", { class: "tag" }, el("span", {}, marked(tag, words))))) : null,
+  ];
+}
+
 // The board can show only human tasks; off at first, and each browser remembers the choice.
 function isHumanOnly() {
   return localStorageGet("kanzo.humanOnly") === "1";
@@ -644,8 +654,7 @@ function card(t, showProject, words = []) {
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
       el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
-    t.description ? el("div", { class: "desc" }, marked(plainText(t.description), words)) : null,
-    t.tags.length ? el("div", { class: "tags" }, t.tags.map((tag) => el("span", { class: "tag" }, marked(tag, words)))) : null);
+    ...summary(t, words));
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;
     e.dataTransfer.effectAllowed = "move";
@@ -1111,8 +1120,11 @@ async function runSearch() {
       ...results.map((t, i) => el("button", { type: "button", class: "result" + (i === 0 ? " selected" : ""),
                                              onmousemove: () => select(i), onclick: () => pick(t) },
         el("span", { class: "dot", style: `background:${projectColor(t.project)}` }),
-        el("span", { class: "title" }, marked(t.title, wordsOf(q))),
-        el("span", { class: "meta" }, el("span", { class: "mono" }, key(t)), t.status))),
+        el("span", { class: "body" }, el("span", { class: "title" }, marked(t.title, wordsOf(q))), ...summary(t, wordsOf(q))),
+        el("span", { class: "meta" },
+          t.comments ? el("span", { class: "comments", title: `${t.comments} comment${t.comments > 1 ? "s" : ""}` },
+                          icon("comment"), String(t.comments)) : null,
+          el("span", { class: "mono" }, key(t)), t.status))),
       ...(results.length ? [] : [el("div", { class: "note" }, q ? "No tasks match." : "No tasks yet.")]));
   } catch (err) { toast(err.message); }
 }
