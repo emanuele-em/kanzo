@@ -535,19 +535,21 @@ impl Store {
         Ok((tasks, hidden))
     }
 
-    /// Tasks of any project whose key, title, description, tags or project hold every
-    /// word of `query`: open ones first, then the most recently changed. An empty query
-    /// gives the most recently changed tasks.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Task>> {
+    /// Tasks of any project whose key, title, description, tags, project or comments hold
+    /// every word of `query`: open ones first, then the most recently changed. An empty
+    /// query gives the most recently changed tasks. The board's filter uses it too.
+    pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<Task>> {
         let words: Vec<String> = query.split_whitespace().take(10).map(|w| w.to_lowercase()).collect();
         let mut sql = format!("{} WHERE 1", Self::TASK_SELECT);
         for i in 0..words.len() {
             sql.push_str(&format!(
-                " AND lower(p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
-                 LIKE ?{} ESCAPE '\\'",
-                i + 2
+                " AND (lower(p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
+                 LIKE ?{n} ESCAPE '\\' OR t.id IN (SELECT task_id FROM comments WHERE lower(body) LIKE ?{n} ESCAPE '\\'))",
+                n = i + 2
             ));
         }
+        // SQLite reads a negative LIMIT as no limit.
+        let limit = limit.map_or(-1, |n| n as i64);
         sql.push_str(&format!(" ORDER BY t.status = ?1, t.updated_at DESC, t.id DESC LIMIT {limit}"));
         let mut values: Vec<String> = vec![self.done_status().to_string()];
         for w in &words {
@@ -1119,15 +1121,17 @@ mod tests {
         s.update_task(old.id, TaskPatch { status: Some("done".into()), ..Default::default() }).unwrap();
         let other = s.create_task(web.id, "Pricing 100%", "").unwrap();
         s.update_task(other.id, TaskPatch { tags: Some("ui".into()), ..Default::default() }).unwrap();
-        let titles = |q: &str| s.search(q, 10).unwrap().into_iter().map(|t| t.title).collect::<Vec<_>>();
+        let titles = |q: &str| s.search(q, Some(10)).unwrap().into_iter().map(|t| t.title).collect::<Vec<_>>();
         assert_eq!(titles("LOGIN"), ["Fix login", "Login page copy"], "any project, open first, done too");
         assert_eq!(titles("login api"), ["Fix login"], "every word must match, the project too");
         assert_eq!(titles(&format!("web#{}", other.id)), ["Pricing 100%"], "by key");
         assert_eq!(titles("ui"), ["Pricing 100%"], "by tag");
+        s.add_comment(old.id, "you", "Needs the new logo", &[]).unwrap();
+        assert_eq!(titles("logo login"), ["Login page copy"], "by comment, with the task's own words");
         assert_eq!(titles("100%"), ["Pricing 100%"], "% is a plain character");
         assert!(titles("nothing-like-this").is_empty());
-        assert_eq!(s.search("", 10).unwrap().len(), 3, "no words: the latest changes");
-        assert_eq!(s.search("login", 1).unwrap()[0].id, login.id);
+        assert_eq!(s.search("", Some(10)).unwrap().len(), 3, "no words: the latest changes");
+        assert_eq!(s.search("login", Some(1)).unwrap()[0].id, login.id);
     }
 
     #[test]

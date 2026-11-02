@@ -154,13 +154,15 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 }
 #new-task { display: inline-flex; align-items: center; gap: 6px; padding-left: 12px; }
 #new-task .icon svg { width: 16px; height: 16px; }
-/* Filter: the board keeps only the tasks whose key, title, description or tags hold every word typed. */
+/* Filter: the board keeps only the tasks search finds. */
 #filter {
   width: 180px; height: 35px; padding: 0 14px; border: 1px solid var(--border); border-radius: 99px;
   background: transparent; color: var(--text); font: inherit; font-size: 13px; outline: none;
 }
 #filter:focus { border-color: var(--link); }
 #filter.on { border-color: var(--link); background: color-mix(in srgb, var(--link) 8%, transparent); }
+/* The words search or the filter found. */
+mark { background: color-mix(in srgb, var(--link) 25%, transparent); color: inherit; border-radius: 3px; }
 /* Show only human tasks: a small icon, coloured while the filter is on. */
 #human-only { color: var(--muted); }
 #human-only:hover, #human-only:focus-visible { color: var(--text); }

@@ -285,7 +285,9 @@ async function loadBoard() {
     // The server leaves out older done tasks unless asked: the board does not show
     // them, and the done column only grows. Search needs them all.
     const done = state.allDone ? "&done=all" : "";
-    const board = await api("GET", "/board?project=" + encodeURIComponent(state.project) + done);
+    const q = $("#filter").value.trim();
+    const board = await api("GET", "/board?project=" + encodeURIComponent(state.project) + done
+                            + (q ? "&q=" + encodeURIComponent(q) : ""));
     if (request !== boardRequest) return;
     state.board = board;
     state.changes = board.changes;
@@ -548,11 +550,11 @@ function renderColumns() {
   if (state.dragging) return;
   const all = state.project === "all";
   const humanOnly = isHumanOnly();
-  const words = filterWords();
+  const words = wordsOf($("#filter").value);
   $("#filter").classList.toggle("on", words.length > 0);
   for (const status of statuses) {
     const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
-    const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human) && matchesFilter(t, words));
+    const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
     // Older done tasks the server left out (see loadBoard).
     const last = status === statuses[statuses.length - 1];
     const hidden = last && !state.allDone ? state.board.done_hidden || 0 : 0;
@@ -564,20 +566,21 @@ function renderColumns() {
       ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
            filtered ? "Show older" : `Show ${hidden} older`)
       : null;
-    col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all)));
+    col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all, words)));
   }
 }
 
-// The filter box keeps on the board only the tasks that hold every word typed, in their key,
-// title, description or tags: the same match as search, but the board stays a board.
-function filterWords() {
-  return $("#filter").value.toLowerCase().split(/\s+/).filter(Boolean);
+// The filter box keeps on the board only the tasks search finds (see loadBoard): search
+// shows one to open, the filter all of them in their columns.
+function wordsOf(query) {
+  return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
 
-function matchesFilter(t, words) {
-  if (!words.length) return true;
-  const text = `${t.project}#${t.id} ${t.title} ${t.description || ""} ${t.tags.join(" ")}`.toLowerCase();
-  return words.every((w) => text.includes(w));
+// The text with each of the words found in it marked, for search and the filter.
+function marked(text, words) {
+  if (!words.length) return text;
+  const re = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "i");
+  return text.split(re).map((part, i) => (i % 2 ? el("mark", {}, part) : part));
 }
 
 // The board can show only human tasks; off at first, and each browser remembers the choice.
@@ -632,17 +635,17 @@ function plainText(md) {
     .trim();
 }
 
-function card(t, showProject) {
+function card(t, showProject, words = []) {
   const node = el("div", { class: "card" + (state.task === t.id ? " open" : ""), draggable: "true", "data-id": t.id,
                            onclick: () => openTask(t.id) },
     el("div", { class: "head" },
-      el("div", { class: "title" }, t.title),
+      el("div", { class: "title" }, marked(t.title, words)),
       // On "All projects" a dot in the project's colour tells the projects apart.
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
       el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
-    t.description ? el("div", { class: "desc" }, plainText(t.description)) : null,
-    t.tags.length ? el("div", { class: "tags" }, t.tags.map((tag) => el("span", { class: "tag" }, tag))) : null);
+    t.description ? el("div", { class: "desc" }, marked(plainText(t.description), words)) : null,
+    t.tags.length ? el("div", { class: "tags" }, t.tags.map((tag) => el("span", { class: "tag" }, marked(tag, words)))) : null);
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;
     e.dataTransfer.effectAllowed = "move";
@@ -750,9 +753,10 @@ function hideNewProject() {
 
 $("#new-task").addEventListener("click", newTask);
 $("#human-only").addEventListener("click", () => setHumanOnly(!isHumanOnly()));
-$("#filter").addEventListener("input", render);
+let filterTimer;
+$("#filter").addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(loadBoard, 120); });
 $("#filter").addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { e.stopPropagation(); $("#filter").value = ""; render(); $("#filter").blur(); }
+  if (e.key === "Escape") { e.stopPropagation(); $("#filter").value = ""; loadBoard(); $("#filter").blur(); }
 });
 $("#new-project-toggle").addEventListener("click", showNewProject);
 $("#new-project-cancel").addEventListener("click", hideNewProject);
@@ -1107,7 +1111,7 @@ async function runSearch() {
       ...results.map((t, i) => el("button", { type: "button", class: "result" + (i === 0 ? " selected" : ""),
                                              onmousemove: () => select(i), onclick: () => pick(t) },
         el("span", { class: "dot", style: `background:${projectColor(t.project)}` }),
-        el("span", { class: "title" }, t.title),
+        el("span", { class: "title" }, marked(t.title, wordsOf(q))),
         el("span", { class: "meta" }, el("span", { class: "mono" }, key(t)), t.status))),
       ...(results.length ? [] : [el("div", { class: "note" }, q ? "No tasks match." : "No tasks yet.")]));
   } catch (err) { toast(err.message); }

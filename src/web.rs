@@ -1,6 +1,6 @@
 //! `kanzo`: the board page, the small JSON API behind it, and MCP over HTTP at `/mcp`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -417,6 +417,9 @@ struct BoardQuery {
     project: Option<String>,
     /// "all" for every done task.
     done: Option<String>,
+    /// The filter: only the tasks that search finds.
+    #[serde(default)]
+    q: String,
 }
 
 /// The whole board, serialized straight from the store's rows.
@@ -437,7 +440,11 @@ async fn board(State(home): Shared, Query(q): Query<BoardQuery>) -> Response {
             None => None,
         };
         let keep_done = (q.done.as_deref() != Some("all")).then_some(DONE_SHOWN);
-        let (tasks, done_hidden) = s.list_tasks_keeping_done(project.map(|p| p.id), None, keep_done)?;
+        let (mut tasks, done_hidden) = s.list_tasks_keeping_done(project.map(|p| p.id), None, keep_done)?;
+        if !q.q.trim().is_empty() {
+            let found: HashSet<i64> = s.search(&q.q, None)?.into_iter().map(|t| t.id).collect();
+            tasks.retain(|t| found.contains(&t.id));
+        }
         Ok(Board {
             changes: change_token(h, s)?,
             done_hidden,
@@ -458,7 +465,7 @@ struct SearchQuery {
 
 /// Tasks of every project matching the search, for the search window.
 async fn search(State(home): Shared, Query(q): Query<SearchQuery>) -> Response {
-    with_store(home, move |_, s| s.search(&q.q, 30)).await
+    with_store(home, move |_, s| s.search(&q.q, Some(30))).await
 }
 
 #[derive(Deserialize)]
