@@ -576,8 +576,7 @@ function filterWords() {
 
 function matchesFilter(t, words) {
   if (!words.length) return true;
-  const tags = Array.isArray(t.tags) ? t.tags.join(" ") : t.tags || "";
-  const text = `${t.project}#${t.id} ${t.title} ${t.description || ""} ${tags}`.toLowerCase();
+  const text = `${t.project}#${t.id} ${t.title} ${t.description || ""} ${t.tags.join(" ")}`.toLowerCase();
   return words.every((w) => text.includes(w));
 }
 
