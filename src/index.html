@@ -161,6 +161,15 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 }
 #filter:focus { border-color: var(--link); }
 #filter.on { border-color: var(--link); background: color-mix(in srgb, var(--link) 8%, transparent); }
+/* Filters kept with Enter: light blue chips, each with its × to remove it. */
+#filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 2px; height: 28px; padding: 0 4px 0 12px; border-radius: 99px;
+  background: color-mix(in srgb, var(--link) 15%, transparent); color: var(--link); font-size: 13px;
+}
+.chip button { display: inline-flex; padding: 4px; border: 0; border-radius: 99px; background: none; color: inherit; }
+.chip button:hover { background: color-mix(in srgb, var(--link) 20%, transparent); }
+.chip .icon svg { width: 13px; height: 13px; }
 /* The words search or the filter found. */
 mark { background: color-mix(in srgb, var(--link) 25%, transparent); color: inherit; border-radius: 3px; }
 /* Show only human tasks: a small icon, coloured while the filter is on. */
@@ -457,6 +466,7 @@ label.setting { cursor: pointer; }
   #settings-nav { flex-direction: row; border-right: 0; border-bottom: 1px solid var(--border); }
   header { padding: 12px; }
   /* On a phone the filter takes its own line, below the title and buttons. */
+  #filters { order: 1; }
   #filter { order: 1; flex: 1 0 100%; width: auto; }
 }
 </style>
@@ -477,6 +487,7 @@ label.setting { cursor: pointer; }
 <main>
   <header>
     <div class="info" id="header"></div>
+    <div id="filters"></div>
     <input type="search" id="filter" placeholder="Filter board" title="Show only the tasks that match (f)" aria-label="Filter the board" autocomplete="off" spellcheck="false" hidden>
     <button class="ghost" id="human-only" title="Show only human tasks (h)" aria-label="Show only human tasks" aria-pressed="false" hidden><span class="icon" data-icon="human"></span></button>
     <button class="ghost" id="network" aria-haspopup="dialog" aria-controls="network-menu"></button>

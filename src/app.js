@@ -286,7 +286,7 @@ async function loadBoard() {
     // The server leaves out older done tasks unless asked: the board does not show
     // them, and the done column only grows. Search needs them all.
     const done = state.allDone ? "&done=all" : "";
-    const q = $("#filter").value.trim();
+    const q = filterQuery();
     const board = await api("GET", "/board?project=" + encodeURIComponent(state.project) + done
                             + (q ? "&q=" + encodeURIComponent(q) : ""));
     if (request !== boardRequest) return;
@@ -485,6 +485,10 @@ function renderHeader() {
   $("#new-task").hidden = !projects.length;
   $("#human-only").hidden = !projects.length;
   $("#filter").hidden = !projects.length;
+  $("#filters").replaceChildren(...(projects.length ? savedFilters() : []).map((f, i) =>
+    el("span", { class: "chip" }, f,
+      el("button", { type: "button", title: `Remove "${f}"`, "aria-label": `Remove the filter ${f}`,
+                     onclick: () => setFilters(savedFilters().filter((_, j) => j !== i)) }, icon("close")))));
   $("#human-only").setAttribute("aria-pressed", String(isHumanOnly()));
   if (!projects.length) { header.replaceChildren(); return; }
   // Plain words for what each piece is: how much is open, and the repos on GitHub.
@@ -551,7 +555,7 @@ function renderColumns() {
   if (state.dragging) return;
   const all = state.project === "all";
   const humanOnly = isHumanOnly();
-  const words = wordsOf($("#filter").value);
+  const words = wordsOf(filterQuery());
   $("#filter").classList.toggle("on", words.length > 0);
   for (const status of statuses) {
     const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
@@ -573,6 +577,21 @@ function renderColumns() {
 
 // The filter box keeps on the board only the tasks search finds (see loadBoard): search
 // shows one to open, the filter all of them in their columns.
+// Enter keeps what's typed as a chip beside the box, and each browser remembers them;
+// a task must match every chip and the text still in the box.
+function savedFilters() {
+  try { return JSON.parse(localStorageGet("kanzo.filters")) || []; } catch { return []; }
+}
+
+function setFilters(filters) {
+  try { localStorage.setItem("kanzo.filters", JSON.stringify(filters)); } catch {}
+  loadBoard();
+}
+
+function filterQuery() {
+  return [...savedFilters(), $("#filter").value].join(" ").trim();
+}
+
 function wordsOf(query) {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
@@ -765,7 +784,10 @@ $("#human-only").addEventListener("click", () => setHumanOnly(!isHumanOnly()));
 let filterTimer;
 $("#filter").addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(loadBoard, 120); });
 $("#filter").addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { e.stopPropagation(); $("#filter").value = ""; loadBoard(); $("#filter").blur(); }
+  const box = e.target, text = box.value.trim();
+  if (e.key === "Escape") { e.stopPropagation(); box.value = ""; loadBoard(); box.blur(); }
+  else if (e.key === "Enter" && text) { box.value = ""; setFilters([...savedFilters(), text]); }
+  else if (e.key === "Backspace" && !box.value && savedFilters().length) setFilters(savedFilters().slice(0, -1));
 });
 $("#new-project-toggle").addEventListener("click", showNewProject);
 $("#new-project-cancel").addEventListener("click", hideNewProject);
