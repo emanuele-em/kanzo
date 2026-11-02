@@ -1,13 +1,9 @@
-//! `kanzo service`: run the board in the background, started at login.
-//! A LaunchAgent on macOS, a systemd user unit on Linux (a Raspberry Pi, an old laptop),
-//! a Task Scheduler task on Windows.
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::home::Home;
+use crate::home::{Home, output};
 
 const LABEL: &str = "com.github.emanuele-em.kanzo";
 const UNIT: &str = "kanzo.service";
@@ -38,8 +34,6 @@ pub fn uninstall() -> Result<()> {
     }
 }
 
-/// Restarts the service, if it's installed, so it runs a newly installed Kanzo; false
-/// when there's none.
 pub fn restart() -> Result<bool> {
     if cfg!(target_os = "macos") && plist_path()?.exists() {
         run("launchctl", &["kickstart", "-k", &format!("{}/{LABEL}", launchd_domain()?)])?;
@@ -57,24 +51,16 @@ fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("cannot find your home folder")
 }
 
-/// Runs a command and fails with its own error output.
 fn run(cmd: &str, args: &[&str]) -> Result<()> {
-    let out = Command::new(cmd).args(args).output().with_context(|| format!("cannot run {cmd}"))?;
-    if !out.status.success() {
-        bail!("{cmd} {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(())
+    output(Command::new(cmd).args(args)).map(drop)
 }
-
-// macOS
 
 fn plist_path() -> Result<PathBuf> {
     Ok(home_dir()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
 }
 
 fn launchd_domain() -> Result<String> {
-    let uid = Command::new("id").arg("-u").output().context("cannot run id -u")?;
-    Ok(format!("gui/{}", String::from_utf8_lossy(&uid.stdout).trim()))
+    Ok(format!("gui/{}", output(Command::new("id").arg("-u"))?))
 }
 
 fn xml_escape(s: &str) -> String {
@@ -145,8 +131,6 @@ fn uninstall_launchd() -> Result<()> {
     Ok(())
 }
 
-// Linux
-
 fn unit_path() -> Result<PathBuf> {
     let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -155,7 +139,6 @@ fn unit_path() -> Result<PathBuf> {
     Ok(config.join("systemd/user").join(UNIT))
 }
 
-/// Quotes one argument for a systemd `ExecStart=` line.
 fn systemd_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"))
 }
@@ -207,11 +190,9 @@ fn uninstall_systemd() -> Result<()> {
     Ok(())
 }
 
-// Windows
-
-/// Stops the board, which may be this process (cmd outlives it), waits 3 s for it to let
-/// go of its port (`timeout` needs a console), then starts it. `/end` stops conhost; the
-/// board then exits with its console (see `web::exit_with_console`).
+/// cmd outlives this process, which may be the board. `ping` waits 3 s for the port to be
+/// let go, as `timeout` needs a console. `/end` stops conhost; the board then exits with
+/// its console (see `web::exit_with_console`).
 fn restart_task() -> Result<()> {
     let line = format!("schtasks /end /tn {TASK} & ping -n 4 127.0.0.1 >nul & schtasks /run /tn {TASK}");
     let mut cmd = Command::new("cmd");
@@ -220,27 +201,22 @@ fn restart_task() -> Result<()> {
     // takes the processes in it along.
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
-    let out = cmd.output().context("cannot run cmd")?;
-    if !out.status.success() {
-        bail!("cannot restart the Kanzo task: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
+    output(&mut cmd).context("cannot restart the Kanzo task")?;
     Ok(())
 }
 
-/// Whether this process is the board the Windows task starts: the task's arguments, and
-/// the task is installed.
 pub fn is_task_board(dir: &Path) -> bool {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     args == ["--no-open".into(), "--home".into(), dir.as_os_str().to_owned()] && task_exists()
 }
 
 fn task_exists() -> bool {
-    Command::new("schtasks").args(["/query", "/tn", TASK]).output().is_ok_and(|o| o.status.success())
+    output(Command::new("schtasks").args(["/query", "/tn", TASK])).is_ok()
 }
 
-/// A logon task that runs the board in the user's session, so it can use their saved
-/// git credentials, through `conhost --headless`, so it has no window. S4U has no
-/// window either, but can't read Credential Manager and needs an elevated shell.
+/// Runs in the user's session so it can use their saved git credentials, through
+/// `conhost --headless` so it has no window. S4U has no window either, but can't read
+/// Credential Manager and needs an elevated shell.
 fn task(exe: &Path, dir: &Path, user: &str) -> String {
     let esc = |s: &str| xml_escape(s).replace('"', "&quot;");
     format!(
@@ -269,16 +245,15 @@ fn task(exe: &Path, dir: &Path, user: &str) -> String {
     )
 }
 
-/// `domain\user`, from Windows in UTF-8: `whoami` prints in the console's code page, and
-/// %USERDOMAIN% is WORKGROUP over SSH.
+/// Not `whoami`, which prints in the console's code page, nor %USERDOMAIN%, which is
+/// WORKGROUP over SSH.
 fn account() -> Result<String> {
     let name =
         "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Security.Principal.WindowsIdentity]::GetCurrent().Name";
-    let out =
-        Command::new("powershell").args(["-NoProfile", "-Command", name]).output().context("cannot run powershell")?;
-    let user = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() || user.is_empty() {
-        bail!("cannot find your Windows account: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let user = output(Command::new("powershell").args(["-NoProfile", "-Command", name]))
+        .context("cannot find your Windows account")?;
+    if user.is_empty() {
+        bail!("cannot find your Windows account");
     }
     Ok(user)
 }

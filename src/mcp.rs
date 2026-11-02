@@ -1,4 +1,3 @@
-//! The board as MCP tools: over stdio for `kanzo mcp`, and over HTTP at `/mcp` of the board.
 //! Replies are short plain text to save agents' tokens.
 
 use std::fmt::Write;
@@ -27,24 +26,33 @@ use crate::home::Home;
 use crate::share::{self, Net};
 use crate::store::{self, Error, Project, Store, Task, TaskPatch, short_time};
 
-/// The most done tasks list_tasks shows, newest first: an old board has thousands.
+/// An old board has thousands of done tasks.
 const DONE_LISTED: usize = 20;
 
-const INSTRUCTIONS: &str = "The user's kanban board, on this machine, for all their projects. Tasks look like \
-api#12. Without `project`, Kanzo uses the project linked to this folder's GitHub repo. Keep it current unasked: \
-doing when you start a task, comments on what you did, review when you finish or get stuck. Leave done and \
-human tasks to the user.";
+macro_rules! instructions {
+    ($whose:literal, $project:literal) => {
+        concat!(
+            "The user's kanban board, on ",
+            $whose,
+            " machine, for all their projects. Tasks look like api#12. ",
+            $project,
+            " Keep it current unasked: doing when you start a task, comments on what you did, review when you \
+             finish or get stuck. Leave done and human tasks to the user."
+        )
+    };
+}
 
-const HTTP_INSTRUCTIONS: &str = "The user's kanban board, on their machine, for all their projects. Tasks look \
-like api#12. Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects). Keep it current \
-unasked: doing when you start a task, comments on what you did, review when you finish or get stuck. Leave \
-done and human tasks to the user.";
+const INSTRUCTIONS: &str =
+    instructions!("this", "Without `project`, Kanzo uses the project linked to this folder's GitHub repo.");
+const HTTP_INSTRUCTIONS: &str =
+    instructions!("their", "Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects).");
 
-/// `kanzo mcp`: one agent on stdin and stdout, in the folder it started us in.
+const NO_PROJECTS: &str = "There are no projects yet. Create one with create_project.";
+
 pub async fn serve(home: Home) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let repos = git_repos(&cwd);
-    let images = home.dir.join("images");
+    let images = home.images();
     let ctx = Ctx { home, cwd: Some(cwd), repos, images, host: Default::default() };
     let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
     let service = server.serve(rmcp::transport::stdio()).await?;
@@ -52,11 +60,10 @@ pub async fn serve(home: Home) -> Result<()> {
     Ok(())
 }
 
-/// MCP over HTTP, mounted at `/mcp` by the board. The board's own Host and Origin
-/// checks (`web::protect`) guard it, including when it listens on the network, so
-/// rmcp's localhost-only list is turned off here.
+/// `web::protect` checks Host and Origin, including when the board listens on the network,
+/// so rmcp's localhost-only list is turned off.
 pub fn http_service(home: Home, shutdown: CancellationToken) -> StreamableHttpService<Kanzo, LocalSessionManager> {
-    let images = home.dir.join("images");
+    let images = home.images();
     let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new(), images, host: Default::default() });
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts().with_cancellation_token(shutdown);
     // rmcp makes a server per session, and for some requests; the tool list is built once.
@@ -70,19 +77,20 @@ pub fn http_service(home: Home, shutdown: CancellationToken) -> StreamableHttpSe
 
 struct Ctx {
     home: Home,
-    /// The agent's working folder; `None` over HTTP, where we cannot know it.
     cwd: Option<PathBuf>,
-    /// GitHub repos (`owner/repo`) of the git remotes of `cwd`.
     repos: Vec<String>,
-    /// Where the agent finds the images of tasks: on a computer that joined this board,
-    /// its own folder, which fetches them from here.
     images: PathBuf,
-    /// The board this computer joined, while `kanzo mcp` uses it for the agent.
     host: tokio::sync::Mutex<Option<share::Upstream>>,
 }
 
 impl Ctx {
-    /// The named project, or the one linked to this folder's git remote.
+    fn scope(&self, store: &Store, name: Option<&str>) -> store::Result<Option<Project>> {
+        if name.is_some_and(|p| p.trim().eq_ignore_ascii_case("all")) {
+            return Ok(None);
+        }
+        self.project(store, name).map(Some)
+    }
+
     fn project(&self, store: &Store, name: Option<&str>) -> store::Result<Project> {
         if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
             return store.find_project(name);
@@ -94,38 +102,38 @@ impl Ctx {
         }
         let known: Vec<String> = store.list_projects()?.into_iter().map(|p| p.slug).collect();
         let known = known.join(", ");
-        let Some(cwd) = &self.cwd else {
-            let msg = if known.is_empty() {
-                "There are no projects yet. Create one with create_project.".to_string()
-            } else {
+        let msg = match (self.cwd.as_ref().map(|c| c.display()), self.repos.first(), known.is_empty()) {
+            (_, None, true) => NO_PROJECTS.to_string(),
+            (None, ..) => {
                 format!("Pass `project` (one of: {known}); over HTTP Kanzo cannot see which folder you work in.")
-            };
-            return Err(Error::NotFound(msg));
-        };
-        let cwd = cwd.display();
-        let msg = match (self.repos.first(), known.is_empty()) {
-            (Some(repo), false) => format!(
+            }
+            (Some(cwd), Some(repo), false) => format!(
                 "No project is linked to {repo} (the git remote of {cwd}). Pass `project` (one of: {known}), \
                  link this repo to one with link_repo, or create a project for it with create_project and repo \"{repo}\"."
             ),
-            (Some(repo), true) => format!(
+            (Some(cwd), Some(repo), true) => format!(
                 "No project is linked to {repo} (the git remote of {cwd}), and there are no projects yet. \
                  Create one with create_project and repo \"{repo}\"."
             ),
-            (None, false) => {
+            (Some(cwd), None, false) => {
                 format!("Cannot tell the project: {cwd} has no git remote. Pass `project` (one of: {known}).")
             }
-            (None, true) => "There are no projects yet. Create one with create_project.".to_string(),
         };
         Err(Error::NotFound(msg))
     }
 }
 
+fn reply(outcome: Result<String, String>) -> CallToolResult {
+    match outcome {
+        Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+        Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
+    }
+}
+
 fn git_repos(dir: &std::path::Path) -> Vec<String> {
-    let Ok(out) = Command::new("git").arg("-C").arg(dir).args(["remote", "-v"]).output() else {
+    let Ok(text) = crate::home::output(Command::new("git").arg("-C").arg(dir).args(["remote", "-v"])) else {
         return Vec::new();
     };
-    let text = String::from_utf8_lossy(&out.stdout);
     // `origin` first, so it wins when several remotes are linked to different projects.
     let mut lines: Vec<&str> = text.lines().collect();
     lines.sort_by_key(|l| !l.starts_with("origin\t"));
@@ -146,8 +154,7 @@ pub struct Kanzo {
     tool_router: ToolRouter<Self>,
 }
 
-/// A task, as `api#12` or just `12`. Agents are told it is a string, which keeps the
-/// tool schemas short; a bare number is accepted too.
+/// Agents are told it is a string, which keeps the tool schemas short; a bare number is accepted too.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum TaskKey {
@@ -245,8 +252,8 @@ struct NextTaskArgs {
 }
 
 impl Kanzo {
-    /// The tool list without the `$schema` line rmcp puts in every input schema, nor the
-    /// `null` of optional fields: agents read this list in every session, so each byte counts.
+    /// Drops rmcp's `$schema` line and the `null` of optional fields: agents read this list in
+    /// every session, so each byte counts.
     fn tools() -> ToolRouter<Self> {
         let mut router = Self::tool_router();
         for route in router.map.values_mut() {
@@ -271,14 +278,10 @@ impl Kanzo {
 
 #[tool_router]
 impl Kanzo {
-    /// Runs `f` with a fresh connection on a blocking thread and turns the
-    /// outcome into text; errors go back to the agent as tool errors it can read.
     async fn run(&self, f: impl FnOnce(&Ctx, &Store) -> store::Result<String> + Send + 'static) -> CallToolResult {
         self.run_for(&Extensions::default(), f).await
     }
 
-    /// Like `run`, with the agent's folder when `kanzo mcp` on a computer that joined
-    /// this board sent it along with the message.
     async fn run_for(
         &self,
         ext: &Extensions,
@@ -309,10 +312,7 @@ impl Kanzo {
         })
         .await
         .unwrap_or_else(|e| Err(format!("internal error: {e}")));
-        match outcome {
-            Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-            Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
-        }
+        reply(outcome)
     }
 
     #[tool(description = "List projects with their repos and open task counts.")]
@@ -321,7 +321,7 @@ impl Kanzo {
             .run_for(&ext, |ctx, store| {
                 let projects = store.list_projects()?;
                 if projects.is_empty() {
-                    return Ok("No projects yet. Create one with create_project.".into());
+                    return Ok(NO_PROJECTS.into());
                 }
                 let here = projects.iter().find(|p| p.repos.iter().any(|r| ctx.repos.contains(r)));
                 let mut out = String::new();
@@ -377,27 +377,20 @@ impl Kanzo {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, move |ctx, store| {
-                let all = args.project.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case("all"));
-                let project = if all { None } else { Some(ctx.project(store, args.project.as_deref())?) };
+                let project = ctx.scope(store, args.project.as_deref())?;
                 let status = args.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
                 let only = match status {
                     Some("all") | None => None,
-                    Some(s) if store.statuses().iter().any(|x| x == s) => Some(s),
                     Some(s) => {
-                        return Err(Error::Invalid(format!(
-                            "unknown status {s:?}; use one of: {}, or all",
-                            store.statuses().join(", ")
-                        )));
+                        store.check_status(s)?;
+                        Some(s)
                     }
                 };
-                // Done tasks only pile up: without a status leave them out, with one keep
-                // the newest.
                 let keep = if status.is_none() { 0 } else { DONE_LISTED };
                 let (tasks, hidden) =
                     store.list_tasks_keeping_done(project.as_ref().map(|p| p.id), only, Some(keep))?;
-                let done = store.statuses().last().map_or("", String::as_str);
+                let done = store::DONE;
                 let mut out = String::new();
-                // Tasks for a person are left out: agents leave them alone.
                 let mut people = 0;
                 for t in &tasks {
                     if t.human {
@@ -412,8 +405,11 @@ impl Kanzo {
                     let _ = writeln!(out, "No tasks in {scope}.");
                 }
                 if people > 0 {
-                    let tasks = if people == 1 { "task" } else { "tasks" };
-                    let _ = writeln!(out, "({people} human {tasks} not shown: for the user, not for agents)");
+                    let _ = writeln!(
+                        out,
+                        "({people} human {} not shown: for the user, not for agents)",
+                        store::tasks(people)
+                    );
                 }
                 if hidden > 0 && status.is_none() {
                     let _ = writeln!(out, "({hidden} {done} not shown; pass status \"{done}\" or \"all\")");
@@ -513,8 +509,7 @@ impl Kanzo {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, move |ctx, store| {
-                let all = args.project.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case("all"));
-                let project = if all { None } else { Some(ctx.project(store, args.project.as_deref())?) };
+                let project = ctx.scope(store, args.project.as_deref())?;
                 match store.next_task(project.as_ref().map(|p| p.id))? {
                     Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task)?)),
                     None => {
@@ -547,8 +542,7 @@ impl Kanzo {
 // untrimmed one for every request.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Kanzo {
-    /// On a computer that joined another's board, each call goes to that board, so agents
-    /// already running switch boards on their next call when this computer joins or leaves.
+    /// Checked on every call, so agents already running switch boards when this computer joins or leaves.
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -565,11 +559,7 @@ impl ServerHandler for Kanzo {
             let client = context.peer.peer_info().and_then(|p| serde_json::to_value(&*p).ok());
             let upstream = upstream.as_mut().expect("set above");
             let outcome = upstream.call(client, &request.name, request.arguments).await;
-            return Ok(match outcome {
-                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-                Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
-            }
-            .into());
+            return Ok(reply(outcome).into());
         }
         self.tool_router.call(ToolCallContext::new(self, request, context)).await
     }
@@ -581,9 +571,8 @@ impl ServerHandler for Kanzo {
     }
 }
 
-/// `api#12 [todo] Fix login {bug} (2 comments)`.
 fn task_line(out: &mut String, t: &Task) {
-    let _ = write!(out, "{}#{} [{}] {}", t.project, t.id, t.status, t.title);
+    let _ = write!(out, "{} [{}] {}", t.key(), t.status, t.title);
     write_tags(out, t);
     match t.comments {
         0 => {}
@@ -594,14 +583,12 @@ fn task_line(out: &mut String, t: &Task) {
     }
 }
 
-/// ` {bug, ui}`, or nothing without tags.
 fn write_tags(out: &mut String, t: &Task) {
     if !t.tags.is_empty() {
         let _ = write!(out, " {{{}}}", t.tags.join(", "));
     }
 }
 
-/// A task in full: description, comments, and the paths of its images, which agents can open.
 fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     let comments = store.list_comments(t.id)?;
     let images = store.list_images(t.id)?;
@@ -610,14 +597,13 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
         images.iter().filter(|i| i.comment_id == comment).map(|i| dir.join(&i.file).display().to_string()).collect()
     };
     let (created, updated) = (short_time(&t.created_at), short_time(&t.updated_at));
-    let mut out = format!("{}#{} {}", t.project, t.id, t.title);
+    let mut out = format!("{} {}", t.key(), t.title);
     write_tags(&mut out, t);
     let _ = write!(out, "\nstatus: {}", t.status);
     if t.human {
         out.push_str(", human: for the user, not for agents");
     }
     let _ = write!(out, ", created {created}");
-    // The update time only when it says something the creation time does not.
     if updated != created {
         let _ = write!(out, ", updated {updated}");
     }

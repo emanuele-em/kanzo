@@ -1,9 +1,7 @@
-//! All reads and writes of `kanzo.db`. Plain SQL, one short-lived connection per operation.
-//!
 //! The database uses a rollback journal (`journal_mode = TRUNCATE`), not WAL. With a
 //! connection per operation, WAL would set up and tear down its `-wal` and `-shm` files
 //! on every request; the rollback journal makes a read touch no extra files at all and
-//! measured about 3x faster per operation. Writes queue on the busy timeout.
+//! measured about 3x faster per operation.
 
 use std::fmt;
 use std::path::Path;
@@ -18,15 +16,11 @@ use serde::Serialize;
 /// only for a migration that older code can't live with, like a renamed column.
 const COMPATIBLE_FROM: usize = 4;
 
-/// Schema migrations, applied in order. Index + 1 is the `schema_version` they lead to.
 const MIGRATIONS: &[&str] = &[
     include_str!("schema.sql"),
-    // 2: a colour picked for the project; NULL leaves the board to choose one.
     "ALTER TABLE projects ADD COLUMN color TEXT;",
-    // 3: a task's tags, comma-separated (see `clean_tags`).
     "ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '';",
-    // 4: any number of repos per project. Each repo belongs to one project. The old
-    // projects.repo column stays, empty: SQLite can only drop it by rebuilding the table.
+    // The old projects.repo column stays, empty: SQLite can only drop it by rebuilding the table.
     "CREATE TABLE project_repos (
          repo       TEXT PRIMARY KEY,
          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE
@@ -36,7 +30,6 @@ const MIGRATIONS: &[&str] = &[
      UPDATE projects SET repo = NULL;
      CREATE TRIGGER project_repos_insert AFTER INSERT ON project_repos BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER project_repos_delete AFTER DELETE ON project_repos BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
-    // 5: images attached to a task, or to one of its comments; the files are in images/.
     "CREATE TABLE images (
          id         INTEGER PRIMARY KEY AUTOINCREMENT,
          task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -47,11 +40,9 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX images_by_task ON images(task_id);
      CREATE TRIGGER images_insert AFTER INSERT ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER images_delete AFTER DELETE ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
-    // 6: tasks for a person, which agents leave alone.
     "ALTER TABLE tasks ADD COLUMN human INTEGER NOT NULL DEFAULT 0;",
 ];
 
-/// The colours a project can be given; the board maps each name to a shade.
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
@@ -60,7 +51,6 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 pub enum Error {
     NotFound(String),
     Invalid(String),
-    /// Another process holds the data folder for longer than we wait, like a long `kanzo sync`.
     Busy(String),
     Db(rusqlite::Error),
 }
@@ -96,12 +86,9 @@ pub struct Project {
     pub id: i64,
     pub slug: String,
     pub name: String,
-    /// Linked GitHub repos as `owner/repo`, in the order they were linked.
     pub repos: Vec<String>,
-    /// One of `PROJECT_COLORS`, or `None` when never picked.
     pub color: Option<String>,
     pub created_at: String,
-    /// Tasks not in the last (done) column.
     pub open: i64,
     pub total: i64,
 }
@@ -112,9 +99,7 @@ pub struct Task {
     pub project: String,
     pub title: String,
     pub description: String,
-    /// Lowercase, without duplicates, in the order they were given.
     pub tags: Vec<String>,
-    /// Work for a person: agents leave it alone, and `next_task` never picks it.
     pub human: bool,
     pub status: String,
     pub position: f64,
@@ -124,7 +109,6 @@ pub struct Task {
 }
 
 impl Task {
-    /// How tasks are shown everywhere: `api#12`.
     pub fn key(&self) -> String {
         format!("{}#{}", self.project, self.id)
     }
@@ -139,45 +123,38 @@ pub struct Comment {
     pub created_at: String,
 }
 
-/// An image attached to a task, or to one of its comments.
 #[derive(Debug, Clone, Serialize)]
 pub struct Image {
     pub id: i64,
     pub task_id: i64,
     pub comment_id: Option<i64>,
-    /// Its file name in the data folder's `images/`, like `6fec521a01297ab5.png`.
     pub file: String,
 }
 
-/// Fields of a task to change; `None` leaves a field as it is.
 #[derive(Debug, Default)]
 pub struct TaskPatch {
     pub title: Option<String>,
     pub description: Option<String>,
     pub status: Option<String>,
-    /// Moves the task to this project (by id).
     pub project_id: Option<i64>,
-    /// Comma-separated; replaces all the tags, and an empty string clears them.
     pub tags: Option<String>,
     pub human: Option<bool>,
 }
 
-/// The board's columns, left to right. New tasks go in todo, agents take theirs from
-/// there and move them to doing, and tasks in done count as done.
 const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 
-/// An optional column before todo, for tasks that agents leave alone.
+pub const DONE: &str = STATUSES[3];
+
 pub const BACKLOG: &str = "backlog";
 
 pub struct Store {
     conn: Connection,
     statuses: Vec<String>,
-    /// Held while the connection is open; declared after `conn` so it is released after it closes.
+    /// Declared after `conn` so it is released after the connection closes.
     _lock: Option<std::fs::File>,
 }
 
 impl Store {
-    /// Opens the database. `lock` is kept until the store is dropped (see `Home::store`).
     pub fn open(path: &Path, lock: Option<std::fs::File>) -> Result<Self> {
         let conn = Connection::open(path)?;
         // The board and any number of agents share this file; wait instead of failing.
@@ -200,18 +177,11 @@ impl Store {
         &self.statuses
     }
 
-    fn done_status(&self) -> &str {
-        STATUSES[3]
-    }
-
-    /// Shows or hides the backlog column. It must be empty to hide it, or its
-    /// tasks would vanish from the board.
     pub fn set_backlog(&self, on: bool) -> Result<()> {
         self.write(|c| {
             let left: i64 = c.query_row("SELECT count(*) FROM tasks WHERE status = ?1", [BACKLOG], |r| r.get(0))?;
             if !on && left > 0 {
-                let tasks = if left == 1 { "task" } else { "tasks" };
-                return Err(Error::Invalid(format!("move the {left} {tasks} out of backlog first")));
+                return Err(Error::Invalid(format!("move the {left} {} out of backlog first", tasks(left))));
             }
             c.execute(
                 "INSERT INTO meta (key, value) VALUES ('backlog', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -223,8 +193,7 @@ impl Store {
         })
     }
 
-    /// Runs `f` in an immediate transaction, so concurrent writers queue up
-    /// on the busy timeout instead of failing halfway.
+    /// Immediate, so concurrent writers queue up on the busy timeout instead of failing halfway.
     fn write<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         match f(&self.conn) {
@@ -239,8 +208,8 @@ impl Store {
         }
     }
 
-    /// Brings the schema up to date. Writes nothing when it already is, so starting
-    /// `kanzo mcp` for every agent session costs no disk write.
+    /// Writes nothing when up to date, so starting `kanzo mcp` for every agent session
+    /// costs no disk write.
     pub fn migrate(&self) -> Result<()> {
         let meta = |c: &Connection, key: &str| -> rusqlite::Result<Option<usize>> {
             Ok(c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get::<_, String>(0))
@@ -278,7 +247,6 @@ impl Store {
         })
     }
 
-    /// Bumped by triggers on every write; the board polls it.
     pub fn changes(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -286,7 +254,6 @@ impl Store {
             .query_row([], |r| r.get(0))?)
     }
 
-    /// The current time, in the same format as the stored timestamps.
     pub fn now(&self) -> Result<String> {
         Ok(self.conn.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?)
     }
@@ -297,8 +264,6 @@ impl Store {
         self.conn.query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0))?;
         Ok(())
     }
-
-    // Projects
 
     const PROJECT_SELECT: &str = "SELECT p.id, p.slug, p.name,
             (SELECT group_concat(repo, ',' ORDER BY r.rowid) FROM project_repos r WHERE r.project_id = p.id),
@@ -323,13 +288,13 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let sql = format!("{} ORDER BY p.slug", Self::PROJECT_SELECT);
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([self.done_status()], Self::project_row)?;
+        let rows = stmt.query_map([DONE], Self::project_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     fn project_where(&self, clause: &str, value: &str) -> Result<Option<Project>> {
         let sql = format!("{} WHERE {clause}", Self::PROJECT_SELECT);
-        Ok(self.conn.query_row(&sql, params![self.done_status(), value], Self::project_row).optional()?)
+        Ok(self.conn.query_row(&sql, params![DONE, value], Self::project_row).optional()?)
     }
 
     pub fn project_by_slug(&self, slug: &str) -> Result<Option<Project>> {
@@ -343,7 +308,6 @@ impl Store {
         }
     }
 
-    /// Finds a project by slug, or by linked repo when given `owner/repo`.
     pub fn find_project(&self, name: &str) -> Result<Project> {
         let found = match self.project_by_slug(name)? {
             Some(p) => Some(p),
@@ -374,13 +338,14 @@ impl Store {
             n => n.to_string(),
         };
         let repo = repo.map(str::trim).filter(|r| !r.is_empty()).map(clean_repo).transpose()?;
-        if self.project_by_slug(&slug)?.is_some() {
-            return Err(Error::Invalid(format!("project {slug} already exists")));
-        }
-        if let Some(r) = &repo {
-            self.check_repo_free(r)?;
-        }
-        let created = self.write(|c| {
+        // Checked in the write's transaction, so nobody can take the slug or the repo in between.
+        self.write(|c| {
+            if self.project_by_slug(&slug)?.is_some() {
+                return Err(Error::Invalid(format!("project {slug} already exists")));
+            }
+            if let Some(r) = &repo {
+                self.check_repo_free(r)?;
+            }
             c.execute("INSERT INTO projects (slug, name) VALUES (?1, ?2)", params![slug, name])?;
             if let Some(r) = &repo {
                 c.execute(
@@ -389,36 +354,21 @@ impl Store {
                 )?;
             }
             Ok(())
-        });
-        match created {
-            // Someone created the same project or linked the repo between our checks and the insert.
-            Err(Error::Db(rusqlite::Error::SqliteFailure(e, _)))
-                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Err(Error::Invalid(format!("project {slug} or its repo already exists")))
-            }
-            other => other,
-        }?;
+        })?;
         self.find_project(&slug)
     }
 
-    /// Links another repo to a project. Each repo belongs to one project.
     pub fn link_repo(&self, slug: &str, repo: &str) -> Result<Project> {
         let project = self.find_project(slug)?;
         let repo = clean_repo(repo)?;
         if project.repos.contains(&repo) {
             return Ok(project);
         }
-        self.check_repo_free(&repo)?;
-        match self
-            .conn
-            .execute("INSERT INTO project_repos (repo, project_id) VALUES (?1, ?2)", params![repo, project.id])
-        {
-            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
-                return Err(Error::Invalid(format!("repo {repo} is already linked to another project")));
-            }
-            other => other?,
-        };
+        self.write(|c| {
+            self.check_repo_free(&repo)?;
+            c.execute("INSERT INTO project_repos (repo, project_id) VALUES (?1, ?2)", params![repo, project.id])?;
+            Ok(())
+        })?;
         self.find_project(&project.slug)
     }
 
@@ -441,7 +391,6 @@ impl Store {
         }
     }
 
-    /// Renames a project. Its slug, and so its task keys like api#12, stay.
     pub fn rename_project(&self, slug: &str, name: &str) -> Result<Project> {
         let name = squash(name);
         if name.is_empty() {
@@ -461,15 +410,12 @@ impl Store {
         self.find_project(&project.slug)
     }
 
-    /// Deletes a project with all its tasks and their comments; returns the project as it was.
     pub fn delete_project(&self, slug: &str) -> Result<Project> {
         let project = self.find_project(slug)?;
         // Tasks and comments go with it through ON DELETE CASCADE.
         self.conn.execute("DELETE FROM projects WHERE id = ?1", [project.id])?;
         Ok(project)
     }
-
-    // Tasks
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
             t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human
@@ -491,21 +437,18 @@ impl Store {
         })
     }
 
-    /// Tasks in board order: by column as configured, then by position.
-    /// Tasks whose status is no longer in the config sort last.
     pub fn list_tasks(&self, project_id: Option<i64>, status: Option<&str>) -> Result<Vec<Task>> {
         Ok(self.list_tasks_keeping_done(project_id, status, None)?.0)
     }
 
-    /// `list_tasks`, but of the done column, which only grows, just the newest `keep_done`
-    /// tasks, read from the database without the rest; also says how many were left out.
+    /// The done column only grows, so only its newest `keep_done` tasks are read.
     pub fn list_tasks_keeping_done(
         &self,
         project_id: Option<i64>,
         status: Option<&str>,
         keep_done: Option<usize>,
     ) -> Result<(Vec<Task>, usize)> {
-        let done = self.done_status();
+        let done = DONE;
         // SQLite reads a negative LIMIT as no limit.
         let limit = keep_done.map_or(-1, |n| n as i64);
         let sql = format!(
@@ -535,21 +478,21 @@ impl Store {
         Ok((tasks, hidden))
     }
 
-    /// Tasks of any project whose key, title, description, tags or project hold every
-    /// word of `query`: open ones first, then the most recently changed. An empty query
-    /// gives the most recently changed tasks.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Task>> {
-        let words: Vec<String> = query.split_whitespace().take(10).map(|w| w.to_lowercase()).collect();
+    // LIKE already ignores the case of ASCII letters, as lower() would.
+    pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<Task>> {
+        let words: Vec<&str> = query.split_whitespace().take(10).collect();
         let mut sql = format!("{} WHERE 1", Self::TASK_SELECT);
         for i in 0..words.len() {
             sql.push_str(&format!(
-                " AND lower(p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
-                 LIKE ?{} ESCAPE '\\'",
-                i + 2
+                " AND ((p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
+                 LIKE ?{n} ESCAPE '\\' OR t.id IN (SELECT task_id FROM comments WHERE body LIKE ?{n} ESCAPE '\\'))",
+                n = i + 2
             ));
         }
+        // SQLite reads a negative LIMIT as no limit.
+        let limit = limit.map_or(-1, |n| n as i64);
         sql.push_str(&format!(" ORDER BY t.status = ?1, t.updated_at DESC, t.id DESC LIMIT {limit}"));
-        let mut values: Vec<String> = vec![self.done_status().to_string()];
+        let mut values: Vec<String> = vec![DONE.to_string()];
         for w in &words {
             let escaped = w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
             values.push(format!("%{escaped}%"));
@@ -568,7 +511,6 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("no task #{id}")))
     }
 
-    /// Looks up `api#12`, `#12` or `12`. A project prefix must match the task's project.
     pub fn find_task(&self, key: &str) -> Result<Task> {
         let (slug, id) = parse_task_key(key)?;
         let task = self.get_task(id)?;
@@ -580,7 +522,7 @@ impl Store {
         Ok(task)
     }
 
-    fn check_status(&self, status: &str) -> Result<()> {
+    pub fn check_status(&self, status: &str) -> Result<()> {
         if self.statuses().iter().any(|s| s == status) {
             Ok(())
         } else {
@@ -597,13 +539,11 @@ impl Store {
         Ok(max.map_or(1.0, |m| m.floor() + 1.0))
     }
 
-    /// Adds a task at the bottom of todo; a shorthand for tests.
     #[cfg(test)]
     pub fn create_task(&self, project_id: i64, title: &str, description: &str) -> Result<Task> {
         self.create_task_in(project_id, None, title, description)
     }
 
-    /// Adds a task at the bottom of `status`, todo when left out.
     pub fn create_task_in(
         &self,
         project_id: i64,
@@ -632,36 +572,18 @@ impl Store {
         }
         self.write(|c| {
             let current = self.get_task(id)?;
-            if let Some(title) = title {
-                c.execute(
-                    &format!("UPDATE tasks SET title = ?1, updated_at = {NOW} WHERE id = ?2"),
-                    params![title, id],
-                )?;
-            }
-            if let Some(p) = patch.project_id {
-                c.execute(
-                    &format!("UPDATE tasks SET project_id = ?1, updated_at = {NOW} WHERE id = ?2 AND project_id <> ?1"),
-                    params![p, id],
-                )?;
-            }
-            if let Some(human) = patch.human {
-                c.execute(
-                    &format!("UPDATE tasks SET human = ?1, updated_at = {NOW} WHERE id = ?2 AND human <> ?1"),
-                    params![human, id],
-                )?;
-            }
-            if let Some(t) = &patch.tags {
-                c.execute(
-                    &format!("UPDATE tasks SET tags = ?1, updated_at = {NOW} WHERE id = ?2"),
-                    params![clean_tags(t).join(","), id],
-                )?;
-            }
-            if let Some(d) = &patch.description {
-                c.execute(
-                    &format!("UPDATE tasks SET description = ?1, updated_at = {NOW} WHERE id = ?2"),
-                    params![d.trim(), id],
-                )?;
-            }
+            // Only what the patch changes is written, and only then is the task newer.
+            let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
+            c.execute(
+                &format!(
+                    "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
+                       human = coalesce(?3, human), tags = coalesce(?4, tags),
+                       description = coalesce(?5, description), updated_at = {NOW}
+                     WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
+                       coalesce(?4, tags), coalesce(?5, description)) <> (title, project_id, human, tags, description)"
+                ),
+                params![title, patch.project_id, patch.human, tags, patch.description.as_deref().map(str::trim), id],
+            )?;
             if let Some(s) = &patch.status
                 && *s != current.status
             {
@@ -676,13 +598,11 @@ impl Store {
         self.get_task(id)
     }
 
-    /// Moves a task to `status`, just above task `before`, or to the bottom when `before` is `None`.
     pub fn move_task(&self, id: i64, status: &str, before: Option<i64>) -> Result<Task> {
         self.check_status(status)?;
         self.write(|c| {
             let current = self.get_task(id)?;
             let before = before.filter(|b| *b != id);
-            // The task to go above, with its position, if it's in that column.
             let anchor: Option<(i64, f64)> = match before {
                 Some(b) => c
                     .query_row("SELECT position FROM tasks WHERE id = ?1 AND status = ?2", params![b, status], |r| {
@@ -704,7 +624,7 @@ impl Store {
                     };
                     let mut prev = prev_of(next)?;
                     if prev.is_some_and(|p| next - p < 1e-9) {
-                        // Out of room between two neighbours: renumber the column 1, 2, 3...
+                        // Out of float room between two neighbours.
                         Self::renumber(c, status)?;
                         next = c.query_row("SELECT position FROM tasks WHERE id = ?1", [before], |r| r.get(0))?;
                         prev = prev_of(next)?;
@@ -737,8 +657,6 @@ impl Store {
         Ok(())
     }
 
-    /// Takes the top task of todo that isn't for a person, and moves it to the bottom
-    /// of doing.
     pub fn next_task(&self, project_id: Option<i64>) -> Result<Option<Task>> {
         let [from, to, ..] = STATUSES;
         let id = self.write(|c| {
@@ -762,37 +680,30 @@ impl Store {
         id.map(|id| self.get_task(id)).transpose()
     }
 
-    /// Deletes a task and its comments; returns the task as it was.
     pub fn delete_task(&self, id: i64) -> Result<Task> {
         let task = self.get_task(id)?;
         self.conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
         Ok(task)
     }
 
-    // Comments
-
     pub fn list_comments(&self, task_id: i64) -> Result<Vec<Comment>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, task_id, author, body, created_at FROM comments WHERE task_id = ?1 ORDER BY id",
-        )?;
+        let mut stmt = self.conn.prepare_cached(&format!("{} WHERE task_id = ?1 ORDER BY id", Self::COMMENT_SELECT))?;
         let rows = stmt.query_map([task_id], Self::comment_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    const COMMENT_SELECT: &str = "SELECT id, task_id, author, body, created_at FROM comments";
 
     fn comment_row(r: &Row) -> rusqlite::Result<Comment> {
         Ok(Comment { id: r.get(0)?, task_id: r.get(1)?, author: r.get(2)?, body: r.get(3)?, created_at: r.get(4)? })
     }
 
-    /// Adds a comment, with the images (files already in `images/`) attached to it.
-    /// A comment needs text, an image, or both.
     pub fn add_comment(&self, task_id: i64, author: &str, body: &str, images: &[String]) -> Result<Comment> {
         let body = body.trim();
         if body.is_empty() && images.is_empty() {
             return Err(Error::Invalid("comment body is empty".into()));
         }
-        if let Some(bad) = images.iter().find(|f| !valid_image_file(f)) {
-            return Err(Error::Invalid(format!("{bad:?} is not an image Kanzo saved")));
-        }
+        images.iter().try_for_each(|f| check_image(f))?;
         let author = match author.trim() {
             "" => "me",
             a => a,
@@ -815,59 +726,46 @@ impl Store {
 
     fn get_comment(&self, id: i64) -> Result<Comment> {
         self.conn
-            .query_row(
-                "SELECT id, task_id, author, body, created_at FROM comments WHERE id = ?1",
-                [id],
-                Self::comment_row,
-            )
+            .query_row(&format!("{} WHERE id = ?1", Self::COMMENT_SELECT), [id], Self::comment_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no comment {id}")))
     }
 
-    /// Deletes a comment; returns it as it was.
     pub fn delete_comment(&self, id: i64) -> Result<Comment> {
         let comment = self.get_comment(id)?;
         self.conn.execute("DELETE FROM comments WHERE id = ?1", [id])?;
         Ok(comment)
     }
 
-    // Images
-
-    /// Attaches an image, already saved in `images/`, to a task.
     pub fn add_image(&self, task_id: i64, file: &str) -> Result<Image> {
-        if !valid_image_file(file) {
-            return Err(Error::Invalid(format!("{file:?} is not an image Kanzo saved")));
-        }
+        check_image(file)?;
         self.get_task(task_id)?;
         self.conn.execute("INSERT INTO images (task_id, file) VALUES (?1, ?2)", params![task_id, file])?;
         Ok(Image { id: self.conn.last_insert_rowid(), task_id, comment_id: None, file: file.into() })
     }
 
-    /// The images of a task and of its comments, oldest first.
     pub fn list_images(&self, task_id: i64) -> Result<Vec<Image>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT id, task_id, comment_id, file FROM images WHERE task_id = ?1 ORDER BY id")?;
+        let mut stmt = self.conn.prepare_cached(&format!("{} WHERE task_id = ?1 ORDER BY id", Self::IMAGE_SELECT))?;
         let rows = stmt.query_map([task_id], Self::image_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    const IMAGE_SELECT: &str = "SELECT id, task_id, comment_id, file FROM images";
 
     fn image_row(r: &Row) -> rusqlite::Result<Image> {
         Ok(Image { id: r.get(0)?, task_id: r.get(1)?, comment_id: r.get(2)?, file: r.get(3)? })
     }
 
-    /// Removes an image from its task or comment; returns it as it was.
     pub fn delete_image(&self, id: i64) -> Result<Image> {
         let image = self
             .conn
-            .query_row("SELECT id, task_id, comment_id, file FROM images WHERE id = ?1", [id], Self::image_row)
+            .query_row(&format!("{} WHERE id = ?1", Self::IMAGE_SELECT), [id], Self::image_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no image {id}")))?;
         self.conn.execute("DELETE FROM images WHERE id = ?1", [id])?;
         Ok(image)
     }
 
-    /// The image files attached to one image, comment, task (with its comments) or project.
     pub fn image_files(&self, of: ImagesOf) -> Result<Vec<String>> {
         let (sql, id) = match of {
             ImagesOf::Image(id) => ("SELECT file FROM images WHERE id = ?1", id),
@@ -882,7 +780,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Of `files`, those no task or comment uses any more.
     pub fn unused_images(&self, files: Vec<String>) -> Result<Vec<String>> {
         let mut used = self.conn.prepare_cached("SELECT EXISTS (SELECT 1 FROM images WHERE file = ?1)")?;
         let mut unused = Vec::new();
@@ -895,7 +792,6 @@ impl Store {
     }
 }
 
-/// Whose images `Store::image_files` lists.
 pub enum ImagesOf {
     Image(i64),
     Comment(i64),
@@ -903,16 +799,26 @@ pub enum ImagesOf {
     Project(i64),
 }
 
-/// The name Kanzo gives a saved image: 16 hex digits and its type, like `6fec521a01297ab5.png`.
+pub const IMAGE_TYPES: [(&str, &str); 4] =
+    [("png", "image/png"), ("jpg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp")];
+
+pub fn tasks(n: i64) -> &'static str {
+    if n == 1 { "task" } else { "tasks" }
+}
+
 pub fn valid_image_file(file: &str) -> bool {
     match file.split_once('.') {
         Some((hash, ext)) => {
             hash.len() == 16
                 && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-                && ["png", "jpg", "gif", "webp"].contains(&ext)
+                && IMAGE_TYPES.iter().any(|(e, _)| *e == ext)
         }
         None => false,
     }
+}
+
+fn check_image(file: &str) -> Result<()> {
+    if valid_image_file(file) { Ok(()) } else { Err(Error::Invalid(format!("{file:?} is not an image Kanzo saved"))) }
 }
 
 fn valid_slug(s: &str) -> bool {
@@ -923,7 +829,6 @@ fn valid_slug(s: &str) -> bool {
         && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
-/// `2026-10-25T09:30:00Z` -> `2026-10-25 09:30 UTC`.
 pub fn short_time(ts: &str) -> String {
     match (ts.get(..10), ts.get(11..16)) {
         (Some(d), Some(t)) => format!("{d} {t} UTC"),
@@ -931,7 +836,6 @@ pub fn short_time(ts: &str) -> String {
     }
 }
 
-/// `" Bug, UI,bug ,, needs  review"` -> `["bug", "ui", "needs review"]`.
 fn clean_tags(input: &str) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();
     for tag in input.split(',') {
@@ -947,7 +851,6 @@ fn clean_repo(repo: &str) -> Result<String> {
     repo_from_url(repo).ok_or_else(|| Error::Invalid(format!("repo {:?} should look like owner/repo", repo.trim())))
 }
 
-/// `"  a   b "` -> `"a b"`: words joined by single spaces.
 fn squash(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for word in s.split_whitespace() {
@@ -967,7 +870,6 @@ fn clean_title(title: &str) -> Result<String> {
     Ok(title)
 }
 
-/// Splits `api#12`, `#12` or `12` into an optional project slug and the task id.
 fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
     let key = key.trim();
     let (slug, num) = match key.rsplit_once('#') {
@@ -981,16 +883,11 @@ fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
     Ok((slug, id))
 }
 
-/// Normalises a GitHub repo given as `owner/repo` or as any git remote URL
-/// (`https://github.com/owner/repo.git`, `git@github.com:owner/repo`, ...) to lowercase `owner/repo`.
-/// A browser URL like `https://github.com/owner/repo/tree/main` gives `owner/repo` too.
 pub fn repo_from_url(input: &str) -> Option<String> {
     let s = input.trim();
     let (path, bare) = if let Some((_, rest)) = s.split_once("://") {
-        // scheme://[user@]host[:port]/owner/repo...
         (rest.split_once('/')?.1, false)
     } else if let Some((_, rest)) = s.split_once(':') {
-        // user@host:owner/repo
         (rest, false)
     } else {
         (s, true)
@@ -1059,14 +956,12 @@ mod tests {
                 .unwrap();
         };
         let newer = MIGRATIONS.len() + 1;
-        // A newer Kanzo only added things: this one goes on using the board, untouched.
         set(newer, MIGRATIONS.len());
         s.migrate().unwrap();
         s.create_project("api", "", None).unwrap();
         let v: String =
             s.conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
         assert_eq!(v, newer.to_string());
-        // A change this version can't live with: it says how to update.
         set(newer, newer);
         assert!(s.migrate().unwrap_err().to_string().contains("kanzo update"));
     }
@@ -1104,7 +999,6 @@ mod tests {
         assert_eq!(s.unlink_repo("api", "me/api").unwrap().repos, ["me/api-docs"]);
         assert!(s.project_by_repo("me/api").unwrap().is_none());
         assert!(s.unlink_repo("api", "me/api").is_err());
-        // A deleted project frees its repos.
         s.delete_project("api").unwrap();
         assert_eq!(s.link_repo("web", "me/api-docs").unwrap().repos, ["me/api-docs"]);
     }
@@ -1119,15 +1013,17 @@ mod tests {
         s.update_task(old.id, TaskPatch { status: Some("done".into()), ..Default::default() }).unwrap();
         let other = s.create_task(web.id, "Pricing 100%", "").unwrap();
         s.update_task(other.id, TaskPatch { tags: Some("ui".into()), ..Default::default() }).unwrap();
-        let titles = |q: &str| s.search(q, 10).unwrap().into_iter().map(|t| t.title).collect::<Vec<_>>();
+        let titles = |q: &str| s.search(q, Some(10)).unwrap().into_iter().map(|t| t.title).collect::<Vec<_>>();
         assert_eq!(titles("LOGIN"), ["Fix login", "Login page copy"], "any project, open first, done too");
         assert_eq!(titles("login api"), ["Fix login"], "every word must match, the project too");
         assert_eq!(titles(&format!("web#{}", other.id)), ["Pricing 100%"], "by key");
         assert_eq!(titles("ui"), ["Pricing 100%"], "by tag");
+        s.add_comment(old.id, "you", "Needs the new logo", &[]).unwrap();
+        assert_eq!(titles("logo login"), ["Login page copy"], "by comment, with the task's own words");
         assert_eq!(titles("100%"), ["Pricing 100%"], "% is a plain character");
         assert!(titles("nothing-like-this").is_empty());
-        assert_eq!(s.search("", 10).unwrap().len(), 3, "no words: the latest changes");
-        assert_eq!(s.search("login", 1).unwrap()[0].id, login.id);
+        assert_eq!(s.search("", Some(10)).unwrap().len(), 3, "no words: the latest changes");
+        assert_eq!(s.search("login", Some(1)).unwrap()[0].id, login.id);
     }
 
     #[test]
@@ -1139,7 +1035,6 @@ mod tests {
         let on_task = s.add_image(t.id, &shot).unwrap();
         assert!(s.add_image(t.id, "../../etc/passwd").is_err());
         assert!(s.add_image(t.id + 1, &shot).is_err());
-        // A comment can be only images.
         let c = s.add_comment(t.id, "me", "", &["fedcba9876543210.jpg".into(), shot.clone()]).unwrap();
         assert!(s.add_comment(t.id, "me", "x", &["evil.svg".into()]).is_err());
         let all: Vec<_> = s.list_images(t.id).unwrap().into_iter().map(|i| (i.comment_id, i.file)).collect();
@@ -1149,7 +1044,6 @@ mod tests {
         );
         assert_eq!(s.image_files(ImagesOf::Task(t.id)).unwrap(), [shot.clone(), "fedcba9876543210.jpg".into()]);
         assert_eq!(s.image_files(ImagesOf::Project(p.id)).unwrap().len(), 2);
-        // The same file twice: removing one attachment leaves it in use.
         s.delete_image(on_task.id).unwrap();
         assert!(s.unused_images(vec![shot.clone()]).unwrap().is_empty());
         let files = s.image_files(ImagesOf::Comment(c.id)).unwrap();
@@ -1165,7 +1059,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kanzo.db");
         {
-            // A board at schema version 3, from before projects could have several repos.
             let c = Connection::open(&path).unwrap();
             c.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").unwrap();
             for sql in &MIGRATIONS[..3] {
@@ -1252,7 +1145,6 @@ mod tests {
         };
         assert_eq!((count("projects"), count("tasks"), count("comments")), (1, 1, 1));
         assert!(s.delete_project("api").is_err());
-        // The slug and repo are free again.
         s.create_project("api", "", Some("me/api")).unwrap();
     }
 
@@ -1289,7 +1181,6 @@ mod tests {
         let api = s.create_project("api", "", None).unwrap();
         let web = s.create_project("web", "", None).unwrap();
         s.create_task(web.id, "web first", "").unwrap();
-        // At the top of api's todo, but for a person: agents never get it.
         let human = s.create_task(api.id, "Call the bank", "").unwrap();
         assert!(s.update_task(human.id, TaskPatch { human: Some(true), ..Default::default() }).unwrap().human);
         s.create_task(api.id, "api first", "").unwrap();
@@ -1321,7 +1212,6 @@ mod tests {
         assert!(s.next_task(None).unwrap().is_none());
         assert_eq!(s.get_task(backlog.id).unwrap().status, "backlog");
 
-        // Hiding it would hide its tasks.
         assert!(s.set_backlog(false).is_err());
         s.delete_task(backlog.id).unwrap();
         s.set_backlog(false).unwrap();
@@ -1361,7 +1251,6 @@ mod tests {
             "https://github.com/owner/repo/",
             "https://github.com/owner/repo/tree/main",
             "https://github.com/owner/repo/pull/3",
-            // Gitea, or any other host: only owner/repo counts.
             "https://gitea.example.com/owner/repo.git",
             "git@gitea.example.com:owner/repo.git",
             "ssh://git@gitea.example.com:2222/owner/repo.git",

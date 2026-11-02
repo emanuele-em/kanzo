@@ -58,7 +58,7 @@ kanzo
 
 The board opens at http://localhost:4242. That's all the setup there is: the first run creates `~/kanzo`, and the whole board lives in it.
 
-`n` adds a task, `/` or `⌘K` searches every project, `Tab` moves to the description, `⌘↵` saves and closes, `Esc` cancels. Mark a task Human and agents leave it to you; the person icon shows only those. Paste or drop an image into a task or a comment to attach it. When a new version is out, the sidebar offers it: one click installs it.
+`n` adds a task, `/` or `⌘K` searches every project, `f` filters the board and `↵` keeps the filter, `Tab` moves to the description, `⌘↵` saves and closes, `Esc` cancels. Mark a task Human and agents leave it to you; the person icon shows only those. Paste or drop an image into a task or a comment to attach it. When a new version is out, the sidebar offers it: one click installs it.
 
 ## Connect your agents
 

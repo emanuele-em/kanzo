@@ -1,6 +1,5 @@
-//! Updating Kanzo from the board: find the latest release, run its installer over this
-//! program, then start the new one in place. It uses `curl` and `sh` (PowerShell on
-//! Windows), which every system has, so Kanzo needs no HTTP client of its own.
+//! Uses `curl` and `sh` (PowerShell on Windows), which every system has, so Kanzo
+//! needs no HTTP client of its own.
 
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -12,13 +11,10 @@ use std::time::{Duration, Instant};
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
-/// Where releases are published; `KANZO_RELEASES_URL` points elsewhere, for tests.
 const RELEASES: &str = "https://github.com/emanuele-em/kanzo/releases/latest/download";
 
-/// How long a check for the latest version is reused: the board checks once a day.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// How long a board waits for the service to stop it after an update, on Windows.
 #[cfg(not(unix))]
 const SERVICE_STOP: Duration = Duration::from_secs(10);
 
@@ -33,8 +29,6 @@ fn curl(url: &str) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
-/// The latest released version, checked at most once a day unless `now`; `None` when
-/// it can't be found, like offline.
 pub fn latest(now: bool) -> Option<String> {
     let mut cached = LATEST.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, version)) = &*cached
@@ -52,14 +46,11 @@ pub fn latest(now: bool) -> Option<String> {
     version
 }
 
-/// True when `version` is newer than this program: `0.2.0` > `0.1.9`.
 pub fn newer(version: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> { v.split(['.', '-', '+']).take(3).map(|p| p.parse().unwrap_or(0)).collect() };
     parts(version) > parts(CURRENT)
 }
 
-/// Runs the latest release's installer over this program and returns its path,
-/// ready to restart.
 pub fn install() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| e.to_string())?;
     // The installer writes to <dir>/bin, so it can only replace a program kept in a bin folder.
@@ -92,14 +83,11 @@ pub fn install() -> Result<PathBuf, String> {
     Ok(exe)
 }
 
-/// Where Windows keeps the running program while the installer replaces it. Named for
-/// its version: an agent's `kanzo mcp` can keep an older one running, and locked.
+/// Named for its version: an agent's `kanzo mcp` can keep an older one running, and locked.
 fn old_exe(exe: &Path) -> PathBuf {
     exe.with_extension(format!("exe.{CURRENT}.old"))
 }
 
-/// Deletes the programs that updates replaced `exe` with on Windows (see `old_exe`),
-/// except those still running.
 pub fn remove_old_exes(exe: &Path) {
     let (Some(dir), Some(name)) = (exe.parent(), exe.file_name()) else { return };
     let prefix = format!("{}.", name.to_string_lossy());
@@ -144,7 +132,6 @@ fn run_installer(script: &[u8], dir: &Path) -> Result<Output, String> {
     out
 }
 
-/// The arguments to start again with: the same ones, without opening another browser tab.
 #[cfg(unix)]
 fn restart_args(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
     let mut args: Vec<OsString> = args.collect();
@@ -154,15 +141,13 @@ fn restart_args(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
     args
 }
 
-/// Replaces this process with the program at `exe`: same arguments, same process, so
-/// the port, the data folder and a running service stay. Returns only on failure.
+/// Same process, so the port, the data folder and a running service stay.
 #[cfg(unix)]
 pub fn restart(exe: &Path) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     Command::new(exe).args(restart_args(std::env::args_os().skip(1))).exec()
 }
 
-/// Restarts the service, which stops this process; see `can_restart`.
 #[cfg(not(unix))]
 pub fn restart(_exe: &Path) -> std::io::Error {
     if let Err(e) = crate::service::restart() {
@@ -172,8 +157,7 @@ pub fn restart(_exe: &Path) -> std::io::Error {
     std::io::Error::other("the service did not restart")
 }
 
-/// Whether `restart` can start the new program in this one's place. On Windows only the
-/// service's board can: a running program can't replace itself there.
+/// On Windows only the service's board can restart: a running program can't replace itself there.
 pub fn can_restart(home: &Path) -> bool {
     cfg!(unix) || crate::service::is_task_board(home)
 }
