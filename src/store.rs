@@ -538,13 +538,14 @@ impl Store {
     /// Tasks of any project whose key, title, description, tags, project or comments hold
     /// every word of `query`: open ones first, then the most recently changed. An empty
     /// query gives the most recently changed tasks. The board's filter uses it too.
+    /// LIKE already ignores the case of ASCII letters, as lower() would.
     pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<Task>> {
-        let words: Vec<String> = query.split_whitespace().take(10).map(|w| w.to_lowercase()).collect();
+        let words: Vec<&str> = query.split_whitespace().take(10).collect();
         let mut sql = format!("{} WHERE 1", Self::TASK_SELECT);
         for i in 0..words.len() {
             sql.push_str(&format!(
-                " AND (lower(p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
-                 LIKE ?{n} ESCAPE '\\' OR t.id IN (SELECT task_id FROM comments WHERE lower(body) LIKE ?{n} ESCAPE '\\'))",
+                " AND ((p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
+                 LIKE ?{n} ESCAPE '\\' OR t.id IN (SELECT task_id FROM comments WHERE body LIKE ?{n} ESCAPE '\\'))",
                 n = i + 2
             ));
         }
