@@ -571,8 +571,9 @@ function renderColumns() {
       ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
            filtered ? "Show older" : `Show ${hidden} older`)
       : null;
-    col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all, words)));
+    col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all)));
   }
+  highlight("filter", columns, words);
 }
 
 // The filter box keeps on the board only the tasks search finds (see loadBoard): search
@@ -596,19 +597,29 @@ function wordsOf(query) {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
 
-// The text with each of the words found in it marked, for search and the filter.
-function marked(text, words) {
-  if (!words.length) return text;
-  const re = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "i");
-  return text.split(re).map((part, i) => (i % 2 ? el("mark", {}, part) : part));
+// Paints the words found in the titles, descriptions and tags under `root`, for search and
+// the filter. The CSS Custom Highlight API does it without adding an element per match.
+function highlight(name, root, words) {
+  if (!window.Highlight) return;
+  const re = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi");
+  const ranges = [];
+  for (const node of words.length ? root.querySelectorAll(".title, .desc, .tag") : []) {
+    const text = node.firstChild;
+    for (const m of text?.nodeType === Node.TEXT_NODE ? text.data.matchAll(re) : []) {
+      const range = new Range();
+      range.setStart(text, m.index);
+      range.setEnd(text, m.index + m[0].length);
+      ranges.push(range);
+    }
+  }
+  CSS.highlights.set(name, new Highlight(...ranges));
 }
 
-// A task's description line and tags, with the words found marked: on cards and in search.
-// A tag lays out its parts with a gap, so its text stays one part.
-function summary(t, words) {
+// A task's description line and tags: on cards and in search.
+function summary(t) {
   return [
-    t.description ? el("span", { class: "desc" }, marked(plainText(t.description), words)) : null,
-    t.tags.length ? el("span", { class: "tags" }, t.tags.map((tag) => el("span", { class: "tag" }, el("span", {}, marked(tag, words))))) : null,
+    t.description ? el("span", { class: "desc" }, plainText(t.description)) : null,
+    t.tags.length ? el("span", { class: "tags" }, t.tags.map((tag) => el("span", { class: "tag" }, tag))) : null,
   ];
 }
 
@@ -664,16 +675,16 @@ function plainText(md) {
     .trim();
 }
 
-function card(t, showProject, words = []) {
+function card(t, showProject) {
   const node = el("div", { class: "card" + (state.task === t.id ? " open" : ""), draggable: "true", "data-id": t.id,
                            onclick: () => openTask(t.id) },
     el("div", { class: "head" },
-      el("div", { class: "title" }, marked(t.title, words)),
+      el("div", { class: "title" }, t.title),
       // On "All projects" a dot in the project's colour tells the projects apart.
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
       el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
-    ...summary(t, words));
+    ...summary(t));
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;
     e.dataTransfer.effectAllowed = "move";
@@ -1142,12 +1153,13 @@ async function runSearch() {
       ...results.map((t, i) => el("button", { type: "button", class: "result" + (i === 0 ? " selected" : ""),
                                              onmousemove: () => select(i), onclick: () => pick(t) },
         el("span", { class: "dot", style: `background:${projectColor(t.project)}` }),
-        el("span", { class: "body" }, el("span", { class: "title" }, marked(t.title, wordsOf(q))), ...summary(t, wordsOf(q))),
+        el("span", { class: "body" }, el("span", { class: "title" }, t.title), ...summary(t)),
         el("span", { class: "meta" },
           t.comments ? el("span", { class: "comments", title: `${t.comments} comment${t.comments > 1 ? "s" : ""}` },
                           icon("comment"), String(t.comments)) : null,
           el("span", { class: "mono" }, key(t)), t.status))),
       ...(results.length ? [] : [el("div", { class: "note" }, q ? "No tasks match." : "No tasks yet.")]));
+    highlight("search", $("#search-results"), wordsOf(q));
   } catch (err) { toast(err.message); }
 }
 

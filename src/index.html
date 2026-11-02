@@ -171,7 +171,7 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .chip button:hover { background: color-mix(in srgb, var(--link) 20%, transparent); }
 .chip .icon svg { width: 13px; height: 13px; }
 /* The words search or the filter found. */
-mark { background: color-mix(in srgb, var(--link) 25%, transparent); color: inherit; border-radius: 3px; }
+::highlight(filter), ::highlight(search) { background-color: color-mix(in srgb, var(--link) 25%, transparent); }
 /* Show only human tasks: a small icon, coloured while the filter is on. */
 #human-only { color: var(--muted); }
 #human-only:hover, #human-only:focus-visible { color: var(--text); }
