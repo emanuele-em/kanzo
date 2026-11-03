@@ -70,7 +70,7 @@ claude mcp add kanzo --scope user -- kanzo mcp   # Claude Code
 codex mcp add kanzo -- kanzo mcp                 # Codex
 ```
 
-Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `which kanzo`), or use the running board at `http://localhost:4242/mcp`.
+Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `which kanzo`), or use the running board at `http://localhost:4242/mcp`. Add `?project=api` to that URL and the agent sees only that project.
 
 Then ask: *"take the next task from kanzo and do it."* The agent moves the card to `doing` and comments as it works. It finds the right project from the git remote of the repo it works in; link more repos to a project from its ⋯ menu.
 

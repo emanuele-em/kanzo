@@ -6,12 +6,14 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::extract::Query;
 use axum::http::request::Parts;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Extensions, Implementation,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Extensions, Implementation,
+    InitializeRequestParams, InitializeResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType,
     ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
@@ -30,11 +32,13 @@ use crate::store::{self, Error, Project, Store, Task, TaskPatch, short_time};
 const DONE_LISTED: usize = 20;
 
 macro_rules! instructions {
-    ($whose:literal, $project:literal) => {
+    ($board:literal, $task:literal, $project:literal) => {
         concat!(
-            "The user's kanban board, on ",
-            $whose,
-            " machine, for all their projects. Tasks look like api#12. ",
+            "The user's kanban board, ",
+            $board,
+            ". Tasks look like ",
+            $task,
+            ". ",
             $project,
             " Keep it current unasked: doing when you start a task, comments on what you did, review when you \
              finish or get stuck. Leave done and human tasks to the user."
@@ -42,10 +46,16 @@ macro_rules! instructions {
     };
 }
 
-const INSTRUCTIONS: &str =
-    instructions!("this", "Without `project`, Kanzo uses the project linked to this folder's GitHub repo.");
-const HTTP_INSTRUCTIONS: &str =
-    instructions!("their", "Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects).");
+const INSTRUCTIONS: &str = instructions!(
+    "on this machine, for all their projects",
+    "api#12",
+    "Without `project`, Kanzo uses the project linked to this folder's GitHub repo."
+);
+const HTTP_INSTRUCTIONS: &str = instructions!(
+    "on their machine, for all their projects",
+    "api#12",
+    "Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects)."
+);
 
 const NO_PROJECTS: &str = "There are no projects yet. Create one with create_project.";
 
@@ -53,8 +63,9 @@ pub async fn serve(home: Home) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let repos = git_repos(&cwd);
     let images = home.images();
-    let ctx = Ctx { home, cwd: Some(cwd), repos, images, host: Default::default() };
-    let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
+    let ctx = Ctx { home, cwd: Some(cwd), repos, images, host: Default::default(), only: None };
+    let (tool_router, pinned_router) = Kanzo::tools();
+    let server = Kanzo { ctx: Arc::new(ctx), tool_router, pinned_router };
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -64,12 +75,12 @@ pub async fn serve(home: Home) -> Result<()> {
 /// so rmcp's localhost-only list is turned off.
 pub fn http_service(home: Home, shutdown: CancellationToken) -> StreamableHttpService<Kanzo, LocalSessionManager> {
     let images = home.images();
-    let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new(), images, host: Default::default() });
+    let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new(), images, host: Default::default(), only: None });
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts().with_cancellation_token(shutdown);
-    // rmcp makes a server per session, and for some requests; the tool list is built once.
-    let tool_router = Kanzo::tools();
+    // rmcp makes a server per session, and for some requests; the tool lists are built once.
+    let (tool_router, pinned_router) = Kanzo::tools();
     StreamableHttpService::new(
-        move || Ok(Kanzo { ctx: ctx.clone(), tool_router: tool_router.clone() }),
+        move || Ok(Kanzo { ctx: ctx.clone(), tool_router: tool_router.clone(), pinned_router: pinned_router.clone() }),
         Default::default(),
         config,
     )
@@ -81,17 +92,37 @@ struct Ctx {
     repos: Vec<String>,
     images: PathBuf,
     host: tokio::sync::Mutex<Option<share::Upstream>>,
+    /// The project of `/mcp?project=api`: the connection sees no other.
+    only: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct McpQuery {
+    project: Option<String>,
+}
+
+/// The project an HTTP client pinned with `/mcp?project=api`.
+fn pinned(ext: &Extensions) -> Option<String> {
+    let parts = ext.get::<Parts>()?;
+    let Query(query) = Query::<McpQuery>::try_from_uri(&parts.uri).ok()?;
+    query.project.map(|p| p.trim().to_string()).filter(|p| !p.is_empty())
 }
 
 impl Ctx {
     fn scope(&self, store: &Store, name: Option<&str>) -> store::Result<Option<Project>> {
-        if name.is_some_and(|p| p.trim().eq_ignore_ascii_case("all")) {
+        if self.only.is_none() && name.is_some_and(|p| p.trim().eq_ignore_ascii_case("all")) {
             return Ok(None);
         }
         self.project(store, name).map(Some)
     }
 
     fn project(&self, store: &Store, name: Option<&str>) -> store::Result<Project> {
+        // `call_tool` passes the URL's project as `project`; errors name no other project.
+        if let Some(only) = &self.only {
+            return store
+                .find_project(only)
+                .map_err(|_| Error::NotFound(format!("no project {only:?} (from ?project= in the MCP URL)")));
+        }
         if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
             return store.find_project(name);
         }
@@ -120,6 +151,14 @@ impl Ctx {
             }
         };
         Err(Error::NotFound(msg))
+    }
+
+    fn task(&self, store: &Store, key: &TaskKey) -> store::Result<Task> {
+        let task = key.find(store)?;
+        if self.only.is_some() && self.project(store, None)?.slug != task.project {
+            return Err(Error::NotFound(format!("no task #{}", task.id)));
+        }
+        Ok(task)
     }
 }
 
@@ -152,6 +191,8 @@ fn git_repos(dir: &std::path::Path) -> Vec<String> {
 pub struct Kanzo {
     ctx: Arc<Ctx>,
     tool_router: ToolRouter<Self>,
+    /// For `/mcp?project=api`: no create_project, and no `project` to pass.
+    pinned_router: ToolRouter<Self>,
 }
 
 /// Agents are told it is a string, which keeps the tool schemas short; a bare number is accepted too.
@@ -254,7 +295,7 @@ struct NextTaskArgs {
 impl Kanzo {
     /// Drops rmcp's `$schema` line and the `null` of optional fields: agents read this list in
     /// every session, so each byte counts.
-    fn tools() -> ToolRouter<Self> {
+    fn tools() -> (ToolRouter<Self>, ToolRouter<Self>) {
         let mut router = Self::tool_router();
         for route in router.map.values_mut() {
             let mut schema = (*route.attr.input_schema).clone();
@@ -272,7 +313,23 @@ impl Kanzo {
             }
             route.attr.input_schema = Arc::new(schema);
         }
-        router
+        let mut pinned = router.clone();
+        pinned.remove_route("create_project");
+        for route in pinned.map.values_mut() {
+            let mut schema = (*route.attr.input_schema).clone();
+            if let Some(serde_json::Value::Object(props)) = schema.get_mut("properties") {
+                props.remove("project");
+            }
+            if let Some(serde_json::Value::Array(required)) = schema.get_mut("required") {
+                required.retain(|r| r != "project");
+            }
+            route.attr.input_schema = Arc::new(schema);
+        }
+        (router, pinned)
+    }
+
+    fn router(&self, ext: &Extensions) -> &ToolRouter<Self> {
+        if pinned(ext).is_some() { &self.pinned_router } else { &self.tool_router }
     }
 }
 
@@ -291,10 +348,11 @@ impl Kanzo {
             let value = ext.get::<Parts>()?.headers.get(name)?;
             Some(String::from_utf8_lossy(value.as_bytes()).into_owned())
         };
-        let ctx = match header(share::FOLDER_HEADER) {
-            Some(folder) => Arc::new(Ctx {
+        let ctx = match (header(share::FOLDER_HEADER), pinned(ext)) {
+            (None, None) => self.ctx.clone(),
+            (folder, only) => Arc::new(Ctx {
                 home: self.ctx.home.clone(),
-                cwd: Some(folder.into()),
+                cwd: folder.map(PathBuf::from),
                 repos: header(share::REPOS_HEADER)
                     .unwrap_or_default()
                     .split(',')
@@ -303,8 +361,8 @@ impl Kanzo {
                     .collect(),
                 images: header(share::IMAGES_HEADER).map_or_else(|| self.ctx.images.clone(), PathBuf::from),
                 host: Default::default(),
+                only,
             }),
-            None => self.ctx.clone(),
         };
         let outcome = tokio::task::spawn_blocking(move || {
             let store = ctx.home.store().map_err(|e| e.to_string())?;
@@ -319,7 +377,11 @@ impl Kanzo {
     async fn list_projects(&self, ext: Extensions) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, |ctx, store| {
-                let projects = store.list_projects()?;
+                let mut projects = store.list_projects()?;
+                if ctx.only.is_some() {
+                    let only = ctx.project(store, None)?;
+                    projects.retain(|p| p.id == only.id);
+                }
                 if projects.is_empty() {
                     return Ok(NO_PROJECTS.into());
                 }
@@ -430,7 +492,7 @@ impl Kanzo {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, move |ctx, store| {
-                let task = args.id.find(store)?;
+                let task = ctx.task(store, &args.id)?;
                 task_detail(ctx, store, &task)
             })
             .await)
@@ -458,10 +520,14 @@ impl Kanzo {
     }
 
     #[tool(description = "Change the fields you pass.")]
-    async fn update_task(&self, Parameters(args): Parameters<UpdateTaskArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn update_task(
+        &self,
+        Parameters(args): Parameters<UpdateTaskArgs>,
+        ext: Extensions,
+    ) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |_, store| {
-                let before = args.id.find(store)?;
+            .run_for(&ext, move |ctx, store| {
+                let before = ctx.task(store, &args.id)?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase());
                 let after = store.update_task(
                     before.id,
@@ -489,12 +555,13 @@ impl Kanzo {
         &self,
         Parameters(args): Parameters<AddCommentArgs>,
         peer: Peer<RoleServer>,
+        ext: Extensions,
     ) -> Result<CallToolResult, ErrorData> {
         let client = peer.peer_info().map(|i| i.client_info.name.clone()).filter(|n| !n.is_empty());
         let author = args.author.filter(|a| !a.trim().is_empty()).or(client).unwrap_or_else(|| "agent".into());
         Ok(self
-            .run(move |_, store| {
-                let task = args.id.find(store)?;
+            .run_for(&ext, move |ctx, store| {
+                let task = ctx.task(store, &args.id)?;
                 store.add_comment(task.id, &author, &args.body, &[])?;
                 Ok(format!("Comment added to {} as {author}.", task.key()))
             })
@@ -522,10 +589,14 @@ impl Kanzo {
     }
 
     #[tool(description = "Delete a task with its comments and images. Can't be undone.")]
-    async fn delete_task(&self, Parameters(args): Parameters<TaskArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn delete_task(
+        &self,
+        Parameters(args): Parameters<TaskArgs>,
+        ext: Extensions,
+    ) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |ctx, store| {
-                let task = args.id.find(store)?;
+            .run_for(&ext, move |ctx, store| {
+                let task = ctx.task(store, &args.id)?;
                 ctx.home.deleting_images(store, store::ImagesOf::Task(task.id), || store.delete_task(task.id))?;
                 let comments = match task.comments {
                     0 => String::new(),
@@ -545,7 +616,7 @@ impl ServerHandler for Kanzo {
     /// Checked on every call, so agents already running switch boards when this computer joins or leaves.
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         // Over HTTP, the board itself sends calls on when it joined another.
@@ -561,7 +632,60 @@ impl ServerHandler for Kanzo {
             let outcome = upstream.call(client, &request.name, request.arguments).await;
             return Ok(reply(outcome).into());
         }
-        self.tool_router.call(ToolCallContext::new(self, request, context)).await
+        // Tools of `/mcp?project=api` have no `project`: it comes from the URL.
+        if let Some(only) = pinned(&context.extensions)
+            && self
+                .tool_router
+                .get(&request.name)
+                .is_some_and(|t| t.input_schema["properties"].get("project").is_some())
+        {
+            request.arguments.get_or_insert_default().insert("project".into(), only.into());
+        }
+        self.router(&context.extensions).call(ToolCallContext::new(self, request, context)).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        // As `tool_handler` would, but with the tools of this connection.
+        let supports_cache_hints = context.protocol_version().is_some_and(|v| v >= ProtocolVersion::V_2026_07_28);
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools: self.router(&context.extensions).list_all(),
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(0),
+            cache_scope: supports_cache_hints.then_some(CacheScope::Public),
+        })
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        context.peer.set_peer_info(request.clone());
+        let mut result = self.negotiate_initialize(&request)?;
+        if let Some(only) = pinned(&context.extensions) {
+            // A URL naming no project is a mistake: refuse the session rather than serve nothing.
+            let home = self.ctx.home.clone();
+            let found = tokio::task::spawn_blocking(move || home.store().ok()?.find_project(&only).ok())
+                .await
+                .unwrap_or_default()
+                .ok_or_else(|| ErrorData::invalid_params("no such project: fix ?project= in the MCP URL", None))?;
+            // The stored slug, not the URL's text, goes to the agent.
+            result.instructions = Some(format!(
+                instructions!(
+                    "on their machine, for their project {0}",
+                    "{0}#12",
+                    "This connection sees no other project."
+                ),
+                found.slug
+            ));
+        }
+        Ok(result)
     }
 
     fn get_info(&self) -> ServerConfig {
