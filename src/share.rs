@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use rmcp::model::{ClientConfig, Implementation, ProtocolVersion, RequestMetaObject};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -310,6 +311,16 @@ pub async fn forward(host: &str, req: Request) -> Response {
     res
 }
 
+/// The `initialize` the host opens a session with. Clients on protocol 2026-07-28 never send
+/// one: they name themselves in every request's `_meta` instead.
+pub fn handshake(initialized: Option<&ClientConfig>, meta: &RequestMetaObject) -> ClientConfig {
+    initialized.cloned().unwrap_or_else(|| {
+        let info = meta.client_info().unwrap_or_else(|| Implementation::new("agent", ""));
+        ClientConfig::new(meta.client_capabilities().unwrap_or_default(), info)
+            .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
+    })
+}
+
 pub struct Upstream {
     host: String,
     session: Option<String>,
@@ -330,7 +341,7 @@ impl Upstream {
 
     pub async fn call(
         &mut self,
-        client: Option<Value>,
+        client: ClientConfig,
         name: &str,
         args: Option<Map<String, Value>>,
     ) -> Result<String, String> {
@@ -415,6 +426,8 @@ impl Upstream {
 
 #[cfg(test)]
 mod tests {
+    use rmcp::model::ClientCapabilities;
+
     use super::*;
 
     #[test]
@@ -452,6 +465,30 @@ mod tests {
         assert_eq!(Net::load(&home), Net::Sharing);
         assert!(rt.block_on(change(&home, Change::Join("192.168.0.12".into()))).unwrap_err().contains("share off"));
         assert!(rt.block_on(change(&home, Change::Off)).unwrap_err().contains("config.toml"));
+    }
+
+    #[test]
+    fn handshake_names_a_client_that_never_initialized() {
+        let roots: ClientCapabilities = serde_json::from_value(json!({ "roots": { "listChanged": true } })).unwrap();
+        let mut meta = RequestMetaObject::new();
+        meta.set_protocol_version(ProtocolVersion::V_2026_07_28);
+        meta.set_client_capabilities(roots.clone());
+        let init = handshake(None, &meta);
+        assert_eq!(init.protocol_version, ProtocolVersion::V_2025_11_25);
+        assert_eq!(init.capabilities, roots);
+        assert_eq!(init.client_info.name, "agent");
+
+        meta.set_client_info(Implementation::new("claude-code", "2.1.309"));
+        assert_eq!(handshake(None, &meta).client_info.name, "claude-code");
+    }
+
+    #[test]
+    fn handshake_repeats_what_a_client_initialized_with() {
+        let client = ClientConfig::new(ClientCapabilities::default(), Implementation::new("codex-mcp-client", "1.0"))
+            .with_protocol_version(ProtocolVersion::V_2025_06_18);
+        let mut meta = RequestMetaObject::new();
+        meta.set_client_info(Implementation::new("from-meta", "1"));
+        assert_eq!(handshake(Some(&client), &meta), client);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ErrorData, Peer, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -127,6 +127,14 @@ fn reply(outcome: Result<String, String>) -> CallToolResult {
     match outcome {
         Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
         Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
+    }
+}
+
+/// Clients on protocol 2026-07-28 name themselves on every request; older ones did once, in `initialize`.
+fn caller(context: &RequestContext<RoleServer>) -> Option<Implementation> {
+    match context.meta.protocol_version() {
+        Some(_) => context.meta.client_info(),
+        None => context.peer.peer_info().map(|p| p.client_info.clone()),
     }
 }
 
@@ -488,9 +496,9 @@ impl Kanzo {
     async fn add_comment(
         &self,
         Parameters(args): Parameters<AddCommentArgs>,
-        peer: Peer<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let client = peer.peer_info().map(|i| i.client_info.name.clone()).filter(|n| !n.is_empty());
+        let client = caller(&context).map(|i| i.name).filter(|n| !n.is_empty());
         let author = args.author.filter(|a| !a.trim().is_empty()).or(client).unwrap_or_else(|| "agent".into());
         Ok(self
             .run(move |_, store| {
@@ -556,7 +564,7 @@ impl ServerHandler for Kanzo {
             if upstream.as_ref().is_none_or(|u| u.host() != host) {
                 *upstream = Some(share::Upstream::new(host, cwd, &self.ctx.repos, &self.ctx.images));
             }
-            let client = context.peer.peer_info().and_then(|p| serde_json::to_value(&*p).ok());
+            let client = share::handshake(context.peer.peer_info().as_deref(), &context.meta);
             let upstream = upstream.as_mut().expect("set above");
             let outcome = upstream.call(client, &request.name, request.arguments).await;
             return Ok(reply(outcome).into());
@@ -629,4 +637,142 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     }
     out.truncate(out.trim_end().len());
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+    use tokio::io::{
+        AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
+    };
+
+    use super::*;
+
+    const STATELESS: &str = "2026-07-28";
+
+    /// The client side of a `kanzo mcp` on stdio.
+    struct Agent {
+        lines: Lines<BufReader<ReadHalf<DuplexStream>>>,
+        write: WriteHalf<DuplexStream>,
+    }
+
+    impl Agent {
+        fn start(home: Home, folder: &std::path::Path) -> Self {
+            let images = home.images();
+            let ctx = Ctx { home, cwd: Some(folder.into()), repos: Vec::new(), images, host: Default::default() };
+            let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            tokio::spawn(async move { server.serve(tokio::io::split(theirs)).await.unwrap().waiting().await });
+            let (read, write) = tokio::io::split(ours);
+            Self { lines: BufReader::new(read).lines(), write }
+        }
+
+        /// The reply to `message`, or `None` for a notification.
+        async fn send(&mut self, message: Value) -> Option<Value> {
+            self.write.write_all(format!("{message}\n").as_bytes()).await.unwrap();
+            let id = message.get("id")?;
+            loop {
+                let reply: Value = serde_json::from_str(&self.lines.next_line().await.unwrap().unwrap()).unwrap();
+                if &reply["id"] == id {
+                    return Some(reply);
+                }
+            }
+        }
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(f)
+    }
+
+    fn board() -> (tempfile::TempDir, Home, Task) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::open(dir.path().to_path_buf()).unwrap();
+        let store = home.store().unwrap();
+        let project = store.create_project("api", "", None).unwrap();
+        let task = store.create_task(project.id, "Ship it", "").unwrap();
+        (dir, home, task)
+    }
+
+    /// Serves `home`'s MCP over HTTP on a free port, as a shared board does.
+    async fn shared(home: Home) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new().nest_service("/mcp", http_service(home, CancellationToken::new()));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        port
+    }
+
+    fn authors(home: &Home, task: &Task) -> Vec<String> {
+        home.store().unwrap().list_comments(task.id).unwrap().into_iter().map(|c| c.author).collect()
+    }
+
+    fn comment(task: &Task, meta: Value) -> Value {
+        let args = json!({ "id": task.key(), "body": "done" });
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "add_comment", "arguments": args, "_meta": meta } })
+    }
+
+    fn stateless(client: Option<&str>) -> Value {
+        let mut meta = json!({
+            "io.modelcontextprotocol/protocolVersion": STATELESS,
+            "io.modelcontextprotocol/clientCapabilities": {},
+        });
+        if let Some(name) = client {
+            meta["io.modelcontextprotocol/clientInfo"] = json!({ "name": name, "version": "1" });
+        }
+        meta
+    }
+
+    #[test]
+    fn a_joined_board_takes_calls_from_a_client_that_never_initialized() {
+        block_on(async {
+            let (_host_dir, host, task) = board();
+            let port = shared(host.clone()).await;
+            let guest_dir = tempfile::tempdir().unwrap();
+            std::fs::write(guest_dir.path().join(share::FILE), format!("join 127.0.0.1:{port}\n")).unwrap();
+            let mut agent = Agent::start(Home::open(guest_dir.path().to_path_buf()).unwrap(), guest_dir.path());
+
+            let reply = agent.send(comment(&task, stateless(Some("claude-code")))).await.unwrap();
+            assert_eq!(reply["result"]["isError"], false, "{reply}");
+            assert_eq!(authors(&host, &task), ["claude-code"]);
+        });
+    }
+
+    #[test]
+    fn comments_are_signed_with_the_name_a_client_initialized_with() {
+        block_on(async {
+            let (dir, home, task) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let client = json!({ "name": "codex-mcp-client", "version": "1" });
+            let params = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": client });
+            agent.send(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": params })).await;
+            agent.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await;
+
+            let meta = json!({ "io.modelcontextprotocol/clientInfo": { "name": "from-meta", "version": "1" } });
+            agent.send(comment(&task, meta)).await;
+            assert_eq!(authors(&home, &task), ["codex-mcp-client"]);
+        });
+    }
+
+    #[test]
+    fn a_comment_over_http_from_a_client_that_gives_no_name_is_signed_agent() {
+        block_on(async {
+            let (_dir, home, task) = board();
+            let port = shared(home.clone()).await;
+            let body = comment(&task, stateless(None)).to_string();
+            let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let head = format!(
+                "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+                 Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: {STATELESS}\r\n\
+                 Mcp-Method: tools/call\r\nMcp-Name: add_comment\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            conn.write_all(format!("{head}{body}").as_bytes()).await.unwrap();
+            let mut reply = String::new();
+            conn.read_to_string(&mut reply).await.unwrap();
+
+            assert!(reply.contains("Comment added"), "{reply}");
+            assert_eq!(authors(&home, &task), ["agent"]);
+        });
+    }
 }
