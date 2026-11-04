@@ -949,21 +949,21 @@ fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
 
 pub fn repo_from_url(input: &str) -> Option<String> {
     let s = input.trim();
-    let (path, bare) = if let Some((_, rest)) = s.split_once("://") {
-        (rest.split_once('/')?.1, false)
-    } else if let Some((_, rest)) = s.split_once(':') {
-        (rest, false)
+    let (host, path) = if let Some((_, rest)) = s.split_once("://") {
+        rest.split_once('/')?
     } else {
-        (s, true)
+        s.split_once(':').unwrap_or(("", s))
     };
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    if parts.len() < 2 || (bare && parts.len() != 2) {
-        return None;
+    // A repo is its whole path, as GitLab nests them. A pasted page goes past it: on GitLab
+    // after /-/, and on GitHub after owner/repo.
+    let mut parts: Vec<&str> = path.split("/-/").next()?.split('/').filter(|p| !p.is_empty()).collect();
+    if host.to_ascii_lowercase().ends_with("github.com") {
+        parts.truncate(2);
     }
-    let owner = parts[0];
-    let repo = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
+    let last = parts.last_mut()?;
+    *last = last.strip_suffix(".git").unwrap_or(*last);
     let ok = |p: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    (ok(owner) && ok(repo)).then(|| format!("{owner}/{repo}").to_ascii_lowercase())
+    (parts.len() >= 2 && parts.iter().all(|p| ok(p))).then(|| parts.join("/").to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -1376,8 +1376,27 @@ mod tests {
         ] {
             assert_eq!(repo_from_url(url).as_deref(), Some("owner/repo"), "{url}");
         }
+        for url in [
+            "acme/backend/api",
+            "https://gitlab.com/acme/backend/api",
+            "https://gitlab.com/acme/backend/api.git",
+            "git@gitlab.com:acme/backend/api.git",
+            "ssh://git@gitlab.com/acme/backend/api.git",
+            "https://gitlab.com/acme/backend/api/-/merge_requests/3",
+        ] {
+            assert_eq!(repo_from_url(url).as_deref(), Some("acme/backend/api"), "{url}");
+        }
         assert_eq!(repo_from_url("repo"), None);
-        assert_eq!(repo_from_url("a/b/c"), None);
         assert_eq!(repo_from_url("own er/repo"), None);
+    }
+
+    #[test]
+    fn repos_nested_in_one_group_are_different_repos() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", Some("https://gitlab.com/acme/backend/api.git")).unwrap();
+        let web = s.create_project("web", "", Some("git@gitlab.com:acme/backend/web.git")).unwrap();
+        assert_eq!(api.repos, ["acme/backend/api"]);
+        assert_eq!(s.project_by_repo("acme/backend/web").unwrap().unwrap().id, web.id);
+        assert!(s.create_project("api2", "", Some("acme/backend/api")).is_err(), "still one project per repo");
     }
 }
