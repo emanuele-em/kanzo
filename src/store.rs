@@ -41,8 +41,7 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER images_insert AFTER INSERT ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER images_delete AFTER DELETE ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     "ALTER TABLE tasks ADD COLUMN human INTEGER NOT NULL DEFAULT 0;",
-    // Linked pull requests, like tags: `owner/repo#12`, comma-separated.
-    "ALTER TABLE tasks ADD COLUMN prs TEXT NOT NULL DEFAULT '';",
+    "ALTER TABLE tasks ADD COLUMN url TEXT NOT NULL DEFAULT '';",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -102,8 +101,8 @@ pub struct Task {
     pub title: String,
     pub description: String,
     pub tags: Vec<String>,
-    /// Pull requests, like `owner/repo#12`.
-    pub prs: Vec<String>,
+    /// A link to anything, like the task's pull request; empty when there is none.
+    pub url: String,
     pub human: bool,
     pub status: String,
     pub position: f64,
@@ -142,8 +141,7 @@ pub struct TaskPatch {
     pub status: Option<String>,
     pub project_id: Option<i64>,
     pub tags: Option<String>,
-    /// Comma-separated PRs to link; a leading `-` unlinks one. See `edit_prs`.
-    pub prs: Option<String>,
+    pub url: Option<String>,
     pub human: Option<bool>,
 }
 
@@ -154,7 +152,7 @@ pub const DONE: &str = STATUSES[3];
 pub const BACKLOG: &str = "backlog";
 
 /// What a task shows besides its id, title and status; each can be turned off in Settings.
-const PROPERTIES: [&str; 8] = ["description", "tags", "prs", "human", "created", "updated", "comments", "images"];
+const PROPERTIES: [&str; 8] = ["description", "tags", "url", "human", "created", "updated", "comments", "images"];
 
 pub struct Store {
     conn: Connection,
@@ -457,7 +455,7 @@ impl Store {
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
             t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human,
-            t.prs
+            t.url
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -467,7 +465,7 @@ impl Store {
             title: r.get(2)?,
             description: r.get(3)?,
             tags: r.get::<_, String>(9)?.split(',').filter(|t| !t.is_empty()).map(String::from).collect(),
-            prs: r.get::<_, String>(11)?.split(',').filter(|p| !p.is_empty()).map(String::from).collect(),
+            url: r.get(11)?,
             human: r.get(10)?,
             status: r.get(4)?,
             position: r.get(5)?,
@@ -524,7 +522,7 @@ impl Store {
         let mut sql = format!("{} WHERE 1", Self::TASK_SELECT);
         for i in 0..words.len() {
             sql.push_str(&format!(
-                " AND ((p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags || ' ' || t.prs) \
+                " AND ((p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
                  LIKE ?{n} ESCAPE '\\' OR t.id IN (SELECT task_id FROM comments WHERE body LIKE ?{n} ESCAPE '\\'))",
                 n = i + 2
             ));
@@ -607,6 +605,7 @@ impl Store {
 
     pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
         let title = patch.title.as_deref().map(clean_title).transpose()?;
+        let url = patch.url.as_deref().map(clean_url).transpose()?;
         if let Some(s) = &patch.status {
             self.check_status(s)?;
         }
@@ -614,30 +613,14 @@ impl Store {
             let current = self.get_task(id)?;
             // Only what the patch changes is written, and only then is the task newer.
             let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
-            let prs = match &patch.prs {
-                Some(edit) => {
-                    // `#12` means a PR in the repo of the project the task ends up in.
-                    let repo: Option<String> = c
-                        .query_row(
-                            "SELECT repo FROM project_repos
-                             WHERE project_id = coalesce(?1, (SELECT project_id FROM tasks WHERE id = ?2))
-                             ORDER BY rowid LIMIT 1",
-                            params![patch.project_id, id],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    Some(edit_prs(current.prs.clone(), edit, repo.as_deref())?.join(","))
-                }
-                None => None,
-            };
             c.execute(
                 &format!(
                     "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
                        human = coalesce(?3, human), tags = coalesce(?4, tags),
-                       description = coalesce(?5, description), prs = coalesce(?7, prs), updated_at = {NOW}
+                       description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
                      WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
-                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, prs))
-                       <> (title, project_id, human, tags, description, prs)"
+                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
+                       <> (title, project_id, human, tags, description, url)"
                 ),
                 params![
                     title,
@@ -646,7 +629,7 @@ impl Store {
                     tags,
                     patch.description.as_deref().map(str::trim),
                     id,
-                    prs
+                    url
                 ],
             )?;
             if let Some(s) = &patch.status
@@ -912,55 +895,20 @@ fn clean_tags(input: &str) -> Vec<String> {
     tags
 }
 
-/// Links and unlinks the PRs in `edit`, in order: `#12` or `12` (in `repo`, the project's
-/// first linked repo), `owner/repo#12` or a GitHub pull request URL; `-` before one unlinks it.
-fn edit_prs(mut prs: Vec<String>, edit: &str, repo: Option<&str>) -> Result<Vec<String>> {
-    for item in edit.split(',').map(str::trim).filter(|i| !i.is_empty()) {
-        match item.strip_prefix('-') {
-            Some(gone) => {
-                let gone = pr_ref(gone, repo)?;
-                prs.retain(|p| *p != gone);
-            }
-            None => {
-                let pr = pr_ref(item, repo)?;
-                if !prs.contains(&pr) {
-                    prs.push(pr);
-                }
-            }
-        }
+/// Any site will do, but only http and https: the board makes it a link people click.
+fn clean_url(input: &str) -> Result<String> {
+    let url = input.trim();
+    if url.is_empty() {
+        return Ok(String::new());
     }
-    Ok(prs)
-}
-
-/// The page of a PR stored as `owner/repo#12`.
-pub fn pr_url(pr: &str) -> String {
-    let (repo, number) = pr.rsplit_once('#').unwrap_or((pr, ""));
-    format!("https://github.com/{repo}/pull/{number}")
-}
-
-fn pr_ref(input: &str, repo: Option<&str>) -> Result<String> {
-    let input = input.trim();
-    let invalid = || Error::Invalid(format!("PR {input:?} should look like #12, owner/repo#12 or a GitHub PR URL"));
-    let (owner_repo, number) = if let Some((url, number)) = input.split_once("/pull/") {
-        let host = url.split_once("://").map_or(url, |(_, rest)| rest).split('/').next().unwrap_or_default();
-        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
-            return Err(invalid());
-        }
-        (Some(repo_from_url(url).ok_or_else(invalid)?), number.split(['/', '?', '#']).next().unwrap_or_default())
-    } else {
-        match input.rsplit_once('#') {
-            Some((r, n)) if !r.trim().is_empty() => (Some(repo_from_url(r).ok_or_else(invalid)?), n),
-            Some((_, n)) => (None, n),
-            None => (None, input),
-        }
-    };
-    let number: u32 = number.trim().parse().ok().filter(|n| *n > 0).ok_or_else(invalid)?;
-    match owner_repo.as_deref().or(repo) {
-        Some(r) => Ok(format!("{r}#{number}")),
-        None => Err(Error::Invalid(format!(
-            "PR {input:?} needs its repo, like owner/repo#{number}: the project has no linked repo"
-        ))),
+    let host = url
+        .split_once("://")
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next());
+    if host.is_none_or(str::is_empty) || url.chars().any(char::is_whitespace) {
+        return Err(Error::Invalid(format!("URL {url:?} should start with http:// or https://")));
     }
+    Ok(url.to_string())
 }
 
 fn clean_repo(repo: &str) -> Result<String> {
@@ -1369,27 +1317,36 @@ mod tests {
     }
 
     #[test]
-    fn pull_requests() {
+    fn a_task_links_to_one_url_on_any_site() {
         let (_dir, s) = store();
-        let api = s.create_project("api", "", Some("me/api")).unwrap();
-        let bare = s.create_project("bare", "", None).unwrap();
+        let api = s.create_project("api", "", None).unwrap();
         let t = s.create_task(api.id, "Fix login", "").unwrap();
-        let link = |id, prs: &str| s.update_task(id, TaskPatch { prs: Some(prs.into()), ..Default::default() });
-        let linked = link(t.id, "#12, 13, Other/Lib#4, https://github.com/me/api/pull/15/files, #12").unwrap();
-        assert_eq!(linked.prs, ["me/api#12", "me/api#13", "other/lib#4", "me/api#15"]);
-        assert_eq!(link(t.id, "-#13, -me/api#99").unwrap().prs, ["me/api#12", "other/lib#4", "me/api#15"]);
-        assert_eq!(titles(&s.search("lib#4", None).unwrap()), ["Fix login"], "by PR");
-        for bad in ["#0", "#x", "a/b/c#1", "https://gitlab.com/me/api/pull/1"] {
-            assert!(link(t.id, bad).unwrap_err().to_string().contains("should look like"), "{bad}");
+        assert_eq!(t.url, "");
+        let set = |url: &str| s.update_task(t.id, TaskPatch { url: Some(url.into()), ..Default::default() });
+        for url in [
+            "https://github.com/Me/Api/pull/12",
+            "https://gitlab.example.com/a/b/-/merge_requests/3?x=1#y",
+            "http://intranet",
+        ] {
+            assert_eq!(set(&format!("  {url} ")).unwrap().url, url);
         }
-        assert_eq!(s.get_task(t.id).unwrap().prs.len(), 3, "a bad PR changes nothing");
-        let other = s.create_task(bare.id, "x", "").unwrap();
-        assert!(link(other.id, "#1").unwrap_err().to_string().contains("no linked repo"));
-        assert_eq!(link(other.id, "me/api#1").unwrap().prs, ["me/api#1"]);
-        let moved = s
-            .update_task(other.id, TaskPatch { project_id: Some(api.id), prs: Some("#2".into()), ..Default::default() })
-            .unwrap();
-        assert_eq!(moved.prs, ["me/api#1", "me/api#2"], "resolved in the project it moves to");
+        for bad in [
+            "#12",
+            "owner/repo#12",
+            "github.com/a/b",
+            "javascript:alert(1)",
+            "javascript://x",
+            "https://",
+            "https://a b",
+        ] {
+            assert!(set(bad).unwrap_err().to_string().contains("should start with"), "{bad}");
+        }
+        assert_eq!(s.get_task(t.id).unwrap().url, "http://intranet", "a bad URL changes nothing");
+        assert_eq!(
+            s.update_task(t.id, TaskPatch { title: Some("Fix".into()), ..Default::default() }).unwrap().url,
+            "http://intranet"
+        );
+        assert_eq!(set("").unwrap().url, "");
     }
 
     #[test]

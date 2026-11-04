@@ -34,7 +34,7 @@ struct TaskOut {
     title: String,
     description: String,
     tags: Vec<String>,
-    prs: Vec<String>,
+    url: String,
     human: bool,
     images: Vec<String>,
     status: String,
@@ -51,7 +51,7 @@ impl TaskOut {
             title: task.title,
             description: task.description,
             tags: task.tags,
-            prs: task.prs,
+            url: task.url,
             human: task.human,
             images,
             status: task.status,
@@ -140,9 +140,8 @@ fn markdown(board: &Board) -> String {
                 if !t.tags.is_empty() {
                     let _ = writeln!(md, "Tags: {}.", t.tags.join(", "));
                 }
-                if !t.prs.is_empty() {
-                    let links: Vec<String> = t.prs.iter().map(|p| format!("[{p}]({})", store::pr_url(p))).collect();
-                    let _ = writeln!(md, "PRs: {}.", links.join(", "));
+                if !t.url.is_empty() {
+                    let _ = writeln!(md, "URL: <{}>", t.url);
                 }
                 if !t.images.is_empty() {
                     let _ = writeln!(md, "Images: {}.", t.images.join(", "));

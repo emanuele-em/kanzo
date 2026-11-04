@@ -37,7 +37,7 @@ macro_rules! instructions {
             " machine, for all their projects. Tasks look like api#12. ",
             $project,
             " Keep it current unasked: doing when you start a task, comments on what you did, review when you \
-             finish or get stuck. Leave done and human tasks to the user."
+             finish or get stuck, url for a PR you opened. Leave done and human tasks to the user."
         )
     };
 }
@@ -208,8 +208,6 @@ struct CreateTaskArgs {
     status: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
-    /// PRs, comma-separated: #12, owner/repo#12 or a URL.
-    prs: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -226,8 +224,8 @@ struct UpdateTaskArgs {
     tags: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
-    /// PRs to link, comma-separated: #12, owner/repo#12 or a URL; -#12 unlinks.
-    prs: Option<String>,
+    /// A link; "" clears.
+    url: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -453,9 +451,9 @@ impl Kanzo {
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
                 let description = args.description.as_deref().unwrap_or("");
                 let mut t = store.create_task_in(project.id, status.as_deref(), &args.title, description)?;
-                if args.tags.is_some() || args.human.is_some() || args.prs.is_some() {
-                    let patch = TaskPatch { tags: args.tags, human: args.human, prs: args.prs, ..Default::default() };
-                    t = store.update_task(t.id, patch)?;
+                if args.tags.is_some() || args.human.is_some() {
+                    t = store
+                        .update_task(t.id, TaskPatch { tags: args.tags, human: args.human, ..Default::default() })?;
                 }
                 Ok(format!("Created {} in {}: {}", t.key(), t.status, t.title))
             })
@@ -477,7 +475,7 @@ impl Kanzo {
                         tags: args.tags,
                         project_id: None,
                         human: args.human,
-                        prs: args.prs,
+                        url: args.url,
                     },
                 )?;
                 let moved = if before.status != after.status {
@@ -626,8 +624,8 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     if updated != created && shown(&hidden, "updated") {
         let _ = write!(out, ", updated {updated}");
     }
-    if !t.prs.is_empty() && shown(&hidden, "prs") {
-        let _ = write!(out, "\nPRs: {}", t.prs.join(", "));
+    if !t.url.is_empty() && shown(&hidden, "url") {
+        let _ = write!(out, "\nurl: {}", t.url);
     }
     out.push('\n');
     if !t.description.is_empty() && shown(&hidden, "description") {

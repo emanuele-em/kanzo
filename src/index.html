@@ -233,9 +233,9 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
   background: var(--hover); border-radius: 99px; padding: 1px 9px 1px 8px;
 }
 .tag .dot { width: 6px; height: 6px; }
-.tag.pr { gap: 4px; color: var(--text); text-decoration: none; font-variant-numeric: tabular-nums; }
-.tag.pr:hover { background: var(--active); }
-.tag.pr .icon svg { width: 12px; height: 12px; }
+.tag.url { gap: 4px; color: var(--text); text-decoration: none; }
+.tag.url:hover { background: var(--active); }
+.tag.url .icon svg { width: 12px; height: 12px; }
 .drop-line { height: 2px; background: var(--text); border-radius: 2px; margin: -4px 4px; }
 .empty {
   margin: auto; text-align: center; color: var(--muted); max-width: 380px; padding: 40px 20px;
@@ -275,7 +275,7 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .props span { color: var(--text); }
 .props > [data-prop] { display: contents; }
 [data-hide~="description"] .desc, [data-hide~="description"] [data-prop="description"],
-[data-hide~="tags"] [data-prop="tags"], [data-hide~="prs"] [data-prop="prs"],
+[data-hide~="tags"] [data-prop="tags"], [data-hide~="url"] [data-prop="url"],
 [data-hide~="human"] .human-mark, [data-hide~="human"] [data-prop="human"],
 [data-hide~="created"] [data-prop="created"],
 [data-hide~="updated"] [data-prop="updated"],
@@ -493,7 +493,7 @@ label.setting { cursor: pointer; }
     <div class="props">
       Status <span><select class="field" id="p-status"></select></span>
       <div data-prop="tags">Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span></div>
-      <div data-prop="prs">PRs <span><input class="inline" id="p-prs" placeholder="Link PRs, like #12 or owner/repo#12" autocomplete="off" spellcheck="false"></span></div>
+      <div data-prop="url">URL <span><input class="inline" id="p-url" type="url" placeholder="Add a link, like a pull request" autocomplete="off" spellcheck="false"></span></div>
       <div data-prop="human">Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span></div>
       <div data-prop="created">Created <span id="p-created"></span></div>
       <div data-prop="updated">Updated <span id="p-updated"></span></div>
