@@ -233,6 +233,9 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
   background: var(--hover); border-radius: 99px; padding: 1px 9px 1px 8px;
 }
 .tag .dot { width: 6px; height: 6px; }
+.tag.pr { gap: 4px; color: var(--text); text-decoration: none; font-variant-numeric: tabular-nums; }
+.tag.pr:hover { background: var(--active); }
+.tag.pr .icon svg { width: 12px; height: 12px; }
 .drop-line { height: 2px; background: var(--text); border-radius: 2px; margin: -4px 4px; }
 .empty {
   margin: auto; text-align: center; color: var(--muted); max-width: 380px; padding: 40px 20px;
@@ -481,6 +484,7 @@ label.setting { cursor: pointer; }
     <div class="props">
       Status <span><select class="field" id="p-status"></select></span>
       Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span>
+      PRs <span><input class="inline" id="p-prs" placeholder="Link PRs, like #12 or owner/repo#12" autocomplete="off" spellcheck="false"></span>
       Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span>
       Created <span id="p-created"></span>
       Updated <span id="p-updated"></span>
