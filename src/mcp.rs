@@ -394,13 +394,14 @@ impl Kanzo {
                 let (tasks, hidden) =
                     store.list_tasks_keeping_done(project.as_ref().map(|p| p.id), only, Some(keep))?;
                 let done = store::DONE;
+                let properties = store.hidden_properties()?;
                 let mut out = String::new();
                 let mut people = 0;
                 for t in &tasks {
                     if t.human {
                         people += 1;
                     } else {
-                        task_line(&mut out, t);
+                        task_line(&mut out, t, &properties);
                         out.push('\n');
                     }
                 }
@@ -408,7 +409,7 @@ impl Kanzo {
                     let scope = project.as_ref().map_or("any project", |p| p.slug.as_str());
                     let _ = writeln!(out, "No tasks in {scope}.");
                 }
-                if people > 0 {
+                if people > 0 && shown(&properties, "human") {
                     let _ = writeln!(
                         out,
                         "({people} human {} not shown: for the user, not for agents)",
@@ -531,8 +532,10 @@ impl Kanzo {
         Ok(self
             .run(move |ctx, store| {
                 let task = args.id.find(store)?;
+                let properties = store.hidden_properties()?;
                 ctx.home.deleting_images(store, store::ImagesOf::Task(task.id), || store.delete_task(task.id))?;
-                let comments = match task.comments {
+                let count = if shown(&properties, "comments") { task.comments } else { 0 };
+                let comments = match count {
                     0 => String::new(),
                     1 => " and its comment".into(),
                     n => format!(" and its {n} comments"),
@@ -576,10 +579,16 @@ impl ServerHandler for Kanzo {
     }
 }
 
-fn task_line(out: &mut String, t: &Task) {
+fn shown(hidden: &[String], property: &str) -> bool {
+    !hidden.iter().any(|p| p == property)
+}
+
+fn task_line(out: &mut String, t: &Task, hidden: &[String]) {
     let _ = write!(out, "{} [{}] {}", t.key(), t.status, t.title);
-    write_tags(out, t);
-    match t.comments {
+    if shown(hidden, "tags") {
+        write_tags(out, t);
+    }
+    match if shown(hidden, "comments") { t.comments } else { 0 } {
         0 => {}
         1 => out.push_str(" (1 comment)"),
         n => {
@@ -595,28 +604,33 @@ fn write_tags(out: &mut String, t: &Task) {
 }
 
 fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
-    let comments = store.list_comments(t.id)?;
-    let images = store.list_images(t.id)?;
+    let hidden = store.hidden_properties()?;
+    let comments = if shown(&hidden, "comments") { store.list_comments(t.id)? } else { Vec::new() };
+    let images = if shown(&hidden, "images") { store.list_images(t.id)? } else { Vec::new() };
     let dir = &ctx.images;
     let paths = |comment: Option<i64>| -> Vec<String> {
         images.iter().filter(|i| i.comment_id == comment).map(|i| dir.join(&i.file).display().to_string()).collect()
     };
     let (created, updated) = (short_time(&t.created_at), short_time(&t.updated_at));
     let mut out = format!("{} {}", t.key(), t.title);
-    write_tags(&mut out, t);
+    if shown(&hidden, "tags") {
+        write_tags(&mut out, t);
+    }
     let _ = write!(out, "\nstatus: {}", t.status);
-    if t.human {
+    if t.human && shown(&hidden, "human") {
         out.push_str(", human: for the user, not for agents");
     }
-    let _ = write!(out, ", created {created}");
-    if updated != created {
+    if shown(&hidden, "created") {
+        let _ = write!(out, ", created {created}");
+    }
+    if updated != created && shown(&hidden, "updated") {
         let _ = write!(out, ", updated {updated}");
     }
-    if !t.prs.is_empty() {
+    if !t.prs.is_empty() && shown(&hidden, "prs") {
         let _ = write!(out, "\nPRs: {}", t.prs.join(", "));
     }
     out.push('\n');
-    if !t.description.is_empty() {
+    if !t.description.is_empty() && shown(&hidden, "description") {
         let _ = writeln!(out, "\n{}", t.description);
     }
     let own = paths(None);

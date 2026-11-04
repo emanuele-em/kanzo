@@ -400,6 +400,7 @@ struct BoardQuery {
 struct Board {
     changes: String,
     done_hidden: usize,
+    hidden_properties: Vec<String>,
     projects: Vec<store::Project>,
     statuses: Vec<String>,
     tasks: Vec<store::Task>,
@@ -421,6 +422,7 @@ async fn board(State(home): Shared, Query(q): Query<BoardQuery>) -> Response {
         Ok(Board {
             changes: change_token(h, s)?,
             done_hidden,
+            hidden_properties: s.hidden_properties()?,
             projects: s.list_projects()?,
             statuses: s.statuses().to_vec(),
             tasks,
@@ -510,12 +512,18 @@ async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
 }
 
 #[derive(Deserialize)]
-struct Settings {
-    backlog: bool,
+#[serde(untagged)]
+enum Settings {
+    Backlog { backlog: bool },
+    Property { property: String, visible: bool },
 }
 
 async fn update_settings(State(home): Shared, Json(r): Json<Settings>) -> Response {
-    with_store(home, move |_, s| s.set_backlog(r.backlog)).await
+    with_store(home, move |_, s| match r {
+        Settings::Backlog { backlog } => s.set_backlog(backlog),
+        Settings::Property { property, visible } => s.set_property(&property, visible),
+    })
+    .await
 }
 
 #[derive(Serialize)]

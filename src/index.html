@@ -273,6 +273,14 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .props { display: grid; grid-template-columns: 96px 1fr; gap: 8px 12px; align-items: center; color: var(--muted); }
 .props select { width: auto; padding: 4px 30px 4px 12px; border-radius: 99px; text-transform: capitalize; }
 .props span { color: var(--text); }
+.props > [data-prop] { display: contents; }
+[data-hide~="description"] .desc, [data-hide~="description"] [data-prop="description"],
+[data-hide~="tags"] [data-prop="tags"], [data-hide~="prs"] [data-prop="prs"],
+[data-hide~="human"] .human-mark, [data-hide~="human"] [data-prop="human"],
+[data-hide~="created"] [data-prop="created"],
+[data-hide~="updated"] [data-prop="updated"],
+[data-hide~="comments"] .result .comments, [data-hide~="comments"] [data-prop="comments"],
+[data-hide~="images"] .panel .thumbs { display: none; }
 .section h3 {
   font-size: 13px; color: var(--muted); margin: 0 0 8px; font-weight: 600;
   display: flex; align-items: center; gap: 8px;
@@ -366,6 +374,7 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 #settings-nav .active { background: var(--active); }
 .settings-pane { display: flex; flex-direction: column; gap: 12px; padding: 18px 22px; overflow-y: auto; }
 .settings-pane h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.settings-pane .setting + h3 { margin-top: 12px; }
 .settings-pane p { margin: 0; color: var(--muted); line-height: 1.45; }
 .settings-pane .error { color: var(--danger); white-space: pre-line; font-size: 13px; }
 .settings-pane .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -483,19 +492,19 @@ label.setting { cursor: pointer; }
     <textarea class="inline title-input" id="p-title" rows="1" spellcheck="false" placeholder="Task title"></textarea>
     <div class="props">
       Status <span><select class="field" id="p-status"></select></span>
-      Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span>
-      PRs <span><input class="inline" id="p-prs" placeholder="Link PRs, like #12 or owner/repo#12" autocomplete="off" spellcheck="false"></span>
-      Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span>
-      Created <span id="p-created"></span>
-      Updated <span id="p-updated"></span>
+      <div data-prop="tags">Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span></div>
+      <div data-prop="prs">PRs <span><input class="inline" id="p-prs" placeholder="Link PRs, like #12 or owner/repo#12" autocomplete="off" spellcheck="false"></span></div>
+      <div data-prop="human">Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span></div>
+      <div data-prop="created">Created <span id="p-created"></span></div>
+      <div data-prop="updated">Updated <span id="p-updated"></span></div>
     </div>
-    <div class="section">
+    <div class="section" data-prop="description">
       <h3>Description</h3>
       <textarea class="inline desc-input" id="p-desc" rows="1" placeholder="Add a description (Markdown)"></textarea>
       <div class="inline md desc-view" id="p-desc-view" tabindex="0" role="button" aria-label="Edit description" hidden></div>
       <div class="thumbs" id="p-images"></div>
     </div>
-    <div class="section">
+    <div class="section" data-prop="comments">
       <h3>Comments <span class="count" id="p-comment-count"></span></h3>
       <div id="p-comments"></div>
       <form class="composer" id="p-comment-form">
@@ -525,6 +534,8 @@ label.setting { cursor: pointer; }
           <span class="text">Backlog column<span>A column before todo, for tasks agents leave alone</span></span>
           <span class="switch"><input type="checkbox" id="settings-backlog" aria-label="Backlog column"><span></span></span>
         </label>
+        <h3>Task properties</h3>
+        <p>Turn one off to hide it on the board and leave it out of what agents get. Nothing is deleted.</p>
       </section>
       <form class="settings-pane" data-section="sync" id="sync-form">
         <h3>Sync</h3>

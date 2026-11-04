@@ -153,6 +153,9 @@ pub const DONE: &str = STATUSES[3];
 
 pub const BACKLOG: &str = "backlog";
 
+/// What a task shows besides its id, title and status; each can be turned off in Settings.
+const PROPERTIES: [&str; 8] = ["description", "tags", "prs", "human", "created", "updated", "comments", "images"];
+
 pub struct Store {
     conn: Connection,
     statuses: Vec<String>,
@@ -194,6 +197,35 @@ impl Store {
                 [if on { "1" } else { "0" }],
             )?;
             // Other open boards redraw their columns.
+            c.execute("UPDATE meta SET value = value + 1 WHERE key = 'changes'", [])?;
+            Ok(())
+        })
+    }
+
+    /// The properties turned off in Settings: off the board, and out of what agents get.
+    pub fn hidden_properties(&self) -> Result<Vec<String>> {
+        let hidden: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'hidden_properties'", [], |r| r.get(0))
+            .optional()?;
+        Ok(hidden.unwrap_or_default().split(',').filter(|p| !p.is_empty()).map(String::from).collect())
+    }
+
+    pub fn set_property(&self, property: &str, visible: bool) -> Result<()> {
+        if !PROPERTIES.contains(&property) {
+            return Err(Error::Invalid(format!("unknown property {property:?}")));
+        }
+        self.write(|c| {
+            let mut hidden = self.hidden_properties()?;
+            hidden.retain(|p| p != property);
+            if !visible {
+                hidden.push(property.to_string());
+            }
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES ('hidden_properties', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [hidden.join(",")],
+            )?;
+            // Other open boards redraw their tasks.
             c.execute("UPDATE meta SET value = value + 1 WHERE key = 'changes'", [])?;
             Ok(())
         })
@@ -1299,6 +1331,28 @@ mod tests {
         assert!(s.set_backlog(false).is_err());
         s.delete_task(backlog.id).unwrap();
         s.set_backlog(false).unwrap();
+    }
+
+    #[test]
+    fn hidden_properties_keep_their_data() {
+        let (_dir, s) = store();
+        assert!(s.hidden_properties().unwrap().is_empty());
+        let api = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(api.id, "x", "Why").unwrap();
+        let before = s.changes().unwrap();
+
+        s.set_property("description", false).unwrap();
+        s.set_property("tags", false).unwrap();
+        s.set_property("tags", false).unwrap();
+        assert_eq!(s.hidden_properties().unwrap(), ["description", "tags"]);
+        assert!(s.changes().unwrap() > before, "other open boards redraw");
+        assert_eq!(s.get_task(t.id).unwrap().description, "Why");
+
+        s.set_property("description", true).unwrap();
+        assert_eq!(s.hidden_properties().unwrap(), ["tags"]);
+        for always in ["title", "status", "nope"] {
+            assert!(s.set_property(always, false).is_err(), "{always}");
+        }
     }
 
     #[test]

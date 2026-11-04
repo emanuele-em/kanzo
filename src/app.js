@@ -290,6 +290,7 @@ async function loadBoard() {
                             + (q ? "&q=" + encodeURIComponent(q) : ""));
     if (request !== boardRequest) return;
     state.board = board;
+    document.documentElement.dataset.hide = (board.hidden_properties || []).join(" ");
     state.changes = board.changes;
     $("#offline").hidden = true;
     render();
@@ -477,7 +478,7 @@ function renderHeader() {
   const { projects, tasks } = state.board;
   const header = $("#header");
   $("#new-task").hidden = !projects.length;
-  $("#human-only").hidden = !projects.length;
+  $("#human-only").hidden = !projects.length || isPropertyHidden("human");
   $("#filter").hidden = !projects.length;
   $("#filters").replaceChildren(...(projects.length ? savedFilters() : []).map((f, i) =>
     el("span", { class: "chip" }, f,
@@ -602,7 +603,8 @@ function highlight(name, root, words) {
 }
 
 function summary(t) {
-  const chips = [...t.prs.map((pr) => prBadge(t, pr)), ...t.tags.map((tag) => el("span", { class: "tag" }, tag))];
+  const chips = [...(isPropertyHidden("prs") ? [] : t.prs.map((pr) => prBadge(t, pr))),
+                 ...(isPropertyHidden("tags") ? [] : t.tags.map((tag) => el("span", { class: "tag" }, tag)))];
   return [
     t.description ? el("span", { class: "desc" }, plainText(t.description)) : null,
     chips.length ? el("span", { class: "tags" }, chips) : null,
@@ -618,8 +620,13 @@ function prBadge(t, pr) {
     icon("pr"), own ? `#${number}` : `${repo.split("/")[1]}#${number}`);
 }
 
+// A board on an older version sends no hidden_properties.
+function isPropertyHidden(property) {
+  return (state.board?.hidden_properties || []).includes(property);
+}
+
 function isHumanOnly() {
-  return localStorageGet("kanzo.humanOnly") === "1";
+  return localStorageGet("kanzo.humanOnly") === "1" && !isPropertyHidden("human");
 }
 
 function setHumanOnly(humanOnly) {
@@ -1408,6 +1415,7 @@ $("#settings").addEventListener("click", toggleSettingsMenu);
 function openSettings(section = "board") {
   closeMenu();
   $("#settings-backlog").checked = state.board?.statuses.includes("backlog") ?? false;
+  document.querySelectorAll("[data-property]").forEach((box) => { box.checked = !isPropertyHidden(box.dataset.property); });
   $("#sync-url").value = syncRemote || "";
   $("#sync-create").hidden = !!syncRemote;
   $("#sync-error").hidden = true;
@@ -1437,13 +1445,21 @@ for (const [dialog, close] of [[$("#project-dialog"), hideNewProject], [$("#sear
   dialog.addEventListener("mousedown", (e) => { if (e.target === dialog) close(); });
   dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
 }
-$("#settings-backlog").addEventListener("change", async (e) => {
-  const box = e.target;
+async function saveSetting(box, fields) {
   try {
-    await api("PATCH", "/settings", { backlog: box.checked });
+    await api("PATCH", "/settings", fields);
     loadBoard();
   } catch (err) { box.checked = !box.checked; toast(err.message); }
-});
+}
+$("#settings-backlog").addEventListener("change", (e) => saveSetting(e.target, { backlog: e.target.checked }));
+$('.settings-pane[data-section="board"]').append(...["Description", "Tags", "PRs", "Human", "Created", "Updated", "Comments", "Images"].map((name) => {
+  const property = name.toLowerCase();
+  return el("label", { class: "setting" }, el("span", { class: "text" }, name),
+    el("span", { class: "switch" },
+      el("input", { type: "checkbox", "data-property": property, "aria-label": name,
+                    onchange: (e) => saveSetting(e.target, { property, visible: e.target.checked }) }),
+      el("span")));
+}));
 $("#settings-update").addEventListener("click", checkForUpdates);
 
 async function checkUpdate() {
