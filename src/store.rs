@@ -41,6 +41,7 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER images_insert AFTER INSERT ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER images_delete AFTER DELETE ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     "ALTER TABLE tasks ADD COLUMN human INTEGER NOT NULL DEFAULT 0;",
+    "ALTER TABLE tasks ADD COLUMN url TEXT NOT NULL DEFAULT '';",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -100,6 +101,8 @@ pub struct Task {
     pub title: String,
     pub description: String,
     pub tags: Vec<String>,
+    /// A link to anything, like the task's pull request; empty when there is none.
+    pub url: String,
     pub human: bool,
     pub status: String,
     pub position: f64,
@@ -138,6 +141,7 @@ pub struct TaskPatch {
     pub status: Option<String>,
     pub project_id: Option<i64>,
     pub tags: Option<String>,
+    pub url: Option<String>,
     pub human: Option<bool>,
 }
 
@@ -146,6 +150,9 @@ const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 pub const DONE: &str = STATUSES[3];
 
 pub const BACKLOG: &str = "backlog";
+
+/// What a task shows besides its id, title and status; each can be turned off in Settings.
+const PROPERTIES: [&str; 8] = ["description", "tags", "url", "human", "created", "updated", "comments", "images"];
 
 pub struct Store {
     conn: Connection,
@@ -188,6 +195,35 @@ impl Store {
                 [if on { "1" } else { "0" }],
             )?;
             // Other open boards redraw their columns.
+            c.execute("UPDATE meta SET value = value + 1 WHERE key = 'changes'", [])?;
+            Ok(())
+        })
+    }
+
+    /// The properties turned off in Settings: off the board, and out of what agents get.
+    pub fn hidden_properties(&self) -> Result<Vec<String>> {
+        let hidden: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'hidden_properties'", [], |r| r.get(0))
+            .optional()?;
+        Ok(hidden.unwrap_or_default().split(',').filter(|p| !p.is_empty()).map(String::from).collect())
+    }
+
+    pub fn set_property(&self, property: &str, visible: bool) -> Result<()> {
+        if !PROPERTIES.contains(&property) {
+            return Err(Error::Invalid(format!("unknown property {property:?}")));
+        }
+        self.write(|c| {
+            let mut hidden = self.hidden_properties()?;
+            hidden.retain(|p| p != property);
+            if !visible {
+                hidden.push(property.to_string());
+            }
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES ('hidden_properties', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [hidden.join(",")],
+            )?;
+            // Other open boards redraw their tasks.
             c.execute("UPDATE meta SET value = value + 1 WHERE key = 'changes'", [])?;
             Ok(())
         })
@@ -418,7 +454,8 @@ impl Store {
     }
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
-            t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human
+            t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human,
+            t.url
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -428,6 +465,7 @@ impl Store {
             title: r.get(2)?,
             description: r.get(3)?,
             tags: r.get::<_, String>(9)?.split(',').filter(|t| !t.is_empty()).map(String::from).collect(),
+            url: r.get(11)?,
             human: r.get(10)?,
             status: r.get(4)?,
             position: r.get(5)?,
@@ -567,6 +605,7 @@ impl Store {
 
     pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
         let title = patch.title.as_deref().map(clean_title).transpose()?;
+        let url = patch.url.as_deref().map(clean_url).transpose()?;
         if let Some(s) = &patch.status {
             self.check_status(s)?;
         }
@@ -578,11 +617,20 @@ impl Store {
                 &format!(
                     "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
                        human = coalesce(?3, human), tags = coalesce(?4, tags),
-                       description = coalesce(?5, description), updated_at = {NOW}
+                       description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
                      WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
-                       coalesce(?4, tags), coalesce(?5, description)) <> (title, project_id, human, tags, description)"
+                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
+                       <> (title, project_id, human, tags, description, url)"
                 ),
-                params![title, patch.project_id, patch.human, tags, patch.description.as_deref().map(str::trim), id],
+                params![
+                    title,
+                    patch.project_id,
+                    patch.human,
+                    tags,
+                    patch.description.as_deref().map(str::trim),
+                    id,
+                    url
+                ],
             )?;
             if let Some(s) = &patch.status
                 && *s != current.status
@@ -845,6 +893,22 @@ fn clean_tags(input: &str) -> Vec<String> {
         }
     }
     tags
+}
+
+/// Any site will do, but only http and https: the board makes it a link people click.
+fn clean_url(input: &str) -> Result<String> {
+    let url = input.trim();
+    if url.is_empty() {
+        return Ok(String::new());
+    }
+    let host = url
+        .split_once("://")
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next());
+    if host.is_none_or(str::is_empty) || url.chars().any(char::is_whitespace) {
+        return Err(Error::Invalid(format!("URL {url:?} should start with http:// or https://")));
+    }
+    Ok(url.to_string())
 }
 
 fn clean_repo(repo: &str) -> Result<String> {
@@ -1218,6 +1282,28 @@ mod tests {
     }
 
     #[test]
+    fn hidden_properties_keep_their_data() {
+        let (_dir, s) = store();
+        assert!(s.hidden_properties().unwrap().is_empty());
+        let api = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(api.id, "x", "Why").unwrap();
+        let before = s.changes().unwrap();
+
+        s.set_property("description", false).unwrap();
+        s.set_property("tags", false).unwrap();
+        s.set_property("tags", false).unwrap();
+        assert_eq!(s.hidden_properties().unwrap(), ["description", "tags"]);
+        assert!(s.changes().unwrap() > before, "other open boards redraw");
+        assert_eq!(s.get_task(t.id).unwrap().description, "Why");
+
+        s.set_property("description", true).unwrap();
+        assert_eq!(s.hidden_properties().unwrap(), ["tags"]);
+        for always in ["title", "status", "nope"] {
+            assert!(s.set_property(always, false).is_err(), "{always}");
+        }
+    }
+
+    #[test]
     fn change_counter_moves_on_every_write() {
         let (_dir, s) = store();
         let c0 = s.changes().unwrap();
@@ -1228,6 +1314,39 @@ mod tests {
         s.add_comment(t.id, "me", "hi", &[]).unwrap();
         let c3 = s.changes().unwrap();
         assert!(c0 < c1 && c1 < c2 && c2 < c3);
+    }
+
+    #[test]
+    fn a_task_links_to_one_url_on_any_site() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(api.id, "Fix login", "").unwrap();
+        assert_eq!(t.url, "");
+        let set = |url: &str| s.update_task(t.id, TaskPatch { url: Some(url.into()), ..Default::default() });
+        for url in [
+            "https://github.com/Me/Api/pull/12",
+            "https://gitlab.example.com/a/b/-/merge_requests/3?x=1#y",
+            "http://intranet",
+        ] {
+            assert_eq!(set(&format!("  {url} ")).unwrap().url, url);
+        }
+        for bad in [
+            "#12",
+            "owner/repo#12",
+            "github.com/a/b",
+            "javascript:alert(1)",
+            "javascript://x",
+            "https://",
+            "https://a b",
+        ] {
+            assert!(set(bad).unwrap_err().to_string().contains("should start with"), "{bad}");
+        }
+        assert_eq!(s.get_task(t.id).unwrap().url, "http://intranet", "a bad URL changes nothing");
+        assert_eq!(
+            s.update_task(t.id, TaskPatch { title: Some("Fix".into()), ..Default::default() }).unwrap().url,
+            "http://intranet"
+        );
+        assert_eq!(set("").unwrap().url, "");
     }
 
     #[test]
