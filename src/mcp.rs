@@ -208,6 +208,8 @@ struct CreateTaskArgs {
     status: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// PRs, comma-separated: #12, owner/repo#12 or a URL.
+    prs: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -224,6 +226,8 @@ struct UpdateTaskArgs {
     tags: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// PRs to link, comma-separated: #12, owner/repo#12 or a URL; -#12 unlinks.
+    prs: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -448,9 +452,9 @@ impl Kanzo {
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
                 let description = args.description.as_deref().unwrap_or("");
                 let mut t = store.create_task_in(project.id, status.as_deref(), &args.title, description)?;
-                if args.tags.is_some() || args.human.is_some() {
-                    t = store
-                        .update_task(t.id, TaskPatch { tags: args.tags, human: args.human, ..Default::default() })?;
+                if args.tags.is_some() || args.human.is_some() || args.prs.is_some() {
+                    let patch = TaskPatch { tags: args.tags, human: args.human, prs: args.prs, ..Default::default() };
+                    t = store.update_task(t.id, patch)?;
                 }
                 Ok(format!("Created {} in {}: {}", t.key(), t.status, t.title))
             })
@@ -472,6 +476,7 @@ impl Kanzo {
                         tags: args.tags,
                         project_id: None,
                         human: args.human,
+                        prs: args.prs,
                     },
                 )?;
                 let moved = if before.status != after.status {
@@ -606,6 +611,9 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     let _ = write!(out, ", created {created}");
     if updated != created {
         let _ = write!(out, ", updated {updated}");
+    }
+    if !t.prs.is_empty() {
+        let _ = write!(out, "\nPRs: {}", t.prs.join(", "));
     }
     out.push('\n');
     if !t.description.is_empty() {

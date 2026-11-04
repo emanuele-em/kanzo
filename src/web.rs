@@ -540,6 +540,7 @@ struct Patch {
     project: Option<String>,
     tags: Option<String>,
     human: Option<bool>,
+    prs: Option<String>,
 }
 
 async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Patch>) -> Response {
@@ -554,6 +555,7 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 project_id,
                 tags: p.tags,
                 human: p.human,
+                prs: p.prs,
             },
         )
     })
