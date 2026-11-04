@@ -380,8 +380,8 @@ impl Kanzo {
         Ok(self
             .run_for(&ext, move |ctx, store| {
                 let project = ctx.scope(store, args.project.as_deref())?;
-                let status = args.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
-                let only = match status {
+                let status = args.status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
+                let only = match status.as_deref() {
                     Some("all") | None => None,
                     Some(s) => {
                         store.check_status(s)?;
