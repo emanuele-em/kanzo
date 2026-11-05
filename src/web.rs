@@ -499,14 +499,13 @@ async fn delete_project(State(home): Shared, Path(slug): Path<String>) -> Respon
 struct NewTask {
     project: String,
     title: String,
-    #[serde(default)]
-    description: String,
+    description: Option<String>,
 }
 
 async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
     with_store(home, move |_, s| {
         let project = s.find_project(&t.project)?;
-        s.create_task_in(project.id, None, &t.title, &t.description)
+        s.create_task_in(project.id, &t.title, TaskPatch { description: t.description, ..Default::default() })
     })
     .await
 }
