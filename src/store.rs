@@ -52,6 +52,7 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX task_waits_by_blocker ON task_waits(waits_on_id);
      CREATE TRIGGER task_waits_insert AFTER INSERT ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER task_waits_delete AFTER DELETE ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
+    "ALTER TABLE projects ADD COLUMN position REAL;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -347,7 +348,7 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> Result<Vec<Project>> {
-        let sql = format!("{} ORDER BY p.slug", Self::PROJECT_SELECT);
+        let sql = format!("{} ORDER BY p.position IS NULL, p.position, p.slug", Self::PROJECT_SELECT);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([DONE], Self::project_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -468,6 +469,41 @@ impl Store {
         }
         let project = self.find_project(slug)?;
         self.conn.execute("UPDATE projects SET color = ?1 WHERE id = ?2", params![color, project.id])?;
+        self.find_project(&project.slug)
+    }
+
+    /// Before `before`, or last. A project never moved has no position and comes after those that
+    /// have one, by slug, so only a move that lands among those has to number them all.
+    pub fn move_project(&self, slug: &str, before: Option<&str>) -> Result<Project> {
+        let project = self.find_project(slug)?;
+        let before = before.map(|b| self.find_project(b)).transpose()?;
+        if before.as_ref().is_some_and(|b| b.id == project.id) {
+            return Ok(project);
+        }
+        self.write(|c| {
+            let mut others: Vec<(i64, Option<f64>)> = c
+                .prepare("SELECT id, position FROM projects WHERE id <> ?1 ORDER BY position IS NULL, position, slug")?
+                .query_map([project.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let at = before.and_then(|b| others.iter().position(|o| o.0 == b.id)).unwrap_or(others.len());
+            let position = match (at.checked_sub(1).map(|i| others[i].1), others.get(at).map(|o| o.1)) {
+                (None, Some(Some(next))) => Some(next - 1.0),
+                (None, _) => Some(1.0),
+                (Some(Some(prev)), Some(Some(next))) if next - prev >= 1e-9 => Some((prev + next) / 2.0),
+                (Some(Some(prev)), Some(None) | None) => Some(prev + 1.0),
+                _ => None,
+            };
+            let mut update = c.prepare("UPDATE projects SET position = ?1 WHERE id = ?2")?;
+            if let Some(position) = position {
+                update.execute(params![position, project.id])?;
+            } else {
+                others.insert(at, (project.id, None));
+                for (i, (id, _)) in others.iter().enumerate() {
+                    update.execute(params![(i + 1) as f64, id])?;
+                }
+            }
+            Ok(())
+        })?;
         self.find_project(&project.slug)
     }
 
@@ -1450,6 +1486,45 @@ mod tests {
 
         s.delete_tasks(&[a, 999, b]).unwrap();
         assert_eq!(titles(&s.list_tasks(None, None).unwrap()), ["c"]);
+    }
+
+    #[test]
+    fn projects_keep_the_order_they_are_moved_to() {
+        let (_dir, s) = store();
+        for slug in ["a", "b", "c", "d"] {
+            s.create_project(slug, "", None).unwrap();
+        }
+        let order = || s.list_projects().unwrap().into_iter().map(|p| p.slug).collect::<Vec<_>>().join("");
+        let move_to = |slug, before| s.move_project(slug, before).unwrap();
+        assert_eq!(order(), "abcd", "never moved: by slug");
+
+        move_to("c", Some("a"));
+        assert_eq!(order(), "cabd", "first");
+        let positioned: i64 = s.conn.query_row("SELECT count(position) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(positioned, 1, "only the moved project needed a position");
+
+        move_to("d", Some("b"));
+        assert_eq!(order(), "cadb", "among projects with no position");
+        move_to("c", None);
+        assert_eq!(order(), "adbc", "last");
+        move_to("b", Some("d"));
+        assert_eq!(order(), "abdc", "between two");
+        move_to("b", Some("b"));
+        assert_eq!(order(), "abdc", "onto itself");
+
+        s.create_project("0new", "", None).unwrap();
+        assert_eq!(order(), "abdc0new", "a new project goes last");
+        move_to("0new", Some("b"));
+        assert_eq!(order(), "a0newbdc");
+
+        for _ in 0..80 {
+            // Out of float room between two neighbours: numbers them again.
+            move_to("c", Some("b"));
+            move_to("d", Some("b"));
+        }
+        assert_eq!(order(), "a0newcdb");
+        assert!(s.move_project("a", Some("nope")).is_err());
+        assert!(s.move_project("nope", None).is_err());
     }
 
     #[test]

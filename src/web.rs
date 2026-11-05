@@ -159,6 +159,7 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/projects", post(create_project))
         .route("/api/projects/{slug}", patch(update_project).delete(delete_project))
         .route("/api/projects/{slug}/repos", post(link_repo).delete(unlink_repo))
+        .route("/api/projects/{slug}/move", post(move_project))
         .route("/api/tasks", post(create_task))
         .route("/api/tasks/bulk", post(bulk_tasks))
         .route("/api/tasks/{id}", get(get_task).patch(update_task).delete(delete_task))
@@ -484,6 +485,15 @@ async fn update_project(State(home): Shared, Path(slug): Path<String>, Json(p): 
         project.map_or_else(|| s.find_project(&slug), Ok)
     })
     .await
+}
+
+#[derive(Deserialize)]
+struct ProjectMove {
+    before: Option<String>,
+}
+
+async fn move_project(State(home): Shared, Path(slug): Path<String>, Json(m): Json<ProjectMove>) -> Response {
+    with_store(home, move |_, s| s.move_project(&slug, m.before.as_deref())).await
 }
 
 #[derive(Deserialize)]

@@ -335,17 +335,19 @@ function render() {
 function renderNav() {
   // Redrawing would take the field away from someone renaming a project.
   if (renaming && document.contains(renaming.input)) return;
+  // Nor while dragging a project: it would cancel the drag.
+  if (movingProject) return;
   const { projects } = state.board;
   const open = projects.reduce((n, p) => n + p.open, 0);
   const link = (slug, name, count, glyph) =>
-    el("a", { href: "#" + slug, title: name, class: state.project === slug ? "active" : null,
+    el("a", { href: "#" + slug, title: name, draggable: "false", class: state.project === slug ? "active" : null,
               onclick: (e) => { e.preventDefault(); setProject(slug); } },
       glyph,
       el("span", { class: "name" }, name),
       el("span", { class: "count" }, String(count)));
   const item = (p) => renaming && renaming.slug === p.slug
     ? el("div", { class: "item renaming" }, icon("folder", projectColor(p.slug)), renaming.input)
-    : el("div", { class: "item" + (state.menu === p.slug ? " menu-open" : "") },
+    : el("div", { class: "item" + (state.menu === p.slug ? " menu-open" : ""), draggable: "true", "data-slug": p.slug },
     link(p.slug, p.name, p.open, icon("folder", projectColor(p.slug))),
     el("button", { class: "more", title: "More", "aria-label": `More for ${p.name}`, "aria-haspopup": "menu",
                    onclick: (e) => toggleProjectMenu(p, e.currentTarget) }, icon("more")));
@@ -400,6 +402,36 @@ function toggleProjectMenu(p, button) {
 }
 
 let renaming = null;
+let movingProject = null;
+const projectLine = el("div", { class: "drop-line" });
+const projectAfter = (y) => [...$("#nav").querySelectorAll("[data-slug]")]
+  .find((i) => { const r = i.getBoundingClientRect(); return y < r.top + r.height / 2; }) || null;
+
+$("#nav").addEventListener("dragstart", (e) => {
+  // Or it's text dragged out of the field renaming a project.
+  movingProject = e.target.dataset?.slug;
+  if (!movingProject) return;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", movingProject);
+});
+$("#nav").addEventListener("dragover", (e) => {
+  if (!movingProject) return;
+  e.preventDefault();
+  $("#nav").insertBefore(projectLine, projectAfter(e.clientY));
+});
+$("#nav").addEventListener("dragleave", (e) => { if (!$("#nav").contains(e.relatedTarget)) projectLine.remove(); });
+$("#nav").addEventListener("drop", async (e) => {
+  if (!movingProject) return;
+  e.preventDefault();
+  const before = projectAfter(e.clientY)?.dataset.slug || null;
+  try { await api("POST", `/projects/${encodeURIComponent(movingProject)}/move`, { before }); } catch (err) { toast(err.message); }
+  loadBoard();
+});
+$("#nav").addEventListener("dragend", () => {
+  movingProject = null;
+  projectLine.remove();
+  renderNav();
+});
 
 function startRename(p) {
   closeMenu();
