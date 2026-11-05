@@ -270,7 +270,7 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .empty h1 { color: var(--text); font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
 
 .panel {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(500px, 100vw); background: var(--panel);
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(var(--panel-width, 500px), 100vw); background: var(--panel);
   border-left: 1px solid var(--border); box-shadow: var(--shadow);
   display: flex; flex-direction: column; transform: translateX(100%); transition: transform .18s ease-out;
   z-index: 10;
@@ -287,7 +287,9 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
   font-size: inherit; color: inherit; cursor: pointer; field-sizing: content;
 }
 .panel .project-pick:hover, .panel .project-pick:focus-within { background: var(--active); color: var(--text); }
-.panel .body { overflow-y: auto; padding: 8px 20px 24px; display: flex; flex-direction: column; gap: 20px; flex: 1; }
+.panel-edge { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; cursor: col-resize; }
+.panel-edge:hover { background: var(--active); }
+.panel .body { overflow-y: auto; padding: 8px max(20px, calc(50% - 430px)) 24px; display: flex; flex-direction: column; gap: 20px; flex: 1; }
 /* The body scrolls instead; without this a long task squeezes the title and textareas to nothing. */
 .panel .body > * { flex-shrink: 0; }
 .panel .inline {
@@ -480,7 +482,8 @@ label.setting { cursor: pointer; }
   .nav { flex-direction: row; overflow-x: auto; }
   .nav a { width: auto; }
   .nav .label { display: none; }
-  #new-project-toggle { display: none; }
+  #new-project-toggle, .panel-edge, #p-wide { display: none; }
+  .panel { width: 100vw; }
   .columns { grid-auto-columns: minmax(78vw, 1fr); padding: 0 12px 12px; }
   .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   #settings-nav { flex-direction: row; border-right: 0; border-bottom: 1px solid var(--border); }
@@ -527,11 +530,13 @@ label.setting { cursor: pointer; }
 </div>
 
 <div class="panel" id="panel" aria-hidden="true">
+  <div class="panel-edge" id="p-edge"></div>
   <div class="top">
     <span class="key mono" id="p-key"></span>
     <span id="p-project"></span>
     <span class="spacer"></span>
     <button class="ghost danger" id="p-delete" title="Delete task" aria-label="Delete task"><span class="icon" data-icon="trash"></span></button>
+    <button class="ghost" id="p-wide" title="Full width" aria-label="Full width"><span class="icon" data-icon="expand"></span></button>
     <button class="ghost" id="p-close" title="Close (Esc)" aria-label="Close"><span class="icon" data-icon="close"></span></button>
   </div>
   <div class="body">

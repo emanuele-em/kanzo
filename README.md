@@ -62,6 +62,8 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 
 `n` adds a task, `/` or `⌘K` searches every project, `⌘`-click or a drag on empty board space selects tasks to move, tag or delete together, `f` filters the board and `↵` keeps the filter, `Tab` moves to the description, `⌘↵` saves and closes. `Esc` leaves a description or tags with what you typed saved, and cancels other fields. In Chrome or Edge, **Install app** at the bottom of the sidebar makes the board an app of its own; on macOS `kanzo` then opens it instead of a tab, on the default port. In the app, `⌘1`–`⌘8` pick a project, `⌘9` the last one and `⌘0` all of them.
 
+Drag the left edge of a task's panel to resize it, or expand it to the whole window; double-click the edge to reset it.
+
 Mark a task Human and agents leave it to you; the person icon shows only those. Paste or drop an image into a task or a comment to attach it. Give a task a URL, like its pull request on any site, and click the link on its card to open it; agents set it with `url`. A link to a file in a description or comment, `[name](file:///path)`, opens in your editor. When a new version is out, the sidebar offers it: one click installs it.
 
 ## Connect your agents

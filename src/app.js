@@ -1123,6 +1123,27 @@ panel.addEventListener("click", async (e) => {
   } catch (err) { toast(err.message); }
 });
 
+// "" is the default width. A drag saves and refits only when it ends: browsers send one move a frame.
+function setPanelWidth(width, save) {
+  panel.style.setProperty("--panel-width", width);
+  if (!save) return;
+  localStorageSet("kanzo.panelWidth", width);
+  [$("#p-title"), $("#p-desc"), $("#p-comment")].forEach(fit);
+}
+
+setPanelWidth(localStorageGet("kanzo.panelWidth") || "");
+$("#p-wide").addEventListener("click", () => setPanelWidth(panel.style.getPropertyValue("--panel-width") === "100vw" ? "" : "100vw", true));
+$("#p-edge").addEventListener("dblclick", () => setPanelWidth("", true));
+$("#p-edge").addEventListener("pointerdown", (down) => {
+  const edge = down.target;
+  edge.setPointerCapture(down.pointerId);
+  edge.onpointermove = (e) => setPanelWidth(`${Math.max(360, innerWidth - e.clientX)}px`);
+  edge.onpointerup = () => {
+    edge.onpointermove = edge.onpointerup = null;
+    setPanelWidth(panel.style.getPropertyValue("--panel-width"), true);
+  };
+});
+
 $("#p-close").addEventListener("click", closeTask);
 $("#p-key").addEventListener("click", () => { if (panelTask) copyKey(key(panelTask)); });
 for (const field of [$("#p-title"), $("#p-desc")]) field.addEventListener("input", () => fit(field));
