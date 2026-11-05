@@ -44,7 +44,7 @@ Where things are:
 | `src/store.rs` | All SQL |
 | `src/mcp.rs` | The MCP tools, over stdio and HTTP (`rmcp`, pinned on purpose: it still changes often) |
 | `src/web.rs` | The board's HTTP API, and `/mcp` |
-| `src/index.html`, `src/app.js`, `src/logo.png` | The board UI: plain HTML, CSS and JavaScript, built into the binary |
+| `src/index.html`, `src/app.js`, `src/logo.png`, `src/icon.png` | The board UI: plain HTML, CSS and JavaScript, built into the binary |
 | `src/sync.rs` | `kanzo sync` |
 | `src/share.rs` | `kanzo share`, `join` and `leave`: sharing the board on the network |
 | `src/export.rs` | `kanzo export` |

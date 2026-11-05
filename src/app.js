@@ -79,6 +79,7 @@ const ICONS = {
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   plus: '<path d="M5 12h14M12 5v14"/>',
+  list: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
@@ -514,6 +515,8 @@ function renderHeader() {
   $("#new-task").hidden = !projects.length;
   $("#human-only").hidden = !projects.length || isPropertyHidden("human");
   $("#filter-box").hidden = !projects.length;
+  $("#view").hidden = !projects.length;
+  $("#view").setAttribute("aria-pressed", String(isList()));
   $("#filters").replaceChildren(...(projects.length ? savedFilters() : []).map((f, i) =>
     el("span", { class: "chip" }, el("span", {}, queryNodes(f)),
       el("button", { type: "button", title: `Remove "${f}"`, "aria-label": `Remove the filter ${f}`,
@@ -548,6 +551,9 @@ async function deleteProject(p) {
 function renderColumns() {
   const { statuses, projects, tasks } = state.board;
   const columns = $("#columns");
+  const inList = isList() && projects.length > 0;
+  columns.hidden = inList;
+  $("#list").hidden = $("#list-tools").hidden = !inList;
   if (!projects.length) {
     state.layout = "";
     columns.style.display = "flex";
@@ -586,26 +592,64 @@ function renderColumns() {
   const humanOnly = isHumanOnly();
   const query = filterQuery();
   $("#filter").classList.toggle("on", query.length > 0);
-  for (const status of statuses) {
-    const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
-    const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
-    const last = status === statuses[statuses.length - 1];
-    const hidden = last && !state.allDone ? state.board.done_hidden || 0 : 0;
-    // Filtered, the server's count of older done tasks says nothing about human ones.
-    const filtered = humanOnly || query.length > 0;
-    const count = mine.length + (filtered ? 0 : hidden);
-    col.querySelector("h2 .count").textContent = count ? String(count) : "";
-    const more = hidden
-      ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
-           filtered ? "Show older" : `Show ${hidden} older`)
-      : null;
-    col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all)));
+  // Filtered, the server's count of older done tasks says nothing about human ones.
+  const filtered = humanOnly || query.length > 0;
+  const hiddenDone = state.allDone ? 0 : state.board.done_hidden || 0;
+  const more = hiddenDone
+    ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
+         filtered ? "Show older" : `Show ${hiddenDone} older`)
+    : null;
+  if (inList) {
+    renderList(tasks.filter((t) => !humanOnly || t.human), all, more);
+  } else {
+    for (const status of statuses) {
+      const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
+      const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
+      const last = status === statuses[statuses.length - 1];
+      const count = mine.length + (!last || filtered ? 0 : hiddenDone);
+      col.querySelector("h2 .count").textContent = count ? String(count) : "";
+      col.querySelector(".cards").replaceChildren(...(last && more ? [more] : []), ...mine.map((t) => card(t, all)));
+    }
   }
-  highlight("filter", columns, wordsOf(query));
+  highlight("filter", inList ? $("#list") : columns, wordsOf(query));
   for (const id of [...state.selected]) {
-    if (!columns.querySelector(`.card[data-id="${id}"]`)) state.selected.delete(id);
+    if (!document.querySelector(`.card[data-id="${id}"]`)) state.selected.delete(id);
   }
   showSelection();
+}
+
+function isList() {
+  return localStorageGet("kanzo.view") === "list";
+}
+
+// Only the view on screen is rendered: every refresh would otherwise build both.
+$("#view").addEventListener("click", () => {
+  localStorageSet("kanzo.view", isList() ? "" : "list");
+  state.layout = "";
+  render();
+});
+for (const [select, name] of [[$("#list-sort"), "kanzo.sort"], [$("#list-group"), "kanzo.group"]]) {
+  select.value = localStorageGet(name) || "";
+  select.addEventListener("change", () => { localStorageSet(name, select.value); renderColumns(); });
+}
+
+function renderList(tasks, all, more) {
+  const { statuses, projects } = state.board;
+  const by = $("#list-sort").value, group = $("#list-group").value;
+  const sorted = !by ? tasks : [...tasks].sort((a, b) =>
+    by === "id" ? a.id - b.id : by === "title" ? a.title.localeCompare(b.title) : b[by].localeCompare(a[by]));
+  const groups = new Map((group === "status" ? statuses : group === "project" ? projects.map((p) => p.slug) : []).map((g) => [g, []]));
+  for (const t of sorted) {
+    for (const g of group === "tags" ? (t.tags.length ? t.tags : [""]) : [group ? t[group] : ""]) {
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(t);
+    }
+  }
+  const names = group === "tags" ? [...groups.keys()].sort((a, b) => !a - !b || a.localeCompare(b)) : [...groups.keys()];
+  $("#list").replaceChildren(...names.flatMap((g) => !groups.get(g).length ? [] : [
+    group ? el("h2", { style: group === "status" ? "text-transform:capitalize" : null }, g || "No tag", el("span", { class: "count" }, String(groups.get(g).length))) : null,
+    ...groups.get(g).map((t) => card(t, all, true)),
+  ]).filter(Boolean), ...(more ? [more] : []));
 }
 
 function showSelection() {
@@ -615,7 +659,8 @@ function showSelection() {
 
 function setSelected(id, on) {
   if (on) state.selected.add(id); else state.selected.delete(id);
-  document.querySelector(`[data-id="${id}"]`)?.classList.toggle("selected", on);
+  // Grouped by tag, a task can have several rows.
+  document.querySelectorAll(`.card[data-id="${id}"]`).forEach((n) => n.classList.toggle("selected", on));
 }
 
 function clearSelection() {
@@ -858,16 +903,18 @@ function plainText(md) {
     .trim();
 }
 
-function card(t, showProject) {
-  const node = el("div", { class: "card" + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (state.selected.has(t.id) ? " selected" : ""),
-                           draggable: "true", "data-id": t.id,
+// In the list, a row: no drag to reorder, since a sorted list has no one position to drop into.
+function card(t, showProject, row) {
+  const node = el("div", { class: "card" + (row ? " row" : "") + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (state.selected.has(t.id) ? " selected" : ""),
+                           draggable: row ? null : "true", "data-id": t.id,
                            onclick: (e) => { if (e.metaKey || e.ctrlKey) toggleSelected(t.id); else openTask(t.id); } },
+    row ? statusIcon(t.status) : null,
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
       el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
-    ...summary(t, waitChip(t), urlChip(t)));
+    ...summary(t, waitChip(t), urlChip(t)).slice(row ? 1 : 0));
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;
     e.dataTransfer.effectAllowed = "move";

@@ -141,7 +141,7 @@ header .repo-link {
 }
 header .repo-link:hover, header .repo-link:focus-visible { background: var(--active); color: var(--text); }
 header .repo-link .icon svg { width: 14px; height: 14px; }
-#network, #human-only { width: auto; height: 35px; min-width: 35px; padding: 0 8px; justify-content: center; border-radius: 99px; }
+#network, #human-only, #view { width: auto; height: 35px; min-width: 35px; padding: 0 8px; justify-content: center; border-radius: 99px; }
 #network { gap: 6px; color: var(--muted); font-size: 13px; }
 #network:hover, #network:focus-visible, #network.open { color: var(--text); }
 #network.on { padding: 0 12px 0 10px; background: color-mix(in srgb, #2f9e44 14%, transparent); color: #2f9e44; font-weight: 500; }
@@ -183,10 +183,10 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .chip button:hover { background: color-mix(in srgb, var(--link) 20%, transparent); }
 .chip .icon svg { width: 13px; height: 13px; }
 ::highlight(filter), ::highlight(search) { background-color: color-mix(in srgb, var(--link) 25%, transparent); }
-#human-only { color: var(--muted); }
-#human-only:hover, #human-only:focus-visible { color: var(--text); }
-#human-only[aria-pressed="true"] { background: color-mix(in srgb, var(--link) 14%, transparent); color: var(--link); }
-#human-only[aria-pressed="true"]:hover, #human-only[aria-pressed="true"]:focus-visible {
+#human-only, #view { color: var(--muted); }
+#human-only:hover, #human-only:focus-visible, #view:hover, #view:focus-visible { color: var(--text); }
+#human-only[aria-pressed="true"], #view[aria-pressed="true"] { background: color-mix(in srgb, var(--link) 14%, transparent); color: var(--link); }
+#human-only[aria-pressed="true"]:hover, #human-only[aria-pressed="true"]:focus-visible, #view[aria-pressed="true"]:hover, #view[aria-pressed="true"]:focus-visible {
   background: color-mix(in srgb, var(--link) 22%, transparent);
 }
 .columns {
@@ -221,6 +221,16 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .card:hover { background: var(--card-hover); }
 .card.open { background: var(--active); }
 html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
+.list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px 24px; display: flex; flex-direction: column; gap: 4px; }
+.list > * { flex-shrink: 0; }
+.list h2 { display: flex; gap: 8px; margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.list h2:first-child { margin-top: 0; }
+.list h2 .count { color: var(--faint); font-weight: 400; }
+.card.row { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 7px 12px; border-radius: 10px; cursor: pointer; }
+.row .head { flex: 1; min-width: 0; }
+.row .tags { margin: 0; flex-shrink: 0; max-width: 40%; flex-wrap: nowrap; overflow: hidden; }
+#list-tools { display: flex; gap: 6px; }
+#list-tools select { width: auto; height: 35px; padding: 0 28px 0 12px; border-radius: 99px; font-size: 13px; }
 .card.selected { box-shadow: inset 0 0 0 2px var(--link); }
 .marquee { position: fixed; z-index: 9; pointer-events: none; background: color-mix(in srgb, var(--link) 15%, transparent); }
 .bulk { bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: max-content; max-width: calc(100vw - 16px); }
@@ -482,7 +492,8 @@ label.setting { cursor: pointer; }
   .nav { flex-direction: row; overflow-x: auto; }
   .nav a { width: auto; }
   .nav .label { display: none; }
-  #new-project-toggle, #rail, .panel-edge, #p-wide { display: none; }
+  #new-project-toggle, #rail, .panel-edge, #p-wide, .row .tags { display: none; }
+  .list { padding: 0 12px 12px; }
   .panel { width: 100vw; }
   .columns { grid-auto-columns: minmax(78vw, 1fr); padding: 0 12px 12px; }
   .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
@@ -524,11 +535,17 @@ html:not(.ready) aside { visibility: hidden; }
     <div class="info" id="header"></div>
     <div id="filters"></div>
     <span class="query" id="filter-box" hidden><span class="query-mirror" aria-hidden="true"><span></span></span><input type="search" id="filter" placeholder="Filter board" title="Show only the tasks that match, like tag:bug or -status:done (f)" aria-label="Filter the board" autocomplete="off" spellcheck="false"></span>
+    <span id="list-tools" hidden>
+      <select class="field" id="list-sort" aria-label="Sort by"><option value="">Board order</option><option value="updated_at">Updated</option><option value="created_at">Created</option><option value="title">Title</option><option value="id">ID</option></select>
+      <select class="field" id="list-group" aria-label="Group by"><option value="">No groups</option><option value="status">By status</option><option value="project">By project</option><option value="tags">By tag</option></select>
+    </span>
+    <button class="ghost" id="view" title="Show as a list" aria-label="Show as a list" aria-pressed="false" hidden><span class="icon" data-icon="list"></span></button>
     <button class="ghost" id="human-only" title="Show only human tasks (h)" aria-label="Show only human tasks" aria-pressed="false" hidden><span class="icon" data-icon="human"></span></button>
     <button class="ghost" id="network" aria-haspopup="dialog" aria-controls="network-menu"></button>
     <button class="btn primary" id="new-task" title="New task (n)" hidden><span class="icon" data-icon="plus"></span>New task</button>
   </header>
   <div class="columns" id="columns"></div>
+  <div class="list" id="list" hidden></div>
 </main>
 
 <div class="bulk" id="bulk" hidden>
