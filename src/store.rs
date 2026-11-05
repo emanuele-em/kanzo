@@ -3,6 +3,7 @@
 //! on every request; the rollback journal makes a read touch no extra files at all and
 //! measured about 3x faster per operation.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
@@ -516,8 +517,7 @@ impl Store {
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
             t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human,
-            t.url, (SELECT group_concat(w.waits_on_id, ',' ORDER BY w.waits_on_id) FROM task_waits w
-                JOIN tasks b ON b.id = w.waits_on_id WHERE w.task_id = t.id AND b.status <> 'done')
+            t.url
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -534,11 +534,28 @@ impl Store {
             created_at: r.get(6)?,
             updated_at: r.get(7)?,
             comments: r.get(8)?,
-            waiting_on: r
-                .get::<_, Option<String>>(12)?
-                .map(|ids| ids.split(',').filter_map(|id| id.parse().ok()).collect())
-                .unwrap_or_default(),
+            waiting_on: Vec::new(),
         })
+    }
+
+    /// One query for all of them, not a subquery per task: on a board of 3,000 tasks that took
+    /// /api/board from 5.3 ms to 7.3 ms even with nothing waiting. Now tasks pay only for actual links.
+    fn add_waiting(&self, tasks: &mut [Task]) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT w.task_id, w.waits_on_id FROM task_waits w JOIN tasks b ON b.id = w.waits_on_id
+             WHERE b.status <> 'done' ORDER BY w.waits_on_id",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut waiting: HashMap<i64, Vec<i64>> = HashMap::new();
+        while let Some(r) = rows.next()? {
+            waiting.entry(r.get(0)?).or_default().push(r.get(1)?);
+        }
+        if !waiting.is_empty() {
+            for t in tasks {
+                t.waiting_on = waiting.remove(&t.id).unwrap_or_default();
+            }
+        }
+        Ok(())
     }
 
     pub fn list_tasks(&self, project_id: Option<i64>, status: Option<&str>) -> Result<Vec<Task>> {
@@ -566,6 +583,7 @@ impl Store {
         let mut tasks: Vec<Task> = stmt
             .query_map(params![project_id, status, done, limit], Self::task_row)?
             .collect::<rusqlite::Result<_>>()?;
+        self.add_waiting(&mut tasks)?;
         let column = |t: &Task| self.statuses().iter().position(|s| *s == t.status).unwrap_or(usize::MAX);
         tasks.sort_by_key(column);
         let hidden = match keep_done {
@@ -615,16 +633,21 @@ impl Store {
         values.extend(filter.values);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), Self::task_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut tasks: Vec<Task> = rows.collect::<rusqlite::Result<_>>()?;
+        self.add_waiting(&mut tasks)?;
+        Ok(tasks)
     }
 
     pub fn get_task(&self, id: i64) -> Result<Task> {
         let sql = format!("{} WHERE t.id = ?1", Self::TASK_SELECT);
-        self.conn
+        let mut task = self
+            .conn
             .prepare_cached(&sql)?
             .query_row([id], Self::task_row)
             .optional()?
-            .ok_or_else(|| Error::NotFound(format!("no task #{id}")))
+            .ok_or_else(|| Error::NotFound(format!("no task #{id}")))?;
+        task.waiting_on = self.task_links(id, false)?.into_iter().filter(|t| t.status != DONE).map(|t| t.id).collect();
+        Ok(task)
     }
 
     pub fn find_task(&self, key: &str) -> Result<Task> {
@@ -1444,6 +1467,9 @@ mod tests {
         let task = s.create_task(p.id, "task", "").unwrap();
         s.update_task(task.id, waits(&blocker.id.to_string())).unwrap();
         assert_eq!(titles(&s.search("is:waiting", None).unwrap()), ["task"]);
+        assert_eq!(s.search("is:waiting", None).unwrap()[0].waiting_on, [blocker.id]);
+        assert_eq!(s.list_tasks(None, None).unwrap()[1].waiting_on, [blocker.id]);
+        assert!(s.list_tasks(None, None).unwrap()[0].waiting_on.is_empty());
         assert_eq!(titles(&s.search("-is:waiting", None).unwrap()), ["blocker"]);
         let json = serde_json::to_value(s.get_task(blocker.id).unwrap()).unwrap();
         assert!(json.get("waiting_on").is_none(), "{json}");
