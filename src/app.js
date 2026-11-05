@@ -1364,7 +1364,7 @@ function renderNetwork() {
   button.replaceChildren(icon("share"), ...(shared ? [tr("Shared")] : []), ...(shared && n != null ? [el("span", { class: "count" }, String(n))] : []));
   button.classList.toggle("on", shared);
   button.title = hosted ? tr("Shared by {0}{1}", host, computers)
-    : shared ? tr("Shared on your network{1}", computers) : tr("Share this board, or join another");
+    : shared ? tr("Shared on your network{0}", computers) : tr("Share this board, or join another");
   if (state.menu === "network") renderNetworkMenu();
 }
 

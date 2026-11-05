@@ -130,7 +130,7 @@ const ZH_CN = {
   "Shared": "已共享",
   ": {0} connected": "：{0}已连接",
   "Shared by {0}{1}": "由 {0} 共享{1}",
-  "Shared on your network{1}": "已在你的网络中共享{1}",
+  "Shared on your network{0}": "已在你的网络中共享{0}",
   "Share this board, or join another": "共享此看板，或加入其他看板",
   "Only the computer with the board can change this": "只有存放看板的电脑能更改此项",
   "Other computers join it at {0}": "其他电脑可通过{0}加入",
