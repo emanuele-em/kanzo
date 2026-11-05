@@ -479,9 +479,9 @@ function renderHeader() {
   const header = $("#header");
   $("#new-task").hidden = !projects.length;
   $("#human-only").hidden = !projects.length || isPropertyHidden("human");
-  $("#filter").hidden = !projects.length;
+  $("#filter-box").hidden = !projects.length;
   $("#filters").replaceChildren(...(projects.length ? savedFilters() : []).map((f, i) =>
-    el("span", { class: "chip" }, f,
+    el("span", { class: "chip" }, el("span", {}, queryNodes(f)),
       el("button", { type: "button", title: `Remove "${f}"`, "aria-label": `Remove the filter ${f}`,
                      onclick: () => setFilters(savedFilters().filter((_, j) => j !== i)) }, icon("close")))));
   $("#human-only").setAttribute("aria-pressed", String(isHumanOnly()));
@@ -582,19 +582,63 @@ function filterQuery() {
   return [...savedFilters(), $("#filter").value].join(" ").trim();
 }
 
-const QUALIFIERS = ["tag", "status", "project", "title", "description", "url", "comment", "id", "comments", "images",
-                    "created", "updated", "is", "has", "no"];
+const anyText = () => true;
+const isNumber = (v) => /^[+-]?\d+$/.test(v);
+const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v);
+const inRange = (side) => (v) => {
+  const ends = v.split("..");
+  return ends.length > 1 ? ends.length === 2 && ends.every(side) : side(v.replace(/^(>=|<=|>|<)/, ""));
+};
+const isField = (v) => ["description", "tags", "url", "comments", "images"].includes(v);
+// What the server takes as each qualifier's value: anything else makes it a plain word.
+const QUALIFIERS = new Map([
+  ["tag", anyText], ["status", anyText], ["project", anyText], ["title", anyText], ["description", anyText],
+  ["url", anyText], ["comment", anyText], ["id", inRange(isNumber)], ["comments", inRange(isNumber)],
+  ["images", inRange(isNumber)], ["created", inRange(isDate)], ["updated", inRange(isDate)],
+  ["is", (v) => v === "human"], ["has", isField], ["no", isField],
+]);
 
-// The text to highlight: words, phrases, and what tag:, title: and description: look for.
+// A part of a query, read as the server reads it. Null for a word.
+function qualifierIn(part) {
+  const match = !part.startsWith('"') && part.replace(/"/g, "").toLowerCase().match(/^(-?)([^:]+):(.*)$/);
+  const valid = match && QUALIFIERS.get(match[2]);
+  if (!valid) return null;
+  const [, negated, name, value] = match;
+  // With no value yet it's still being typed; with a wrong one, it's a word.
+  return !value || valid(value) ? { negated: negated === "-", name, value } : null;
+}
+
+// The text to highlight on cards: words, phrases, and what tag:, title: and description: look for.
 function wordsOf(query) {
   const words = [];
-  for (const part of query.toLowerCase().match(/(?:[^\s"]+|"[^"]*"?)+/g) || []) {
-    const text = part.replace(/"/g, "");
-    const qualifier = part.startsWith('"') ? null : text.match(/^(-?)([^:]+):(.*)$/);
-    if (!qualifier || !QUALIFIERS.includes(qualifier[2])) words.push(text);
-    else if (!qualifier[1] && ["tag", "title", "description"].includes(qualifier[2])) words.push(qualifier[3]);
+  for (const part of query.match(/(?:[^\s"]+|"[^"]*"?)+/g) || []) {
+    const qualifier = qualifierIn(part);
+    if (!qualifier) words.push(part.replace(/"/g, "").toLowerCase());
+    else if (!qualifier.negated && ["tag", "title", "description"].includes(qualifier.name)) words.push(qualifier.value);
   }
   return words.filter(Boolean);
+}
+
+// A query as text, with its qualifiers marked. Keeps every character, for .query-mirror to line up.
+function queryNodes(query) {
+  return (query.match(/\s+|(?:[^\s"]+|"[^"]*"?)+/g) || []).map((part) => {
+    const qualifier = qualifierIn(part);
+    if (!qualifier) return part;
+    const key = part.indexOf(":") + 1;
+    return el("span", { class: qualifier.value ? "qualifier complete" : "qualifier" },
+      el("span", { class: "qualifier-key" }, part.slice(0, key)), part.slice(key));
+  });
+}
+
+// An input can't color part of its text, so a copy behind it shows it, and the input keeps the caret.
+function paintQuery(input) {
+  const mirror = input.previousElementSibling;
+  mirror.firstElementChild.replaceChildren(...queryNodes(input.value));
+  mirror.scrollLeft = input.scrollLeft;
+}
+
+for (const input of document.querySelectorAll(".query input")) {
+  for (const type of ["input", "scroll", "keyup", "click"]) input.addEventListener(type, () => paintQuery(input));
 }
 
 function highlight(name, root, words) {
@@ -789,8 +833,8 @@ let filterTimer;
 $("#filter").addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(loadBoard, 120); });
 $("#filter").addEventListener("keydown", (e) => {
   const box = e.target, text = box.value.trim();
-  if (e.key === "Escape") { e.stopPropagation(); box.value = ""; loadBoard(); box.blur(); }
-  else if (e.key === "Enter" && text) { box.value = ""; setFilters([...savedFilters(), text]); }
+  if (e.key === "Escape") { e.stopPropagation(); box.value = ""; paintQuery(box); loadBoard(); box.blur(); }
+  else if (e.key === "Enter" && text) { box.value = ""; paintQuery(box); setFilters([...savedFilters(), text]); }
   else if (e.key === "Backspace" && !box.value && savedFilters().length) setFilters(savedFilters().slice(0, -1));
 });
 $("#new-project-toggle").addEventListener("click", showNewProject);
@@ -1111,6 +1155,7 @@ function openSearch() {
   closeMenu();
   $("#search-dialog").hidden = false;
   $("#search").value = "";
+  paintQuery($("#search"));
   $("#search").focus();
   runSearch();
 }
@@ -1173,7 +1218,7 @@ document.addEventListener("keydown", (e) => {
     openSearch();
   }
   if (e.key === "n" && plain && !$("#new-task").hidden) { e.preventDefault(); newTask(); }
-  if (e.key === "f" && plain && !$("#filter").hidden) { e.preventDefault(); $("#filter").focus(); }
+  if (e.key === "f" && plain && !$("#filter-box").hidden) { e.preventDefault(); $("#filter").focus(); }
   if (e.key === "h" && plain && !$("#human-only").hidden) { e.preventDefault(); setHumanOnly(!isHumanOnly()); }
 });
 
