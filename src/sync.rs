@@ -131,8 +131,10 @@ pub fn sync(home: &Home, keep: Option<Keep>, prompt: bool) -> Result<String> {
     let note = {
         let lock = home.lock_exclusive()?;
         Store::open(&home.db_path(), None)?.settle()?;
-        // What this machine does on the network stays here.
-        git(&["add", "--all", "--", ".", &format!(":(exclude){}", crate::share::FILE)])?;
+        // This machine's settings, and what it does on the network, stay here. A config.toml already
+        // in the board stays too: taking it out would delete the file on machines with an older Kanzo
+        // when they pull, and a Pi would forget its listen.
+        git(&["add", "--all", "--", ".", ":(exclude)config.toml", &format!(":(exclude){}", crate::share::FILE)])?;
         if lock.is_some() { String::new() } else { format!("\n{NO_LOCKS}") }
     };
     if !git_ok(&["diff", "--cached", "--quiet"]) {
@@ -232,7 +234,19 @@ fn replace<T>(home: &Home, pull: impl FnOnce() -> Result<T>) -> Result<()> {
     // Rolls back a write a crashed process left in kanzo.db-journal, which SQLite
     // would otherwise apply to the pulled file.
     Store::open(&home.db_path(), None)?.settle()?;
-    pull()?;
+    // A board an older Kanzo synced has a config.toml in it, which a pull could change, delete, or
+    // stop at. This machine's own steps aside, so git never sees it, and comes back as it was.
+    let config = home.dir.join("config.toml");
+    let in_board = |at: &str| git_ok(&home.dir, false, &["cat-file", "-e", &format!("{at}:config.toml")]);
+    let mine = if in_board("HEAD") || in_board("@{upstream}") { std::fs::read(&config).ok() } else { None };
+    if mine.is_some() {
+        std::fs::remove_file(&config).context("cannot move config.toml aside")?;
+    }
+    let pulled = pull();
+    if let Some(mine) = mine {
+        crate::home::write_whole(&config, &mine).context("cannot put config.toml back")?;
+    }
+    pulled?;
     Store::open(&home.db_path(), None)?.migrate()?;
     Ok(())
 }
@@ -311,6 +325,92 @@ mod tests {
             db.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
         assert_eq!(version, "999");
         assert!(format!("{:#}", Home::open(b.dir.clone()).unwrap_err()).contains(newer));
+    }
+
+    #[test]
+    fn config_toml_stays_on_each_machine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (pi, laptop) = two_machines(tmp.path());
+        std::fs::write(pi.dir.join("config.toml"), "listen = \"0.0.0.0\"\n").unwrap();
+        pi.store().unwrap().create_project("pi", "", None).unwrap();
+        sync(&pi, None, false).unwrap();
+        sync(&laptop, None, false).unwrap();
+
+        assert_eq!(laptop.store().unwrap().list_projects().unwrap()[0].slug, "pi");
+        assert!(Home::open(laptop.dir.clone()).unwrap().config.listen.is_loopback());
+        assert!(!git(&pi.dir, false, &["ls-files"]).unwrap().contains("config.toml"));
+    }
+
+    /// What sync did up to 0.3.1: commit everything but network, config.toml too, then pull or push.
+    fn older_sync(dir: &Path) {
+        let git = |args: &[&str]| git(dir, false, args).unwrap();
+        git(&["fetch", "--quiet"]);
+        git(&["add", "--all", "--", ".", ":(exclude)network"]);
+        if !git_ok(dir, false, &["diff", "--cached", "--quiet"]) {
+            git(&["-c", "user.name=Kanzo", "-c", "user.email=kanzo@localhost", "commit", "--quiet", "-m", "older"]);
+        }
+        if git_ok(dir, false, &["rev-parse", "--verify", "--quiet", "@{upstream}"]) {
+            git(&["merge", "--quiet", "--ff-only", "@{upstream}"]);
+        }
+        git(&["push", "--quiet", "--set-upstream", "origin", "HEAD"]);
+    }
+
+    /// A Pi on the network whose board an older Kanzo synced, config.toml and all.
+    fn older_pi(tmp: &Path) -> (std::path::PathBuf, Home) {
+        let remote = tmp.join("remote.git");
+        git(tmp, false, &["init", "--quiet", "--bare", remote.to_str().unwrap()]).unwrap();
+        let pi = machine(&tmp.join("pi"), &remote);
+        std::fs::write(pi.dir.join("config.toml"), "listen = \"0.0.0.0\"\n").unwrap();
+        older_sync(&pi.dir);
+        (remote, pi)
+    }
+
+    #[test]
+    fn a_pi_on_an_older_kanzo_keeps_its_listen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (remote, pi) = older_pi(tmp.path());
+        let laptop = machine(&tmp.path().join("laptop"), &remote);
+        sync(&laptop, Some(Keep::Remote), false).unwrap();
+        assert!(Home::open(laptop.dir.clone()).unwrap().config.listen.is_loopback());
+
+        laptop.store().unwrap().create_project("laptop", "", None).unwrap();
+        sync(&laptop, None, false).unwrap();
+        older_sync(&pi.dir);
+        assert_eq!(pi.store().unwrap().list_projects().unwrap().len(), 1);
+        assert!(!Home::open(pi.dir.clone()).unwrap().config.listen.is_loopback());
+
+        // Then the Pi updates too.
+        laptop.store().unwrap().create_project("later", "", None).unwrap();
+        sync(&laptop, None, false).unwrap();
+        sync(&pi, None, false).unwrap();
+        assert_eq!(pi.store().unwrap().list_projects().unwrap().len(), 2);
+        assert!(!Home::open(pi.dir.clone()).unwrap().config.listen.is_loopback());
+    }
+
+    #[test]
+    fn a_pi_keeps_its_listen_when_a_board_without_config_toml_replaces_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (remote, pi) = older_pi(tmp.path());
+        let laptop = machine(&tmp.path().join("laptop"), &remote);
+        sync(&laptop, Some(Keep::Local), false).unwrap();
+        sync(&pi, Some(Keep::Remote), false).unwrap();
+
+        assert!(!Home::open(pi.dir.clone()).unwrap().config.listen.is_loopback());
+    }
+
+    #[test]
+    fn config_toml_from_an_older_kanzo_stays_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (laptop, pi) = two_machines(tmp.path());
+        // The first sync adds it to the board, the second changes it.
+        for config in ["listen = \"0.0.0.0\"\n", "listen = \"0.0.0.0\"\nport = 4300\n"] {
+            std::fs::write(pi.dir.join("config.toml"), config).unwrap();
+            older_sync(&pi.dir);
+            sync(&laptop, None, false).unwrap();
+            let kept = Home::open(laptop.dir.clone()).unwrap().config;
+            assert!(kept.listen.is_loopback());
+            assert_eq!(kept.port, crate::home::DEFAULT_PORT);
+        }
     }
 
     #[test]
