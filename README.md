@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
 </p>
 
-Kanzo is a kanban board in your browser and an MCP server in one 4.5 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and it works.
+Kanzo is a kanban board in your browser and an MCP server in one 4.7 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and it works.
 
 You never edit a file. Everything is done in one of three places:
 
@@ -234,7 +234,7 @@ Settings on the board lists each task's properties, like tags or comments. Turn 
 
 | | |
 | --- | --- |
-| Program | 4.5 MB, SQLite included |
+| Program | 4.7 MB, SQLite included |
 | Memory | 4.5 MB idle, 8 MB with 3,000 tasks |
 | Start | 2 ms |
 | Board of 3,000 tasks | 17 ms to load in the browser |
