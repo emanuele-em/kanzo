@@ -581,25 +581,23 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub fn create_task(&self, project_id: i64, title: &str, description: &str) -> Result<Task> {
-        self.create_task_in(project_id, None, title, description)
+    pub fn create_task(&self, project: i64, title: &str, description: &str) -> Result<Task> {
+        self.create_task_in(project, title, TaskPatch { description: Some(description.into()), ..Default::default() })
     }
 
-    pub fn create_task_in(
-        &self,
-        project_id: i64,
-        status: Option<&str>,
-        title: &str,
-        description: &str,
-    ) -> Result<Task> {
+    // One write, or an agent could take a task before it's human. Uses description, status, tags, human.
+    pub fn create_task_in(&self, project_id: i64, title: &str, patch: TaskPatch) -> Result<Task> {
         let title = clean_title(title)?;
-        let status = status.unwrap_or(STATUSES[0]);
+        let status = patch.status.as_deref().unwrap_or(STATUSES[0]);
         self.check_status(status)?;
+        let description = patch.description.as_deref().unwrap_or("").trim();
+        let tags = clean_tags(patch.tags.as_deref().unwrap_or("")).join(",");
         let id = self.write(|c| {
             let position = Self::end_of_column(c, status, 0)?;
             c.execute(
-                "INSERT INTO tasks (project_id, title, description, status, position) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![project_id, title, description.trim(), status, position],
+                "INSERT INTO tasks (project_id, title, description, status, position, tags, human) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false)],
             )?;
             Ok(c.last_insert_rowid())
         })?;
@@ -1258,8 +1256,10 @@ mod tests {
         let api = s.create_project("api", "", None).unwrap();
         let web = s.create_project("web", "", None).unwrap();
         s.create_task(web.id, "web first", "").unwrap();
-        let human = s.create_task(api.id, "Call the bank", "").unwrap();
-        assert!(s.update_task(human.id, TaskPatch { human: Some(true), ..Default::default() }).unwrap().human);
+        let changes = s.changes().unwrap();
+        let patch = TaskPatch { human: Some(true), tags: Some("Bug, bug".into()), ..Default::default() };
+        let human = s.create_task_in(api.id, "Call the bank", patch).unwrap();
+        assert!(human.human && human.tags == ["bug"] && s.changes().unwrap() == changes + 1, "all in one write");
         s.create_task(api.id, "api first", "").unwrap();
         s.create_task(api.id, "api second", "").unwrap();
 
@@ -1269,6 +1269,7 @@ mod tests {
         assert_eq!(s.next_task(Some(api.id)).unwrap().unwrap().title, "api second");
         assert!(s.next_task(Some(api.id)).unwrap().is_none());
         assert_eq!(s.get_task(human.id).unwrap().status, "todo");
+        assert!(!s.update_task(human.id, TaskPatch { human: Some(false), ..Default::default() }).unwrap().human);
     }
 
     #[test]
@@ -1279,9 +1280,10 @@ mod tests {
         let s = Store::open(&dir.path().join("kanzo.db"), None).unwrap();
         assert_eq!(s.statuses(), ["backlog", "todo", "doing", "review", "done"]);
         let api = s.create_project("api", "", None).unwrap();
-        let backlog = s.create_task_in(api.id, Some("backlog"), "later", "").unwrap();
+        let status = |s: &str| TaskPatch { status: Some(s.into()), ..Default::default() };
+        let backlog = s.create_task_in(api.id, "later", status("backlog")).unwrap();
         assert_eq!(backlog.status, "backlog");
-        assert!(s.create_task_in(api.id, Some("nope"), "x", "").is_err());
+        assert!(s.create_task_in(api.id, "x", status("nope")).is_err());
         assert_eq!(s.create_task(api.id, "now", "").unwrap().status, "todo");
 
         let t = s.next_task(None).unwrap().unwrap();
