@@ -338,7 +338,7 @@ function renderNav() {
   const { projects } = state.board;
   const open = projects.reduce((n, p) => n + p.open, 0);
   const link = (slug, name, count, glyph) =>
-    el("a", { href: "#" + slug, class: state.project === slug ? "active" : null,
+    el("a", { href: "#" + slug, title: name, class: state.project === slug ? "active" : null,
               onclick: (e) => { e.preventDefault(); setProject(slug); } },
       glyph,
       el("span", { class: "name" }, name),
@@ -1760,6 +1760,15 @@ async function installUpdate(available) {
   }
   location.reload();
 }
+
+function setRail(on) {
+  document.documentElement.classList.toggle("rail", on);
+  $("#rail").setAttribute("aria-expanded", String(!on));
+  localStorageSet("kanzo.rail", on ? "1" : "");
+}
+setRail(localStorageGet("kanzo.rail") === "1");
+document.documentElement.classList.add("ready");
+$("#rail").addEventListener("click", () => setRail($("#rail").getAttribute("aria-expanded") === "true"));
 
 // Chromium's browsers ask this only while the board isn't installed; the others never do.
 let installPrompt;

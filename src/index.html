@@ -482,7 +482,7 @@ label.setting { cursor: pointer; }
   .nav { flex-direction: row; overflow-x: auto; }
   .nav a { width: auto; }
   .nav .label { display: none; }
-  #new-project-toggle, .panel-edge, #p-wide { display: none; }
+  #new-project-toggle, #rail, .panel-edge, #p-wide { display: none; }
   .panel { width: 100vw; }
   .columns { grid-auto-columns: minmax(78vw, 1fr); padding: 0 12px 12px; }
   .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
@@ -491,6 +491,16 @@ label.setting { cursor: pointer; }
   #filters { order: 1; }
   #filter-box { order: 1; flex: 1 0 100%; }
   #filter { width: 100%; }
+}
+/* A page can paint before its script runs: this way a folded sidebar never shows open. */
+html:not(.ready) aside { visibility: hidden; }
+@media (min-width: 701px) {
+  .rail body { grid-template-columns: 52px minmax(0, 1fr); }
+  .rail aside .ghost, .rail .nav a { font-size: 0; gap: 0; justify-content: center; padding: 8px 0; }
+  .rail .brand { font-size: 0; gap: 12px; flex-direction: column; padding: 4px 0 12px; }
+  .rail .brand .ghost { margin: 0; }
+  .rail .nav .name, .rail .nav .count, .rail .nav .item .more, .rail .nav .label { display: none; }
+  .rail #rail .icon { transform: rotate(180deg); }
 }
 </style>
 </head>
@@ -501,11 +511,12 @@ label.setting { cursor: pointer; }
     Kanzo
     <button class="ghost" id="search-open" title="Search (/ or ⌘K)" aria-label="Search tasks"><span class="icon" data-icon="search"></span></button>
   </div>
-  <button class="ghost" id="new-project-toggle"><span class="icon" data-icon="newProject"></span>New project</button>
+  <button class="ghost" id="new-project-toggle" title="New project"><span class="icon" data-icon="newProject"></span>New project</button>
   <nav class="nav" id="nav"></nav>
   <button class="ghost update" id="update" hidden><span class="icon" data-icon="update"></span><span id="update-label"></span></button>
   <button class="ghost" id="install" title="Use the board as an app of its own" hidden><span class="icon" data-icon="update"></span>Install app</button>
-  <button class="ghost" id="settings" aria-haspopup="menu"><span class="icon" data-icon="settings"></span>Settings</button>
+  <button class="ghost" id="rail" title="Fold the sidebar" aria-label="Fold the sidebar"><span class="icon" data-icon="expand"></span>Fold</button>
+  <button class="ghost" id="settings" title="Settings" aria-haspopup="menu"><span class="icon" data-icon="settings"></span>Settings</button>
 </aside>
 
 <main>
