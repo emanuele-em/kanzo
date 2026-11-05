@@ -216,6 +216,7 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 }
 .card:hover { background: var(--card-hover); }
 .card.open { background: var(--active); }
+html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .card.dragging { opacity: .4; }
 .card .head { display: flex; align-items: flex-start; gap: 10px; }
 .card .title { overflow-wrap: anywhere; flex: 1; min-width: 0; }
@@ -294,10 +295,16 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 [data-hide~="description"] .desc, [data-hide~="description"] [data-prop="description"],
 [data-hide~="tags"] [data-prop="tags"], [data-hide~="url"] [data-prop="url"],
 [data-hide~="human"] .human-mark, [data-hide~="human"] [data-prop="human"],
+[data-hide~="waiting"] .waits, [data-hide~="waiting"] [data-prop="waiting"],
 [data-hide~="created"] [data-prop="created"],
 [data-hide~="updated"] [data-prop="updated"],
 [data-hide~="comments"] .result .comments, [data-hide~="comments"] [data-prop="comments"],
 [data-hide~="images"] .panel .thumbs { display: none; }
+.links { display: flex; flex-wrap: wrap; gap: 4px; }
+#p-waits-links:not(:empty) { margin-top: 8px; }
+.links .tag { border: 0; max-width: 100%; }
+.links .tag:hover, .links .tag:focus-visible { background: var(--active); }
+.links span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
 .section h3 {
   font-size: 13px; color: var(--muted); margin: 0 0 8px; font-weight: 600;
   display: flex; align-items: center; gap: 8px;
@@ -515,6 +522,8 @@ label.setting { cursor: pointer; }
       <div data-prop="tags">Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span></div>
       <div data-prop="url">URL <span><input class="inline" id="p-url" type="url" placeholder="Add a link, like a pull request" autocomplete="off" spellcheck="false"></span></div>
       <div data-prop="human">Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span></div>
+      <div data-prop="waiting">Waits on <span><input class="inline" id="p-waits" placeholder="Add tasks, like api#12" autocomplete="off" spellcheck="false"><span class="links" id="p-waits-links"></span></span></div>
+      <div data-prop="waiting" id="p-blocks-row">Blocks <span class="links" id="p-blocks"></span></div>
       <div data-prop="created">Created <span id="p-created"></span></div>
       <div data-prop="updated">Updated <span id="p-updated"></span></div>
     </div>

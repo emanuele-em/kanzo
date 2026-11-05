@@ -196,7 +196,7 @@ struct ListTasksArgs {
     /// One column, or "all". Done is left out by default.
     status: Option<String>,
     /// Words, or tag: status: project: title: description: url: comment: id: comments: images: created: updated:
-    /// is:human has: no:, like tag:bug -status:done. Includes done.
+    /// is:human is:waiting has: no:, like tag:bug -status:done. Includes done.
     filter: Option<String>,
 }
 
@@ -220,6 +220,8 @@ struct CreateTaskArgs {
     status: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// Tasks it waits on, like api#12.
+    waits_on: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -238,6 +240,8 @@ struct UpdateTaskArgs {
     human: Option<bool>,
     /// A link; "" clears.
     url: Option<String>,
+    /// Tasks it waits on, like api#12; "" clears.
+    waits_on: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -469,12 +473,12 @@ impl Kanzo {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, move |ctx, store| {
-                let CreateTaskArgs { title, description, project, tags, status, human } = args;
+                let CreateTaskArgs { title, description, project, tags, status, human, waits_on } = args;
                 let project = ctx.project(store, project.as_deref())?;
                 let status = status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
-                let patch = TaskPatch { description, status, tags, human, ..Default::default() };
+                let patch = TaskPatch { description, status, tags, human, waits_on, ..Default::default() };
                 let t = store.create_task_in(project.id, &title, patch)?;
-                Ok(format!("Created {} in {}: {}", t.key(), t.status, t.title))
+                Ok(format!("Created {} in {}: {}{}", t.key(), t.status, t.title, waits_note(store, &t)?))
             })
             .await)
     }
@@ -495,6 +499,7 @@ impl Kanzo {
                         project_id: None,
                         human: args.human,
                         url: args.url,
+                        waits_on: args.waits_on,
                     },
                 )?;
                 let moved = if before.status != after.status {
@@ -502,7 +507,7 @@ impl Kanzo {
                 } else {
                     String::new()
                 };
-                Ok(format!("Updated {}{moved}: {}", after.key(), after.title))
+                Ok(format!("Updated {}{moved}: {}{}", after.key(), after.title, waits_note(store, &after)?))
             })
             .await)
     }
@@ -533,11 +538,18 @@ impl Kanzo {
         Ok(self
             .run_for(&ext, move |ctx, store| {
                 let project = ctx.scope(store, args.project.as_deref())?;
-                match store.next_task_matching(project.as_ref().map(|p| p.id), args.filter.as_deref().unwrap_or(""))? {
+                let id = project.as_ref().map(|p| p.id);
+                let filter = args.filter.as_deref().unwrap_or("");
+                match store.next_task_matching(id, filter)? {
                     Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task)?)),
                     None => {
+                        let waiting = store.waiting_in_todo(id, filter)?;
                         let scope = project.map_or("any project".into(), |p| p.slug);
-                        Ok(format!("Nothing in todo for {scope}."))
+                        Ok(match waiting {
+                            0 => format!("Nothing in todo for {scope}."),
+                            1 => format!("Nothing ready in todo for {scope}: 1 task waits on others."),
+                            n => format!("Nothing ready in todo for {scope}: {n} tasks wait on others."),
+                        })
                     }
                 }
             })
@@ -605,6 +617,9 @@ fn task_line(out: &mut String, t: &Task, hidden: &[String]) {
     if shown(hidden, "tags") {
         write_tags(out, t);
     }
+    if shown(hidden, "waiting") {
+        write_waits(out, t);
+    }
     match if shown(hidden, "comments") { t.comments } else { 0 } {
         0 => {}
         1 => out.push_str(" (1 comment)"),
@@ -618,6 +633,22 @@ fn write_tags(out: &mut String, t: &Task) {
     if !t.tags.is_empty() {
         let _ = write!(out, " {{{}}}", t.tags.join(", "));
     }
+}
+
+fn write_waits(out: &mut String, t: &Task) {
+    if !t.waiting_on.is_empty() {
+        let ids: Vec<String> = t.waiting_on.iter().map(|id| format!("#{id}")).collect();
+        let _ = write!(out, " (waits on {})", ids.join(", "));
+    }
+}
+
+/// Tells an agent that moved or changed a task that it's still waiting; moving one anyway is allowed.
+fn waits_note(store: &Store, t: &Task) -> store::Result<String> {
+    let mut note = String::new();
+    if !t.waiting_on.is_empty() && shown(&store.hidden_properties()?, "waiting") {
+        write_waits(&mut note, t);
+    }
+    Ok(note)
 }
 
 fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
@@ -634,6 +665,9 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
         write_tags(&mut out, t);
     }
     let _ = write!(out, "\nstatus: {}", t.status);
+    if shown(&hidden, "waiting") {
+        write_waits(&mut out, t);
+    }
     if t.human && shown(&hidden, "human") {
         out.push_str(", human: for the user, not for agents");
     }
@@ -752,6 +786,36 @@ mod tests {
             meta["io.modelcontextprotocol/clientInfo"] = json!({ "name": name, "version": "1" });
         }
         meta
+    }
+
+    #[test]
+    fn agents_see_what_a_task_waits_on_and_why_nothing_is_ready() {
+        block_on(async {
+            let (dir, home, blocker) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let mut call = async |name: &str, args: Value| -> String {
+                let params = json!({ "name": name, "arguments": args, "_meta": stateless(None) });
+                let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+                let reply = agent.send(message).await.unwrap();
+                reply["result"]["content"][0]["text"].as_str().unwrap().to_string()
+            };
+            let waiting =
+                call("create_task", json!({ "title": "Then this", "project": "api", "waits_on": blocker.key() })).await;
+            assert_eq!(waiting, "Created api#2 in todo: Then this (waits on #1)");
+            assert!(call("list_tasks", json!({ "project": "api" })).await.contains("Then this (waits on #1)"));
+            assert!(call("get_task", json!({ "id": "api#2" })).await.contains("status: todo (waits on #1)"));
+
+            call("update_task", json!({ "id": "api#1", "status": "doing" })).await;
+            let next = call("next_task", json!({ "project": "api" })).await;
+            assert_eq!(next, "Nothing ready in todo for api: 1 task waits on others.");
+            let moved = call("update_task", json!({ "id": "api#2", "status": "doing" })).await;
+            assert_eq!(moved, "Updated api#2, todo -> doing: Then this (waits on #1)");
+            let next = call("next_task", json!({ "project": "api" })).await;
+            assert_eq!(next, "Nothing in todo for api.");
+
+            home.store().unwrap().set_property("waiting", false).unwrap();
+            assert!(!call("get_task", json!({ "id": "api#2" })).await.contains("waits on"));
+        });
     }
 
     #[test]

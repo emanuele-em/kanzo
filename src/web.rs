@@ -527,14 +527,22 @@ async fn update_settings(State(home): Shared, Json(r): Json<Settings>) -> Respon
 
 #[derive(Serialize)]
 struct TaskReply {
+    blocks: Vec<store::TaskLink>,
     comments: Vec<store::Comment>,
     images: Vec<store::Image>,
     task: store::Task,
+    waits_on: Vec<store::TaskLink>,
 }
 
 async fn get_task(State(home): Shared, Path(id): Path<i64>) -> Response {
     with_store(home, move |_, s| {
-        Ok(TaskReply { comments: s.list_comments(id)?, images: s.list_images(id)?, task: s.get_task(id)? })
+        Ok(TaskReply {
+            blocks: s.task_links(id, true)?,
+            comments: s.list_comments(id)?,
+            images: s.list_images(id)?,
+            task: s.get_task(id)?,
+            waits_on: s.task_links(id, false)?,
+        })
     })
     .await
 }
@@ -548,6 +556,7 @@ struct Patch {
     tags: Option<String>,
     human: Option<bool>,
     url: Option<String>,
+    waits_on: Option<String>,
 }
 
 async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Patch>) -> Response {
@@ -563,6 +572,7 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 tags: p.tags,
                 human: p.human,
                 url: p.url,
+                waits_on: p.waits_on,
             },
         )
     })

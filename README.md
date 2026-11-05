@@ -90,6 +90,13 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
   <img alt="The board with the Backlog column on, left of Todo" src="docs/img/backlog-light.jpg">
 </picture>
 
+## Make a task wait on others
+
+> [!TIP]
+> **Just ask your agent:** *"make kanzo#12 wait on #10 and #11."*
+
+List what a task waits on in its panel, or have agents pass `waits_on`. Until those tasks are done, `next_task` skips it, and its card is dimmed and says what it waits on. Only `done` counts: a task in `review` still blocks. Nothing stops you from moving a waiting task yourself.
+
 ## Filter and search
 
 > [!TIP]
@@ -111,6 +118,7 @@ The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `nex
 | `id:`, `comments:`, `images:` | a number, or a range | `id:12`, `comments:>2`, `images:1..3` |
 | `created:`, `updated:` | a date, or a range | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | tasks for you, not agents | `-is:human` |
+| `is:waiting` | tasks waiting on unfinished ones | `-is:waiting` |
 | `has:`, `no:` | `description`, `tags`, `url`, `comments` or `images` | `has:url`, `no:tags` |
 
 Anything else is plain text. Use quotes for a phrase, `"on hold"`, or to look for text that reads like a qualifier, `"tag:bug"`. Agents can't filter through a property you've hidden in Settings.

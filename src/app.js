@@ -595,7 +595,7 @@ const QUALIFIERS = new Map([
   ["tag", anyText], ["status", anyText], ["project", anyText], ["title", anyText], ["description", anyText],
   ["url", anyText], ["comment", anyText], ["id", inRange(isNumber)], ["comments", inRange(isNumber)],
   ["images", inRange(isNumber)], ["created", inRange(isDate)], ["updated", inRange(isDate)],
-  ["is", (v) => v === "human"], ["has", isField], ["no", isField],
+  ["is", (v) => v === "human" || v === "waiting"], ["has", isField], ["no", isField],
 ]);
 
 // A part of a query, read as the server reads it. Null for a word.
@@ -655,8 +655,8 @@ function highlight(name, root, words) {
   CSS.highlights.set(name, new Highlight(...ranges));
 }
 
-function summary(t, link = null) {
-  const chips = [...(link ? [link] : []), ...(isPropertyHidden("tags") ? [] : t.tags.map((tag) => el("span", { class: "tag" }, tag)))];
+function summary(t, ...extra) {
+  const chips = [...extra.filter(Boolean), ...(isPropertyHidden("tags") ? [] : t.tags.map((tag) => el("span", { class: "tag" }, tag)))];
   return [
     t.description ? el("span", { class: "desc" }, plainText(t.description)) : null,
     chips.length ? el("span", { class: "tags" }, chips) : null,
@@ -669,6 +669,11 @@ function urlChip(t) {
   return el("a", { class: "tag url", href: t.url, target: "_blank", rel: "noopener", title: t.url, draggable: "false",
                    onclick: (e) => e.stopPropagation() },
     icon("url"), t.url.split("/")[2].replace(/^www\./, ""));
+}
+
+// Only on cards, like the URL. Most tasks have no waiting_on at all, to keep the board's reply small.
+function waitChip(t) {
+  return t.waiting_on ? el("span", { class: "tag waits" }, `Waits on ${t.waiting_on.map((id) => `#${id}`).join(", ")}`) : null;
 }
 
 // A board on an older version sends no hidden_properties.
@@ -725,14 +730,14 @@ function plainText(md) {
 }
 
 function card(t, showProject) {
-  const node = el("div", { class: "card" + (state.task === t.id ? " open" : ""), draggable: "true", "data-id": t.id,
+  const node = el("div", { class: "card" + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : ""), draggable: "true", "data-id": t.id,
                            onclick: () => openTask(t.id) },
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
       el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
-    ...summary(t, urlChip(t)));
+    ...summary(t, waitChip(t), urlChip(t)));
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;
     e.dataTransfer.effectAllowed = "move";
@@ -849,6 +854,10 @@ $("#new-project").addEventListener("submit", async (e) => {
 
 const panel = $("#panel");
 let panelTask = null;
+let panelWaits = "";
+
+const taskLink = (t) => el("button", { type: "button", class: "tag", title: key(t), onclick: () => pick(t) },
+  statusIcon(t.status), el("span", {}, t.title));
 
 async function openTask(id) {
   leavePanelField();
@@ -895,13 +904,15 @@ async function refreshTask() {
   }
   // Another task may have taken the panel meanwhile.
   if (state.task !== id) return;
-  const { task, comments, images } = data;
+  // A board on an older version sends neither list.
+  const { task, comments, images, waits_on = [], blocks = [] } = data;
   panelTask = task;
+  panelWaits = waits_on.map(key).join(", ");
   $("#p-key").textContent = key(task);
   $("#p-key").title = `Copy ${key(task)}`;
   // Never overwrite what is being typed or picked.
   if (!$("#p-project").contains(document.activeElement)) renderProjectPick(task);
-  for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")], [$("#p-url"), task.url || ""]]) {
+  for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")], [$("#p-url"), task.url || ""], [$("#p-waits"), panelWaits]]) {
     if (document.activeElement !== field) { field.value = value; fit(field); }
   }
   showDesc();
@@ -911,6 +922,9 @@ async function refreshTask() {
   if (!statuses.includes(task.status)) status.append(el("option", { value: task.status }, task.status));
   status.value = task.status;
   $("#p-human").checked = task.human;
+  $("#p-waits-links").replaceChildren(...waits_on.map(taskLink));
+  $("#p-blocks").replaceChildren(...blocks.map(taskLink));
+  $("#p-blocks-row").hidden = !blocks.length;
   $("#p-created").replaceChildren(timeEl(task.created_at));
   $("#p-updated").replaceChildren(timeEl(task.updated_at));
   $("#p-comment-count").textContent = comments.length ? String(comments.length) : "";
@@ -1115,6 +1129,14 @@ $("#p-url").addEventListener("blur", (e) => {
   const url = e.target.value.trim();
   if (url !== (panelTask.url || "")) patchTask({ url });
   else e.target.value = url;
+});
+
+$("#p-waits").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+  else if (e.key === "Escape") cancelField(e, panelWaits);
+});
+$("#p-waits").addEventListener("blur", (e) => {
+  if (panelTask && e.target.value.trim() !== panelWaits) patchTask({ waits_on: e.target.value });
 });
 
 $("#p-comment-form").addEventListener("submit", async (e) => {
@@ -1503,7 +1525,7 @@ async function saveSetting(box, fields) {
   } catch (err) { box.checked = !box.checked; toast(err.message); }
 }
 $("#settings-backlog").addEventListener("change", (e) => saveSetting(e.target, { backlog: e.target.checked }));
-$('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL", "Human", "Created", "Updated", "Comments", "Images"].map((name) => {
+$('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL", "Human", "Waiting", "Created", "Updated", "Comments", "Images"].map((name) => {
   const property = name.toLowerCase();
   return el("label", { class: "setting" }, el("span", { class: "text" }, name),
     el("span", { class: "switch" },
