@@ -1,5 +1,6 @@
 //! Replies are short plain text to save agents' tokens.
 
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -194,6 +195,9 @@ struct ListTasksArgs {
     project: Option<String>,
     /// One column, or "all". Done is left out by default.
     status: Option<String>,
+    /// Words, or tag: status: project: title: description: url: comment: id: comments: images: created: updated:
+    /// is:human has: no:, like tag:bug -status:done. Includes done.
+    filter: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -259,6 +263,8 @@ struct LinkRepoArgs {
 struct NextTaskArgs {
     /// Slug, or "all".
     project: Option<String>,
+    /// As in list_tasks, like tag:bug.
+    filter: Option<String>,
 }
 
 impl Kanzo {
@@ -396,9 +402,17 @@ impl Kanzo {
                         Some(s)
                     }
                 };
-                let keep = if status.is_none() { 0 } else { DONE_LISTED };
-                let (tasks, hidden) =
-                    store.list_tasks_keeping_done(project.as_ref().map(|p| p.id), only, Some(keep))?;
+                let filter = args.filter.filter(|f| !f.trim().is_empty());
+                let keep = match (&filter, &status) {
+                    (Some(_), _) => None,
+                    (None, None) => Some(0),
+                    (None, Some(_)) => Some(DONE_LISTED),
+                };
+                let (mut tasks, hidden) = store.list_tasks_keeping_done(project.as_ref().map(|p| p.id), only, keep)?;
+                if let Some(filter) = &filter {
+                    let found: HashSet<i64> = store.search_for_agent(filter)?.into_iter().map(|t| t.id).collect();
+                    tasks.retain(|t| found.contains(&t.id));
+                }
                 let done = store::DONE;
                 let properties = store.hidden_properties()?;
                 let mut out = String::new();
@@ -519,7 +533,7 @@ impl Kanzo {
         Ok(self
             .run_for(&ext, move |ctx, store| {
                 let project = ctx.scope(store, args.project.as_deref())?;
-                match store.next_task(project.as_ref().map(|p| p.id))? {
+                match store.next_task_matching(project.as_ref().map(|p| p.id), args.filter.as_deref().unwrap_or(""))? {
                     Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task)?)),
                     None => {
                         let scope = project.map_or("any project".into(), |p| p.slug);

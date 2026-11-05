@@ -549,15 +549,15 @@ function renderColumns() {
   if (state.dragging) return;
   const all = state.project === "all";
   const humanOnly = isHumanOnly();
-  const words = wordsOf(filterQuery());
-  $("#filter").classList.toggle("on", words.length > 0);
+  const query = filterQuery();
+  $("#filter").classList.toggle("on", query.length > 0);
   for (const status of statuses) {
     const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
     const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
     const last = status === statuses[statuses.length - 1];
     const hidden = last && !state.allDone ? state.board.done_hidden || 0 : 0;
     // Filtered, the server's count of older done tasks says nothing about human ones.
-    const filtered = humanOnly || words.length > 0;
+    const filtered = humanOnly || query.length > 0;
     const count = mine.length + (filtered ? 0 : hidden);
     col.querySelector("h2 .count").textContent = count ? String(count) : "";
     const more = hidden
@@ -566,7 +566,7 @@ function renderColumns() {
       : null;
     col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all)));
   }
-  highlight("filter", columns, words);
+  highlight("filter", columns, wordsOf(query));
 }
 
 function savedFilters() {
@@ -582,8 +582,19 @@ function filterQuery() {
   return [...savedFilters(), $("#filter").value].join(" ").trim();
 }
 
+const QUALIFIERS = ["tag", "status", "project", "title", "description", "url", "comment", "id", "comments", "images",
+                    "created", "updated", "is", "has", "no"];
+
+// The text to highlight: words, phrases, and what tag:, title: and description: look for.
 function wordsOf(query) {
-  return query.toLowerCase().split(/\s+/).filter(Boolean);
+  const words = [];
+  for (const part of query.toLowerCase().match(/(?:[^\s"]+|"[^"]*"?)+/g) || []) {
+    const text = part.replace(/"/g, "");
+    const qualifier = part.startsWith('"') ? null : text.match(/^(-?)([^:]+):(.*)$/);
+    if (!qualifier || !QUALIFIERS.includes(qualifier[2])) words.push(text);
+    else if (!qualifier[1] && ["tag", "title", "description"].includes(qualifier[2])) words.push(qualifier[3]);
+  }
+  return words.filter(Boolean);
 }
 
 function highlight(name, root, words) {
