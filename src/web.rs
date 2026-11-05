@@ -156,6 +156,7 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/projects/{slug}", patch(update_project).delete(delete_project))
         .route("/api/projects/{slug}/repos", post(link_repo).delete(unlink_repo))
         .route("/api/tasks", post(create_task))
+        .route("/api/tasks/bulk", post(bulk_tasks))
         .route("/api/tasks/{id}", get(get_task).patch(update_task).delete(delete_task))
         .route("/api/tasks/{id}/move", post(move_task))
         .route("/api/tasks/{id}/comments", post(add_comment))
@@ -593,6 +594,29 @@ async fn move_task(State(home): Shared, Path(id): Path<i64>, Json(m): Json<Move>
 
 async fn delete_task(State(home): Shared, Path(id): Path<i64>) -> Response {
     with_store(home, move |h, s| h.deleting_images(s, ImagesOf::Task(id), || s.delete_task(id))).await
+}
+
+#[derive(Deserialize)]
+struct Bulk {
+    ids: Vec<i64>,
+    status: Option<String>,
+    #[serde(default)]
+    add_tags: String,
+    #[serde(default)]
+    remove_tags: String,
+    #[serde(default)]
+    delete: bool,
+}
+
+async fn bulk_tasks(State(home): Shared, Json(b): Json<Bulk>) -> Response {
+    with_store(home, move |h, s| {
+        if b.delete {
+            h.deleting_images(s, ImagesOf::Tasks(b.ids.clone()), || s.delete_tasks(&b.ids))
+        } else {
+            s.update_tasks(&b.ids, b.status.as_deref(), &b.add_tags, &b.remove_tags)
+        }
+    })
+    .await
 }
 
 #[derive(Deserialize)]

@@ -29,6 +29,8 @@ const state = {
   menu: null,
   net: null,
   guests: null,
+  selected: new Set(),
+  sweeping: false,
 };
 
 async function api(method, path, body) {
@@ -543,10 +545,11 @@ function renderColumns() {
       return col;
     }));
     showCollapsed();
+    $("#bulk-status").replaceChildren(el("option", { value: "", hidden: true }, "Move to…"), ...statuses.map((s) => el("option", { value: s }, s)));
   }
 
   // During a drag the DOM is being moved by hand; refresh once it ends.
-  if (state.dragging) return;
+  if (state.dragging || state.sweeping) return;
   const all = state.project === "all";
   const humanOnly = isHumanOnly();
   const query = filterQuery();
@@ -567,7 +570,101 @@ function renderColumns() {
     col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all)));
   }
   highlight("filter", columns, wordsOf(query));
+  for (const id of [...state.selected]) {
+    if (!columns.querySelector(`.card[data-id="${id}"]`)) state.selected.delete(id);
+  }
+  showSelection();
 }
+
+function showSelection() {
+  $("#bulk").hidden = !state.selected.size;
+  $("#bulk-count").textContent = `${state.selected.size} selected`;
+}
+
+function setSelected(id, on) {
+  if (on) state.selected.add(id); else state.selected.delete(id);
+  document.querySelector(`[data-id="${id}"]`)?.classList.toggle("selected", on);
+}
+
+function clearSelection() {
+  state.selected.forEach((id) => setSelected(id, false));
+  showSelection();
+}
+
+// Closes the panel: one or the other, so the bar can't cover it.
+function toggleSelected(id) {
+  if (state.task) closeTask();
+  setSelected(id, !state.selected.has(id));
+  showSelection();
+}
+
+// Drag on empty board space to select, with ⌘ to add to what's selected. Cards are measured once, when
+// the drag starts, so moving the mouse never forces a layout.
+function sweep(down) {
+  const marquee = el("div", { class: "marquee" });
+  const kept = new Set(down.metaKey || down.ctrlKey ? state.selected : []);
+  let cards, x, y, frame = 0;
+  const paint = () => {
+    frame = 0;
+    const x1 = Math.min(down.clientX, x), x2 = Math.max(down.clientX, x), y1 = Math.min(down.clientY, y), y2 = Math.max(down.clientY, y);
+    marquee.style.cssText = `left:${x1}px;top:${y1}px;width:${x2 - x1}px;height:${y2 - y1}px`;
+    for (const { id, r, list } of cards) {
+      // A card scrolled out of its column can't be under the box.
+      const hit = r.right > x1 && r.left < x2 && r.bottom > Math.max(y1, list.top) && r.top < Math.min(y2, list.bottom);
+      if ((hit || kept.has(id)) !== state.selected.has(id)) setSelected(id, !state.selected.has(id));
+    }
+    showSelection();
+  };
+  const move = (e) => {
+    x = e.clientX; y = e.clientY;
+    if (!cards) {
+      if (Math.hypot(x - down.clientX, y - down.clientY) < 4) return;
+      state.sweeping = true;
+      document.body.append(marquee);
+      cards = [...$("#columns").querySelectorAll(".column:not(.collapsed) .card")].map((n) =>
+        ({ id: +n.dataset.id, r: n.getBoundingClientRect(), list: n.parentNode.getBoundingClientRect() }));
+    }
+    if (!frame) frame = requestAnimationFrame(paint);
+  };
+  const up = () => {
+    cancelAnimationFrame(frame);
+    document.removeEventListener("mousemove", move);
+    document.removeEventListener("mouseup", up);
+    marquee.remove();
+    state.sweeping = false;
+    if (cards) renderColumns();
+    else if (!kept.size) clearSelection();
+  };
+  document.addEventListener("mousemove", move);
+  document.addEventListener("mouseup", up);
+}
+
+$("#columns").addEventListener("mousedown", (e) => {
+  const onScrollbar = e.offsetX > e.target.clientWidth || e.offsetY > e.target.clientHeight;
+  if (e.button || onScrollbar || e.target.closest(".card, button, a, .collapsed")) return;
+  e.preventDefault();
+  sweep(e);
+});
+
+async function changeSelected(change) {
+  const ids = state.board.tasks.filter((t) => state.selected.has(t.id)).map((t) => t.id);
+  try { await api("POST", "/tasks/bulk", { ids, ...change }); } catch (err) { toast(err.message); }
+  loadBoard();
+}
+
+$("#bulk").addEventListener("keydown", (e) => {
+  const { name, value } = e.target;
+  if (e.key === "Escape") { e.stopPropagation(); e.target.blur(); clearSelection(); }
+  else if (e.key === "Enter" && name && value.trim()) { changeSelected({ [name]: value }); e.target.value = ""; }
+});
+$("#bulk-status").addEventListener("change", (e) => {
+  changeSelected({ status: e.target.value });
+  e.target.value = "";
+});
+$("#bulk-delete").addEventListener("click", () => {
+  if (confirm(`Delete ${plural(state.selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true });
+});
+$("#bulk-clear").addEventListener("click", clearSelection);
 
 function savedFilters() {
   try { return JSON.parse(localStorageGet("kanzo.filters")) || []; } catch { return []; }
@@ -730,8 +827,9 @@ function plainText(md) {
 }
 
 function card(t, showProject) {
-  const node = el("div", { class: "card" + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : ""), draggable: "true", "data-id": t.id,
-                           onclick: () => openTask(t.id) },
+  const node = el("div", { class: "card" + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (state.selected.has(t.id) ? " selected" : ""),
+                           draggable: "true", "data-id": t.id,
+                           onclick: (e) => { if (e.metaKey || e.ctrlKey) toggleSelected(t.id); else openTask(t.id); } },
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
@@ -873,6 +971,7 @@ const taskLink = (t) => el("button", { type: "button", class: "tag", title: key(
   statusIcon(t.status), el("span", {}, t.title));
 
 async function openTask(id) {
+  clearSelection();
   leavePanelField();
   if (fresh !== id) dropFresh();
   state.task = id;
@@ -1272,6 +1371,7 @@ document.addEventListener("keydown", (e) => {
   const plain = !typing && !e.metaKey && !e.ctrlKey;
   if (e.key === "Escape" && state.menu) { closeMenu(); return; }
   if (e.key === "Escape" && state.task && !typing) closeTask();
+  if (e.key === "Escape" && !typing) clearSelection();
   if ((e.key === "/" && plain) || (e.key === "k" && (e.metaKey || e.ctrlKey))) {
     e.preventDefault();
     openSearch();

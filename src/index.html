@@ -73,7 +73,7 @@ aside {
 .nav .item.renaming { display: flex; align-items: center; gap: 10px; padding: 3px 6px 3px 10px; }
 .nav .item.renaming .field { padding: 5px 8px; border-radius: 8px; }
 @media (hover: none) { .nav .more { display: block; } .nav .item .count { visibility: hidden; } }
-.menu {
+.menu, .bulk {
   position: fixed; z-index: 30; min-width: 190px; padding: 6px; background: var(--menu);
   border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
 }
@@ -217,6 +217,11 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .card:hover { background: var(--card-hover); }
 .card.open { background: var(--active); }
 html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
+.card.selected { box-shadow: inset 0 0 0 2px var(--link); }
+.marquee { position: fixed; z-index: 9; pointer-events: none; background: color-mix(in srgb, var(--link) 15%, transparent); }
+.bulk { bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: max-content; max-width: calc(100vw - 16px); }
+.bulk .field { width: 120px; padding: 5px 12px; }
+.bulk select { text-transform: capitalize; }
 .card.dragging { opacity: .4; }
 .card .head { display: flex; align-items: flex-start; gap: 10px; }
 .card .title { overflow-wrap: anywhere; flex: 1; min-width: 0; }
@@ -270,9 +275,9 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .panel .top { display: flex; align-items: center; gap: 8px; padding: 14px 16px 6px 20px; }
 .panel .top .key { color: var(--muted); }
 .panel .top .spacer { flex: 1; }
-.panel .top .ghost { width: auto; padding: 6px; color: var(--muted); }
-.panel .top .ghost:hover { color: var(--text); }
-.panel .top .ghost.danger:hover { color: var(--danger); background: var(--danger-bg); }
+.panel .top .ghost, .bulk .ghost { width: auto; padding: 6px; color: var(--muted); }
+.panel .top .ghost:hover, .bulk .ghost:hover { color: var(--text); }
+.panel .top .ghost.danger:hover, .bulk .danger:hover { color: var(--danger); background: var(--danger-bg); }
 .panel .project-pick select {
   appearance: none; -webkit-appearance: none; border: 0; background: none; padding: 0; margin: 0;
   font-size: inherit; color: inherit; cursor: pointer; field-sizing: content;
@@ -506,6 +511,15 @@ label.setting { cursor: pointer; }
   </header>
   <div class="columns" id="columns"></div>
 </main>
+
+<div class="bulk" id="bulk" hidden>
+  <span id="bulk-count"></span>
+  <select class="field" id="bulk-status" aria-label="Move to"></select>
+  <input class="field" name="add_tags" placeholder="Add tags" autocomplete="off">
+  <input class="field" name="remove_tags" placeholder="Remove tags" autocomplete="off">
+  <button class="ghost danger" id="bulk-delete" title="Delete" aria-label="Delete"><span class="icon" data-icon="trash"></span></button>
+  <button class="ghost" id="bulk-clear" title="Clear (Esc)" aria-label="Clear"><span class="icon" data-icon="close"></span></button>
+</div>
 
 <div class="panel" id="panel" aria-hidden="true">
   <div class="top">
