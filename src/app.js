@@ -1009,7 +1009,9 @@ function showDesc() {
   const editing = document.activeElement === desc || !desc.value.trim();
   desc.hidden = !editing;
   view.hidden = editing;
-  if (!editing) view.innerHTML = markdown(desc.value);
+  // Hidden, it measured 0, as it does when the task before this one had a description.
+  if (editing) fit(desc);
+  else view.innerHTML = markdown(desc.value);
 }
 
 function editDesc() {
