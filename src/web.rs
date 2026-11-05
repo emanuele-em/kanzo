@@ -25,10 +25,12 @@ const INDEX: &str = include_str!("index.html");
 const IMAGE_LIMIT: usize = 25 * 1024 * 1024;
 const APP_JS: &str = include_str!("app.js");
 const LOGO: &[u8] = include_bytes!("logo.png");
+const ICON: &[u8] = include_bytes!("icon.png");
+const MANIFEST: &str = r##"{"id":"/","name":"Kanzo","start_url":"/","display":"standalone","background_color":"#ffffff","icons":[{"src":"/icon.png","sizes":"192x192 512x512","type":"image/png"}]}"##;
 
 /// Scripts only from this server, so even a bug in the Markdown renderer cannot run injected script.
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-                   connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+                   connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 pub async fn serve(home: Home, open: bool) -> Result<()> {
     let port = home.config.port;
@@ -40,7 +42,7 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
             if share::is_kanzo(&format!("127.0.0.1:{port}")).await {
                 println!("Kanzo is already running at {url}");
                 if open {
-                    open_browser(&url);
+                    open_board(&url, port);
                 }
                 return Ok(());
             }
@@ -63,7 +65,9 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
         println!("MCP over HTTP at {url}/mcp");
     }
     if open {
-        open_browser(&url);
+        // It waits to see if there's an app, which must not hold up the board.
+        let url = url.clone();
+        tokio::task::spawn_blocking(move || open_board(&url, port));
     }
     // Cancelling this also ends open MCP streams, which would otherwise hold up shutdown.
     let shutdown = CancellationToken::new();
@@ -171,6 +175,11 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/", get(|| async { Html(INDEX) }))
         .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
         .route("/logo.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], LOGO) }))
+        .route("/icon.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], ICON) }))
+        .route(
+            "/manifest.webmanifest",
+            get(|| async { ([(header::CONTENT_TYPE, "application/manifest+json")], MANIFEST) }),
+        )
         .route("/api/ping", get(|| async { "kanzo" }))
         .route("/api/update", get(update_status).post(update_now))
         .route("/api/network", get(network).post(change_network).route_layer(middleware::from_fn(this_computer)))
@@ -823,6 +832,21 @@ fn exit_with_console() {
             }
             std::process::exit(0);
         });
+    }
+}
+
+/// The installed app if there is one, or else a browser tab. An app opens the address it was
+/// installed from, so only on the default port, where that's this board.
+fn open_board(url: &str, port: u16) {
+    let app = cfg!(target_os = "macos")
+        && port == crate::home::DEFAULT_PORT
+        && std::process::Command::new("open")
+            .args(["-a", "Kanzo"])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+    if !app {
+        open_browser(url);
     }
 }
 

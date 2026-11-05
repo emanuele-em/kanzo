@@ -1370,6 +1370,13 @@ document.addEventListener("keydown", (e) => {
   const typing = e.target.closest("input, textarea, select");
   const plain = !typing && !e.metaKey && !e.ctrlKey;
   if (e.key === "Escape" && state.menu) { closeMenu(); return; }
+  // Only in the installed app: in a browser tab, these keys belong to the browser.
+  if (/^\d$/.test(e.key) && (e.metaKey || e.ctrlKey) && state.board && matchMedia("(display-mode: standalone)").matches) {
+    const { projects } = state.board;
+    const slug = e.key === "0" ? "all" : projects[e.key === "9" ? projects.length - 1 : e.key - 1]?.slug;
+    e.preventDefault();
+    if (slug) setProject(slug);
+  }
   if (e.key === "Escape" && state.task && !typing) closeTask();
   if (e.key === "Escape" && !typing) clearSelection();
   if ((e.key === "/" && plain) || (e.key === "k" && (e.metaKey || e.ctrlKey))) {
@@ -1732,6 +1739,16 @@ async function installUpdate(available) {
   }
   location.reload();
 }
+
+// Chromium's browsers ask this only while the board isn't installed; the others never do.
+let installPrompt;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  $("#install").hidden = false;
+});
+window.addEventListener("appinstalled", () => { $("#install").hidden = true; });
+$("#install").addEventListener("click", () => installPrompt.prompt());
 
 checkUpdate();
 setInterval(checkUpdate, 24 * 60 * 60 * 1000);

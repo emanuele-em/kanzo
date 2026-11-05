@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kanzo</title>
 <link rel="icon" href="/logo.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.png">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f9f9f9">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#000000">
 <style>
 :root {
   --bg: #ffffff; --sidebar: #f9f9f9; --col: #f7f7f7; --card: #ffffff; --card-hover: #f4f4f4; --panel: #ffffff;
@@ -497,6 +501,7 @@ label.setting { cursor: pointer; }
   <button class="ghost" id="new-project-toggle"><span class="icon" data-icon="newProject"></span>New project</button>
   <nav class="nav" id="nav"></nav>
   <button class="ghost update" id="update" hidden><span class="icon" data-icon="update"></span><span id="update-label"></span></button>
+  <button class="ghost" id="install" title="Use the board as an app of its own" hidden><span class="icon" data-icon="update"></span>Install app</button>
   <button class="ghost" id="settings" aria-haspopup="menu"><span class="icon" data-icon="settings"></span>Settings</button>
 </aside>
 
