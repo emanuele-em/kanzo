@@ -8,6 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::functions::FunctionFlags;
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
@@ -517,27 +518,37 @@ impl Store {
         Ok((tasks, hidden))
     }
 
-    // SQLite's LIKE ignores case only for ASCII. Registered here, not in open, because
-    // every operation opens a connection and only search needs this.
-    pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<Task>> {
+    // SQLite's LIKE ignores case only for ASCII. Registered per query, not in open, because
+    // every operation opens a connection and only filters need this.
+    fn add_has_word(&self) -> Result<()> {
         let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
         self.conn.create_scalar_function("has_word", 2, flags, |c| {
             Ok(c.get_raw(0).as_str()?.to_lowercase().contains(c.get_raw(1).as_str()?))
         })?;
-        let words: Vec<&str> = query.split_whitespace().take(10).collect();
-        let mut sql = format!("{} WHERE 1", Self::TASK_SELECT);
-        for i in 0..words.len() {
-            sql.push_str(&format!(
-                " AND (has_word(p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags, ?{n}) \
-                 OR t.id IN (SELECT task_id FROM comments WHERE has_word(body, ?{n})))",
-                n = i + 2
-            ));
-        }
+        Ok(())
+    }
+
+    pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<Task>> {
+        self.search_seeing(query, limit, &[])
+    }
+
+    /// Finds nothing through a property Settings hides from agents.
+    pub fn search_for_agent(&self, query: &str) -> Result<Vec<Task>> {
+        self.search_seeing(query, None, &self.hidden_properties()?)
+    }
+
+    fn search_seeing(&self, query: &str, limit: Option<usize>, hidden: &[String]) -> Result<Vec<Task>> {
+        self.add_has_word()?;
+        let filter = Filter::new(query, 2, hidden);
         // SQLite reads a negative LIMIT as no limit.
         let limit = limit.map_or(-1, |n| n as i64);
-        sql.push_str(&format!(" ORDER BY t.status = ?1, t.updated_at DESC, t.id DESC LIMIT {limit}"));
+        let sql = format!(
+            "{} WHERE 1{} ORDER BY t.status = ?1, t.updated_at DESC, t.id DESC LIMIT {limit}",
+            Self::TASK_SELECT,
+            filter.sql
+        );
         let mut values: Vec<String> = vec![DONE.to_string()];
-        values.extend(words.iter().map(|w| w.to_lowercase()));
+        values.extend(filter.values);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), Self::task_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -706,17 +717,29 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn next_task(&self, project_id: Option<i64>) -> Result<Option<Task>> {
+        self.next_task_matching(project_id, "")
+    }
+
+    pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
+        let filter = if query.trim().is_empty() {
+            Filter::default()
+        } else {
+            self.add_has_word()?;
+            Filter::new(query, 3, &self.hidden_properties()?)
+        };
         let [from, to, ..] = STATUSES;
         let id = self.write(|c| {
-            let id: Option<i64> = c
-                .query_row(
-                    "SELECT id FROM tasks WHERE status = ?1 AND human = 0 AND (?2 IS NULL OR project_id = ?2) \
-                     ORDER BY position LIMIT 1",
-                    params![from, project_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let sql = format!(
+                "SELECT t.id FROM tasks t JOIN projects p ON p.id = t.project_id
+                 WHERE t.status = ?1 AND t.human = 0 AND (?2 IS NULL OR t.project_id = ?2){}
+                 ORDER BY t.position LIMIT 1",
+                filter.sql
+            );
+            let mut values: Vec<Value> = vec![from.to_string().into(), project_id.into()];
+            values.extend(filter.values.iter().cloned().map(Value::from));
+            let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
             if let Some(id) = id {
                 let position = Self::end_of_column(c, to, id)?;
                 c.execute(
@@ -883,6 +906,164 @@ pub fn short_time(ts: &str) -> String {
         (Some(d), Some(t)) => format!("{d} {t} UTC"),
         _ => ts.to_string(),
     }
+}
+
+const COMMENT_COUNT: &str = "(SELECT count(*) FROM comments WHERE task_id = t.id)";
+const IMAGE_COUNT: &str = "(SELECT count(*) FROM images WHERE task_id = t.id)";
+const QUALIFIERS: [&str; 15] = [
+    "tag",
+    "status",
+    "project",
+    "title",
+    "description",
+    "url",
+    "comment",
+    "id",
+    "comments",
+    "images",
+    "created",
+    "updated",
+    "is",
+    "has",
+    "no",
+];
+
+/// A query as SQL to add to a WHERE clause: every part must match. A part is a word,
+/// `"some words"`, or a qualifier from the README's table, which `-` negates. Anything that
+/// isn't a complete qualifier, like `http://x` or `created:soon`, is a word.
+#[derive(Default)]
+struct Filter {
+    sql: String,
+    values: Vec<String>,
+    first: usize,
+}
+
+impl Filter {
+    fn new(query: &str, first: usize, hidden: &[String]) -> Self {
+        let mut filter = Self { first, ..Default::default() };
+        for (part, quoted) in query_parts(query).into_iter().take(10) {
+            let part = part.to_lowercase();
+            let qualifier = if quoted { None } else { filter.qualifier(&part, hidden) };
+            let clause = qualifier.unwrap_or_else(|| filter.word(&part, hidden));
+            if !clause.is_empty() {
+                filter.sql.push_str(&format!(" AND {clause}"));
+            }
+        }
+        filter
+    }
+
+    fn bind(&mut self, value: &str) -> String {
+        self.values.push(value.to_string());
+        format!("?{}", self.first + self.values.len() - 1)
+    }
+
+    fn word(&mut self, word: &str, hidden: &[String]) -> String {
+        let seen = |property: &str| !hidden.iter().any(|h| h == property);
+        let n = self.bind(word);
+        let mut text = String::from("p.slug || '#' || t.id || ' ' || t.title");
+        if seen("description") {
+            text.push_str(" || ' ' || t.description");
+        }
+        if seen("tags") {
+            text.push_str(" || ' ' || t.tags");
+        }
+        let mut sql = format!("has_word({text}, {n})");
+        if seen("comments") {
+            sql.push_str(&format!(" OR t.id IN (SELECT task_id FROM comments WHERE has_word(body, {n}))"));
+        }
+        format!("({sql})")
+    }
+
+    /// `None` when `part` is a plain word. Empty while its value is still being typed.
+    fn qualifier(&mut self, part: &str, hidden: &[String]) -> Option<String> {
+        let (negated, part) = part.strip_prefix('-').map_or((false, part), |rest| (true, rest));
+        let (name, value) = part.split_once(':')?;
+        let property = match name {
+            "tag" => "tags",
+            "comment" => "comments",
+            "is" => "human",
+            "has" | "no" => value,
+            other => other,
+        };
+        if hidden.iter().any(|h| h == property) {
+            return None;
+        }
+        if value.is_empty() && QUALIFIERS.contains(&name) {
+            return Some(String::new());
+        }
+        let sql = match (name, value) {
+            ("tag", tag) => format!("has_word(',' || t.tags || ',', {})", self.bind(&format!(",{tag},"))),
+            ("status", status) => format!("t.status = {}", self.bind(status)),
+            ("project", slug) => format!("p.slug = {}", self.bind(slug)),
+            ("title", word) => format!("has_word(t.title, {})", self.bind(word)),
+            ("description", word) => format!("has_word(t.description, {})", self.bind(word)),
+            ("url", word) => format!("has_word(t.url, {})", self.bind(word)),
+            ("comment", word) => {
+                format!("t.id IN (SELECT task_id FROM comments WHERE has_word(body, {}))", self.bind(word))
+            }
+            ("id", range) => range_sql("t.id", range, number)?,
+            ("comments", range) => range_sql(COMMENT_COUNT, range, number)?,
+            ("images", range) => range_sql(IMAGE_COUNT, range, number)?,
+            ("created", range) => range_sql("substr(t.created_at, 1, 10)", range, date)?,
+            ("updated", range) => range_sql("substr(t.updated_at, 1, 10)", range, date)?,
+            ("is", "human") => "t.human".to_string(),
+            ("has" | "no", "description") => "t.description <> ''".to_string(),
+            ("has" | "no", "tags") => "t.tags <> ''".to_string(),
+            ("has" | "no", "url") => "t.url <> ''".to_string(),
+            ("has" | "no", "comments") => format!("{COMMENT_COUNT} > 0"),
+            ("has" | "no", "images") => format!("{IMAGE_COUNT} > 0"),
+            _ => return None,
+        };
+        Some(if negated != (name == "no") { format!("NOT ({sql})") } else { sql })
+    }
+}
+
+/// Splits on spaces outside double quotes, and drops the quotes: `tag:"needs review"` is one
+/// part. True when the part starts with a quote, which makes it a word whatever it says.
+fn query_parts(query: &str) -> Vec<(String, bool)> {
+    let mut parts = Vec::new();
+    let (mut part, mut quoted, mut starts_quoted) = (String::new(), false, false);
+    for c in query.chars() {
+        match c {
+            '"' => {
+                starts_quoted |= part.is_empty() && !quoted;
+                quoted = !quoted;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !part.is_empty() {
+                    parts.push((std::mem::take(&mut part), starts_quoted));
+                }
+                starts_quoted = false;
+            }
+            c => part.push(c),
+        }
+    }
+    if !part.is_empty() {
+        parts.push((part, starts_quoted));
+    }
+    parts
+}
+
+/// `5`, `>5`, `>=5`, `<5`, `<=5` or `5..9`. `side` only lets through what's safe in SQL.
+fn range_sql(column: &str, range: &str, side: fn(&str) -> Option<String>) -> Option<String> {
+    if let Some((from, to)) = range.split_once("..") {
+        return Some(format!("{column} BETWEEN {} AND {}", side(from)?, side(to)?));
+    }
+    for op in [">=", "<=", ">", "<"] {
+        if let Some(rest) = range.strip_prefix(op) {
+            return Some(format!("{column} {op} {}", side(rest)?));
+        }
+    }
+    Some(format!("{column} = {}", side(range)?))
+}
+
+fn number(text: &str) -> Option<String> {
+    text.parse::<i64>().ok().map(|n| n.to_string())
+}
+
+fn date(text: &str) -> Option<String> {
+    let dashes = |i: usize, b: u8| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() };
+    (text.len() == 10 && text.bytes().enumerate().all(|(i, b)| dashes(i, b))).then(|| format!("'{text}'"))
 }
 
 fn clean_tags(input: &str) -> Vec<String> {
@@ -1089,6 +1270,163 @@ mod tests {
         assert!(titles("nothing-like-this").is_empty());
         assert_eq!(s.search("", Some(10)).unwrap().len(), 3, "no words: the latest changes");
         assert_eq!(s.search("login", Some(1)).unwrap()[0].id, login.id);
+    }
+
+    #[test]
+    fn filter_by_any_property() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let web = s.create_project("web", "", None).unwrap();
+        let patch = |tags: &str, status: &str| TaskPatch {
+            tags: Some(tags.into()),
+            status: Some(status.into()),
+            description: Some("Users loop on /login".into()),
+            ..Default::default()
+        };
+        let login = s.create_task_in(api.id, "Fix login", patch("Bug, needs review", "doing")).unwrap();
+        let debug = s.create_task_in(api.id, "Debug tools", patch("debugger", "todo")).unwrap();
+        let human = s.create_task(web.id, "Call the Bank", "").unwrap();
+        s.update_task(
+            human.id,
+            TaskPatch { human: Some(true), url: Some("https://x.dev/1".into()), ..Default::default() },
+        )
+        .unwrap();
+        s.add_comment(debug.id, "you", "Needs the new logo", &[]).unwrap();
+        s.add_comment(debug.id, "you", "Soon", &[]).unwrap();
+        s.conn.execute("INSERT INTO images (task_id, file) VALUES (?1, 'a.png')", [human.id]).unwrap();
+        s.conn
+            .execute("UPDATE tasks SET created_at = '2026-01-15T10:00:00Z', updated_at = '2026-03-01T10:00:00Z'", [])
+            .unwrap();
+        s.conn.execute("UPDATE tasks SET created_at = '2026-02-01T10:00:00Z' WHERE id = ?1", [login.id]).unwrap();
+
+        let ids = |q: &str| {
+            let mut ids: Vec<i64> = s.search(q, None).unwrap().into_iter().map(|t| t.id).collect();
+            ids.sort_unstable();
+            ids
+        };
+        let (l, d, h) = (login.id, debug.id, human.id);
+        for (q, want) in [
+            ("tag:bug", vec![l]),
+            ("TAG:BUG", vec![l]),
+            ("tag:debug", vec![]),
+            ("tag:\"needs review\"", vec![l]),
+            ("-tag:bug", vec![d, h]),
+            ("status:doing", vec![l]),
+            ("status:DOING", vec![l]),
+            ("project:api", vec![l, d]),
+            ("-project:api", vec![h]),
+            ("title:login", vec![l]),
+            ("title:loop", vec![]),
+            ("description:loop", vec![l, d]),
+            ("url:x.dev", vec![h]),
+            ("comment:logo", vec![d]),
+            (&format!("id:{l}"), vec![l]),
+            (&format!("id:>{l}"), vec![d, h]),
+            (&format!("id:{l}..{d}"), vec![l, d]),
+            ("comments:2", vec![d]),
+            ("comments:>=1", vec![d]),
+            ("comments:<1", vec![l, h]),
+            ("images:1", vec![h]),
+            ("created:2026-02-01", vec![l]),
+            ("created:<2026-02-01", vec![d, h]),
+            ("created:>=2026-02-01", vec![l]),
+            ("created:2026-01-01..2026-01-31", vec![d, h]),
+            ("updated:2026-03-01", vec![l, d, h]),
+            ("is:human", vec![h]),
+            ("-is:human", vec![l, d]),
+            ("has:url", vec![h]),
+            ("no:url", vec![l, d]),
+            ("-has:url", vec![l, d]),
+            ("-no:url", vec![h]),
+            ("has:tags", vec![l, d]),
+            ("has:description", vec![l, d]),
+            ("has:comments", vec![d]),
+            ("no:images", vec![l, d]),
+            ("tag:bug status:doing", vec![l]),
+            ("tag:bug status:todo", vec![]),
+            ("project:api fix", vec![l]),
+            ("project:api -status:doing", vec![d]),
+            // Being typed: filters nothing yet.
+            ("tag:", vec![l, d, h]),
+            ("-status:", vec![l, d, h]),
+            ("has:", vec![l, d, h]),
+            // Not a complete qualifier: a word.
+            ("created:soon", vec![]),
+            ("comments:many", vec![]),
+            ("is:nothing", vec![]),
+            ("has:nothing", vec![]),
+            ("http://x.dev", vec![]),
+            ("-login", vec![]),
+            // Quotes make a phrase, or text that only looks like a qualifier.
+            ("\"loop on\"", vec![l, d]),
+            ("\"tag:bug\"", vec![]),
+        ] {
+            assert_eq!(ids(q), want, "{q}");
+        }
+        s.update_task(l, TaskPatch { description: Some("status:doing is the text".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(ids("\"status:doing\""), [l]);
+    }
+
+    #[test]
+    fn filter_values_cannot_change_the_sql() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        s.create_task(api.id, "Keep me", "").unwrap();
+        for q in [
+            "tag:x'OR'1'='1",
+            "created:2026-01-01'OR'1'='1",
+            "created:'OR'1'='1'--",
+            "id:1)OR(1=1",
+            "comments:1;DROP",
+            "created:2026-01-0'",
+            "title:'",
+            "status:'--",
+        ] {
+            assert!(s.search(q, None).unwrap().is_empty(), "{q}");
+        }
+        assert_eq!(s.search("", None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn next_task_takes_the_top_match_and_never_a_human_one() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let tagged = |title: &str, human: bool| {
+            let patch = TaskPatch { tags: Some("billing".into()), human: Some(human), ..Default::default() };
+            s.create_task_in(api.id, title, patch).unwrap();
+        };
+        s.create_task(api.id, "Not in the epic", "").unwrap();
+        tagged("For the user", true);
+        tagged("First in the epic", false);
+        tagged("Second in the epic", false);
+
+        let next = |q: &str| s.next_task_matching(Some(api.id), q).unwrap().map(|t| t.title);
+        assert_eq!(next("is:human"), None);
+        assert_eq!(next("tag:nope"), None);
+        assert_eq!(next("tag:billing").as_deref(), Some("First in the epic"));
+        assert_eq!(next("TAG:billing second").as_deref(), Some("Second in the epic"));
+        assert_eq!(next("tag:billing"), None, "the human one stays");
+        assert_eq!(next("  ").as_deref(), Some("Not in the epic"));
+    }
+
+    #[test]
+    fn agents_cannot_filter_through_hidden_properties() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let patch = TaskPatch { tags: Some("secret".into()), ..Default::default() };
+        let t = s.create_task_in(api.id, "Plain title", patch).unwrap();
+        s.add_comment(t.id, "you", "whisper", &[]).unwrap();
+        let found = |q: &str| s.search_for_agent(q).unwrap().len();
+        assert_eq!((found("tag:secret"), found("secret"), found("comment:whisper"), found("whisper")), (1, 1, 1, 1));
+
+        s.set_property("tags", false).unwrap();
+        s.set_property("comments", false).unwrap();
+        assert_eq!((found("tag:secret"), found("secret"), found("comment:whisper"), found("whisper")), (0, 0, 0, 0));
+        assert_eq!(found("has:tags"), 0);
+        assert_eq!(s.next_task_matching(None, "tag:secret").unwrap().map(|t| t.id), None);
+        assert_eq!(found("plain"), 1, "what stays visible still matches");
+        assert_eq!(s.search("tag:secret", None).unwrap().len(), 1, "the board still sees them");
     }
 
     #[test]

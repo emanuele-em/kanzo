@@ -88,6 +88,26 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
   <img alt="The board with the Backlog column on, left of Todo" src="docs/img/backlog-light.jpg">
 </picture>
 
+## Filter and search
+
+> [!TIP]
+> **Just ask your agent:** *"take the next kanzo task tagged billing,"* or *"list what's left in kanzo with tag:billing."*
+
+The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `next_task` all understand the same words, like on GitHub. Every part must match, and `-` before a qualifier negates it: `tag:billing -status:done`.
+
+| Qualifier | Finds | Example |
+| --- | --- | --- |
+| `tag:` | that exact tag | `tag:bug`, `tag:"needs review"` |
+| `status:` | a column | `status:doing` |
+| `project:` | a project | `project:api` |
+| `title:`, `description:`, `url:`, `comment:` | text in that field | `title:login`, `comment:"on hold"` |
+| `id:`, `comments:`, `images:` | a number, or a range | `id:12`, `comments:>2`, `images:1..3` |
+| `created:`, `updated:` | a date, or a range | `created:2026-11-05`, `updated:<2026-01-31` |
+| `is:human` | tasks for you, not agents | `-is:human` |
+| `has:`, `no:` | `description`, `tags`, `url`, `comments` or `images` | `has:url`, `no:tags` |
+
+Anything else is plain text. Use quotes for a phrase, `"on hold"`, or to look for text that reads like a qualifier, `"tag:bug"`. Agents can't filter through a property you've hidden in Settings.
+
 ## Use it on several computers
 
 Two ways, neither with any setup: share one board live, or sync it between machines.

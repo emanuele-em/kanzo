@@ -147,9 +147,26 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 }
 #new-task { display: inline-flex; align-items: center; gap: 6px; padding-left: 12px; }
 #new-task .icon svg { width: 16px; height: 16px; }
+.query { position: relative; display: block; }
+.query[hidden] { display: none; }
+.query input { position: relative; display: block; color: transparent; caret-color: var(--text); }
+.query input::placeholder { color: var(--faint); }
+.query input::selection { color: transparent; background: color-mix(in srgb, var(--link) 30%, transparent); }
+.query-mirror {
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: flex; align-items: center; overflow: hidden;
+  color: var(--text); line-height: normal; pointer-events: none;
+}
+.query-mirror > span, .chip > span:first-child { white-space: pre; }
+/* Room to scroll as far as the input does, with its clear button. */
+.query-mirror > span { padding-right: 40px; }
+/* Color only, no weight or padding: the text has to stay exactly under the input's caret. */
+.qualifier-key { color: var(--link); }
+.chip .qualifier-key { font-weight: 600; }
+/* Stops where the input's text does, before its clear button. */
+#filter-box .query-mirror { padding: 0 15px; font-size: 13px; clip-path: inset(0 28px 0 0); }
 #filter {
   width: 180px; height: 35px; padding: 0 14px; border: 1px solid var(--border); border-radius: 99px;
-  background: transparent; color: var(--text); font: inherit; font-size: 13px; outline: none;
+  background: transparent; font: inherit; font-size: 13px; outline: none;
 }
 #filter:focus { border-color: var(--link); }
 #filter.on { border-color: var(--link); background: color-mix(in srgb, var(--link) 8%, transparent); }
@@ -351,7 +368,9 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 }
 .search-field { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
 .search-field .icon { color: var(--faint); }
-.search-field input { flex: 1; min-width: 0; border: 0; background: none; font-size: 16px; }
+.search-field .query { flex: 1; min-width: 0; }
+.search-field input { width: 100%; padding: 0; border: 0; background: none; font-size: 16px; }
+.search-field .query-mirror { font-size: 16px; }
 .search-field input::-webkit-search-cancel-button { display: none; }
 .results { overflow-y: auto; padding: 6px; }
 .dialog-window {
@@ -451,7 +470,8 @@ label.setting { cursor: pointer; }
   #settings-nav { flex-direction: row; border-right: 0; border-bottom: 1px solid var(--border); }
   header { padding: 12px; }
   #filters { order: 1; }
-  #filter { order: 1; flex: 1 0 100%; width: auto; }
+  #filter-box { order: 1; flex: 1 0 100%; }
+  #filter { width: 100%; }
 }
 </style>
 </head>
@@ -472,7 +492,7 @@ label.setting { cursor: pointer; }
   <header>
     <div class="info" id="header"></div>
     <div id="filters"></div>
-    <input type="search" id="filter" placeholder="Filter board" title="Show only the tasks that match (f)" aria-label="Filter the board" autocomplete="off" spellcheck="false" hidden>
+    <span class="query" id="filter-box" hidden><span class="query-mirror" aria-hidden="true"><span></span></span><input type="search" id="filter" placeholder="Filter board" title="Show only the tasks that match, like tag:bug or -status:done (f)" aria-label="Filter the board" autocomplete="off" spellcheck="false"></span>
     <button class="ghost" id="human-only" title="Show only human tasks (h)" aria-label="Show only human tasks" aria-pressed="false" hidden><span class="icon" data-icon="human"></span></button>
     <button class="ghost" id="network" aria-haspopup="dialog" aria-controls="network-menu"></button>
     <button class="btn primary" id="new-task" title="New task (n)" hidden><span class="icon" data-icon="plus"></span>New task</button>
@@ -592,7 +612,7 @@ label.setting { cursor: pointer; }
 </div>
 <div class="search-dialog" id="search-dialog" hidden>
   <div class="search-window" role="dialog" aria-label="Search tasks">
-    <label class="search-field"><span class="icon" data-icon="search"></span><input id="search" type="search" placeholder="Search tasks" autocomplete="off" spellcheck="false" aria-label="Search tasks"></label>
+    <label class="search-field"><span class="icon" data-icon="search"></span><span class="query"><span class="query-mirror" aria-hidden="true"><span></span></span><input id="search" type="search" placeholder="Search tasks" autocomplete="off" spellcheck="false" aria-label="Search tasks"></span></label>
     <div class="results" id="search-results"></div>
   </div>
 </div>
