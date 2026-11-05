@@ -816,7 +816,18 @@ function dropFresh() {
   api("DELETE", `/tasks/${id}`).then(loadBoard, () => {});
 }
 
+// A reload or a closed tab may never blur the field being typed in.
 window.addEventListener("pagehide", () => {
+  const active = document.activeElement;
+  const fields = !panelTask ? null
+    : active === $("#p-desc") && active.value.trim() !== panelTask.description ? { description: active.value }
+    : active === $("#p-tags") && cleanTags(active.value).join() !== panelTask.tags.join() ? { tags: cleanTags(active.value).join() }
+    : null;
+  if (fields) {
+    fresh = null;
+    fetch(`/api/tasks/${panelTask.id}`, { method: "PATCH", keepalive: true,
+                                          headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) });
+  }
   if (fresh) fetch(`/api/tasks/${fresh}`, { method: "DELETE", keepalive: true });
 });
 
@@ -855,6 +866,8 @@ $("#new-project").addEventListener("submit", async (e) => {
 const panel = $("#panel");
 let panelTask = null;
 let panelWaits = "";
+// Unsent comments by task, so closing the panel doesn't lose one.
+const drafts = new Map();
 
 const taskLink = (t) => el("button", { type: "button", class: "tag", title: key(t), onclick: () => pick(t) },
   statusIcon(t.status), el("span", {}, t.title));
@@ -865,7 +878,7 @@ async function openTask(id) {
   state.task = id;
   document.querySelectorAll(".card.open").forEach((c) => c.classList.remove("open"));
   document.querySelector(`.card[data-id="${id}"]`)?.classList.add("open");
-  $("#p-comment").value = "";
+  $("#p-comment").value = drafts.get(id) || "";
   pending = [];
   renderPending();
   fit($("#p-comment"));
@@ -992,6 +1005,14 @@ function cancelField(e, saved) {
   e.target.blur();
 }
 
+// For writing worth keeping: Esc leaves the field, and leaving it saves. Closing a new task
+// saves what was typed, and drops the task if nothing was.
+function leaveField(e) {
+  e.stopPropagation();
+  if (fresh && fresh === state.task) closeTask();
+  else e.target.blur();
+}
+
 $("#p-close").addEventListener("click", closeTask);
 $("#p-key").addEventListener("click", () => { if (panelTask) copyKey(key(panelTask)); });
 for (const field of [$("#p-title"), $("#p-desc")]) field.addEventListener("input", () => fit(field));
@@ -1010,7 +1031,7 @@ $("#p-title").addEventListener("blur", (e) => {
 
 $("#p-desc").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); closeTask(); }
-  else if (e.key === "Escape") cancelField(e, panelTask ? panelTask.description : "");
+  else if (e.key === "Escape") leaveField(e);
 });
 $("#p-desc").addEventListener("blur", (e) => {
   if (panelTask && e.target.value.trim() !== panelTask.description) patchTask({ description: e.target.value });
@@ -1111,7 +1132,7 @@ for (const [zone, toComment] of [[$("#p-desc").closest(".section"), false], [$("
 const cleanTags = (text) => [...new Set(text.split(",").map((t) => t.trim().replace(/\s+/g, " ").toLowerCase()).filter(Boolean))];
 $("#p-tags").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
-  else if (e.key === "Escape") cancelField(e, panelTask ? panelTask.tags.join(", ") : "");
+  else if (e.key === "Escape") leaveField(e);
 });
 $("#p-tags").addEventListener("blur", (e) => {
   if (!panelTask) return;
@@ -1146,6 +1167,7 @@ $("#p-comment-form").addEventListener("submit", async (e) => {
   try {
     await api("POST", `/tasks/${panelTask.id}/comments`, { body, images: pending });
     if (fresh === panelTask.id) fresh = null;
+    drafts.delete(panelTask.id);
     $("#p-comment").value = "";
     pending = [];
     renderPending();
@@ -1154,7 +1176,11 @@ $("#p-comment-form").addEventListener("submit", async (e) => {
     loadBoard();
   } catch (err) { toast(err.message); }
 });
-$("#p-comment").addEventListener("input", (e) => { $("#p-send").disabled = !e.target.value.trim() && !pending.length; fit(e.target); });
+$("#p-comment").addEventListener("input", (e) => {
+  if (e.target.value) drafts.set(state.task, e.target.value); else drafts.delete(state.task);
+  $("#p-send").disabled = !e.target.value.trim() && !pending.length;
+  fit(e.target);
+});
 $("#p-comment").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#p-comment-form").requestSubmit(); }
 });
