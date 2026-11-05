@@ -621,12 +621,10 @@ function wordsOf(query) {
 
 // A query as text, with its qualifiers marked. Keeps every character, for .query-mirror to line up.
 function queryNodes(query) {
-  return (query.match(/\s+|(?:[^\s"]+|"[^"]*"?)+/g) || []).map((part) => {
-    const qualifier = qualifierIn(part);
-    if (!qualifier) return part;
+  return (query.match(/\s+|(?:[^\s"]+|"[^"]*"?)+/g) || []).flatMap((part) => {
+    if (!qualifierIn(part)) return part;
     const key = part.indexOf(":") + 1;
-    return el("span", { class: qualifier.value ? "qualifier complete" : "qualifier" },
-      el("span", { class: "qualifier-key" }, part.slice(0, key)), part.slice(key));
+    return [el("span", { class: "qualifier-key" }, part.slice(0, key)), part.slice(key)];
   });
 }
 
