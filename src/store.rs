@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
@@ -516,14 +517,19 @@ impl Store {
         Ok((tasks, hidden))
     }
 
-    // LIKE already ignores the case of ASCII letters, as lower() would.
+    // SQLite's LIKE ignores case only for ASCII. Registered here, not in open, because
+    // every operation opens a connection and only search needs this.
     pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<Task>> {
+        let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+        self.conn.create_scalar_function("has_word", 2, flags, |c| {
+            Ok(c.get_raw(0).as_str()?.to_lowercase().contains(c.get_raw(1).as_str()?))
+        })?;
         let words: Vec<&str> = query.split_whitespace().take(10).collect();
         let mut sql = format!("{} WHERE 1", Self::TASK_SELECT);
         for i in 0..words.len() {
             sql.push_str(&format!(
-                " AND ((p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags) \
-                 LIKE ?{n} ESCAPE '\\' OR t.id IN (SELECT task_id FROM comments WHERE body LIKE ?{n} ESCAPE '\\'))",
+                " AND (has_word(p.slug || '#' || t.id || ' ' || t.title || ' ' || t.description || ' ' || t.tags, ?{n}) \
+                 OR t.id IN (SELECT task_id FROM comments WHERE has_word(body, ?{n})))",
                 n = i + 2
             ));
         }
@@ -531,10 +537,7 @@ impl Store {
         let limit = limit.map_or(-1, |n| n as i64);
         sql.push_str(&format!(" ORDER BY t.status = ?1, t.updated_at DESC, t.id DESC LIMIT {limit}"));
         let mut values: Vec<String> = vec![DONE.to_string()];
-        for w in &words {
-            let escaped = w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-            values.push(format!("%{escaped}%"));
-        }
+        values.extend(words.iter().map(|w| w.to_lowercase()));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), Self::task_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1088,6 +1091,16 @@ mod tests {
         assert!(titles("nothing-like-this").is_empty());
         assert_eq!(s.search("", Some(10)).unwrap().len(), 3, "no words: the latest changes");
         assert_eq!(s.search("login", Some(1)).unwrap()[0].id, login.id);
+    }
+
+    #[test]
+    fn search_ignores_case_beyond_ascii() {
+        let (_dir, s) = store();
+        let web = s.create_project("web", "", None).unwrap();
+        s.create_task(web.id, "Über café", "").unwrap();
+        for q in ["über", "ÜBER", "Über", "café", "CAFÉ", "web#1"] {
+            assert_eq!(s.search(q, None).unwrap().len(), 1, "{q}");
+        }
     }
 
     #[test]
