@@ -38,7 +38,8 @@ macro_rules! instructions {
             " machine, for all their projects. Tasks look like api#12. ",
             $project,
             " Keep it current unasked: doing when you start a task, comments on what you did, review when you \
-             finish or get stuck, url for a PR you opened. Leave done and human tasks to the user."
+             finish or get stuck, url for a PR you opened. Leave done and human tasks to the user. Link files as \
+             [name](file:///path)."
         )
     };
 }

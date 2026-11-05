@@ -210,7 +210,7 @@ function inline(s) {
   s = s
     .replace(/\u0000/g, "")
     .replace(/`([^`]+)`/g, (_, code) => keep(`<code>${code}</code>`))
-    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:)[^\s)\u0000]+)\)/g, (_, text, url) => link(url, emphasis(text)))
+    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|file:\/\/\/)[^\s)\u0000]+)\)/g, (_, text, url) => link(url, emphasis(text)))
     .replace(/(^|[\s(])(https?:\/\/[^\s)\u0000]+)/g, (_, before, url) => before + link(url, url));
   const restore = (html) => html.replace(/\u0000(\d+)\u0000/g, (_, i) => restore(saved[i]));
   return restore(emphasis(s));
@@ -1012,6 +1012,17 @@ function leaveField(e) {
   if (fresh && fresh === state.task) closeTask();
   else e.target.blur();
 }
+
+// A page can't open a file: link, so the board does, on the computer it runs on.
+panel.addEventListener("click", async (e) => {
+  const link = e.target.closest('a[href^="file:///"]');
+  if (!link) return;
+  e.preventDefault();
+  try {
+    const path = decodeURIComponent(link.getAttribute("href").slice(7)).replace(/^\/([a-zA-Z]:)/, "$1");
+    await api("POST", "/open", { path });
+  } catch (err) { toast(err.message); }
+});
 
 $("#p-close").addEventListener("click", closeTask);
 $("#p-key").addEventListener("click", () => { if (panelTask) copyKey(key(panelTask)); });

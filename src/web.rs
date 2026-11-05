@@ -173,6 +173,8 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/ping", get(|| async { "kanzo" }))
         .route("/api/update", get(update_status).post(update_now))
         .route("/api/network", get(network).post(change_network).route_layer(middleware::from_fn(this_computer)))
+        // Not forwarded by a joined board either: the files are on this computer.
+        .route("/api/open", post(open_file).route_layer(middleware::from_fn(this_computer)))
         .merge(shared)
         .layer(Extension(guard.clone()))
         .layer(middleware::from_fn_with_state(guard, protect))
@@ -291,7 +293,7 @@ async fn forward(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> R
 
 async fn this_computer(req: Request, next: Next) -> Response {
     match guest(&req) {
-        Some(_) => (StatusCode::FORBIDDEN, "only the computer with the board can change its network").into_response(),
+        Some(_) => fail(StatusCode::FORBIDDEN, "only the computer with the board can do that").into_response(),
         None => next.run(req).await,
     }
 }
@@ -702,6 +704,16 @@ async fn change_network(
 }
 
 #[derive(Deserialize)]
+struct OpenFile {
+    path: std::path::PathBuf,
+}
+
+async fn open_file(State(home): Shared, Json(o): Json<OpenFile>) -> Reply {
+    blocking(move || home.open_file(&o.path)).await?.map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({})).into_response())
+}
+
+#[derive(Deserialize)]
 struct SyncRequest {
     #[serde(default)]
     keep: Option<String>,
@@ -809,7 +821,52 @@ fn open_browser(url: &str) {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
+
+    /// The status of asking a board to open `path`, from `from`.
+    async fn open_from(home: &Home, from: Option<IpAddr>, path: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), Net::Sharing));
+        let mut app = router(home.clone(), guard, CancellationToken::new());
+        if let Some(ip) = from {
+            app = app.layer(Extension(ConnectInfo(SocketAddr::new(ip, 1))));
+        }
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let body = json!({ "path": path }).to_string();
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let head = format!(
+            "POST /api/open HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        conn.write_all(format!("{head}{body}").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).await.unwrap();
+        reply.split(' ').nth(1).unwrap().to_string()
+    }
+
+    #[test]
+    fn only_this_computer_opens_a_file_and_only_a_file() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut home = Home::open(tmp.path().to_path_buf()).unwrap();
+            home.config.editor = Some("true".into());
+            let file = tmp.path().join("notes.md");
+            std::fs::write(&file, "").unwrap();
+            let file = file.to_str().unwrap();
+
+            let guest = Some(IpAddr::from([192, 168, 1, 9]));
+            assert_eq!(open_from(&home, guest, file).await, "403");
+            assert_eq!(open_from(&home, None, "notes.md").await, "400");
+            assert_eq!(open_from(&home, None, tmp.path().to_str().unwrap()).await, "400");
+            assert_eq!(open_from(&home, None, &format!("{file}.missing")).await, "400");
+            #[cfg(unix)]
+            assert_eq!(open_from(&home, None, file).await, "200");
+        });
+    }
 
     #[test]
     fn hosts() {
