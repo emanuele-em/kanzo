@@ -228,7 +228,7 @@ mcp_http = true        # MCP at /mcp
 editor = "/usr/local/bin/cursor"   # opens file:/// links; on macOS, your text editor without it
 ```
 
-Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted.
+Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted. What's new, in the same place, lists this version's new features and bug fixes.
 
 ## Small and fast
 

@@ -94,6 +94,7 @@ const ICONS = {
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  news: '<path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.2 6.1-.7z"/>',
   comment: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>',
 };
@@ -1718,6 +1719,7 @@ function toggleSettingsMenu() {
     el("button", { onclick: () => openSettings() }, icon("settings"), "Settings"),
     el("button", { onclick: () => { closeMenu(); checkForUpdates(); } }, icon("update"), "Check for updates",
       el("span", { class: "value" }, `v${state.board.version}`)),
+    el("button", { onclick: () => openSettings("whats-new") }, icon("news"), "What's new"),
     el("button", { onclick: sync }, icon("sync"), "Sync"));
   document.body.append(menu);
   const r = button.getBoundingClientRect();
@@ -1746,6 +1748,17 @@ function openSettings(section = "board") {
 function showSection(section) {
   document.querySelectorAll("#settings-nav button").forEach((b) => b.classList.toggle("active", b.dataset.section === section));
   document.querySelectorAll(".settings-pane").forEach((p) => { p.hidden = p.dataset.section !== section; });
+  if (section === "whats-new") loadWhatsNew();
+}
+
+// Fetched when first shown, so the page doesn't carry the notes on every load.
+async function loadWhatsNew() {
+  const notes = $("#whats-new");
+  if (notes.firstChild) return;
+  try {
+    const res = await fetch("/changelog.md");
+    if (res.ok) notes.innerHTML = markdown(await res.text());
+  } catch {}
 }
 
 function closeSettings() {
@@ -1778,6 +1791,7 @@ $('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL
       el("span")));
 }));
 $("#settings-update").addEventListener("click", checkForUpdates);
+$("#settings-news").addEventListener("click", () => showSection("whats-new"));
 
 async function checkUpdate() {
   try {

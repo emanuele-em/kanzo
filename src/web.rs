@@ -26,6 +26,7 @@ const IMAGE_LIMIT: usize = 25 * 1024 * 1024;
 const APP_JS: &str = include_str!("app.js");
 const LOGO: &[u8] = include_bytes!("logo.png");
 const ICON: &[u8] = include_bytes!("icon.png");
+const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 const MANIFEST: &str = r##"{"id":"/","name":"Kanzo","start_url":"/","display":"standalone","background_color":"#ffffff","icons":[{"src":"/icon.png","sizes":"192x192 512x512","type":"image/png"}]}"##;
 
 /// Scripts only from this server, so even a bug in the Markdown renderer cannot run injected script.
@@ -177,6 +178,7 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
         .route("/logo.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], LOGO) }))
         .route("/icon.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], ICON) }))
+        .route("/changelog.md", get(|| async { ([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], CHANGELOG) }))
         .route(
             "/manifest.webmanifest",
             get(|| async { ([(header::CONTENT_TYPE, "application/manifest+json")], MANIFEST) }),
@@ -882,6 +884,12 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    #[test]
+    fn changelog_is_for_this_version() {
+        let heading = format!("## {} - ", update::CURRENT);
+        assert!(CHANGELOG.starts_with(&heading), "CHANGELOG.md should start with the notes for this release");
+    }
 
     /// The status of asking a board to open `path`, from `from`.
     async fn open_from(home: &Home, from: Option<IpAddr>, path: &str) -> String {
