@@ -83,14 +83,17 @@ impl Home {
     pub fn open(dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let dir = dir.canonicalize().unwrap_or(dir);
-        write_if_missing(&dir.join("config.toml"), CONFIG_TEMPLATE)?;
         write_if_missing(&dir.join(".gitignore"), GITIGNORE)?;
 
-        let path = dir.join("config.toml");
+        let mut home = Self { dir, config: Config::default() };
+        // During a pull, config.toml can be missing or another machine's, until kanzo sync puts it back.
+        let lock = home.lock_shared()?;
+        let path = home.dir.join("config.toml");
+        write_if_missing(&path, CONFIG_TEMPLATE)?;
         let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let config: Config = toml::from_str(&text).with_context(|| format!("{} is not valid", path.display()))?;
+        home.config = toml::from_str(&text).with_context(|| format!("{} is not valid", path.display()))?;
+        drop(lock);
 
-        let home = Self { dir, config };
         home.store()?.migrate()?;
         Ok(home)
     }
@@ -121,11 +124,15 @@ impl Home {
     /// Callers keep it for one operation only, so a database replaced by `kanzo sync`
     /// is picked up on the next one. The shared lock lets sync wait for it to finish.
     pub fn store(&self) -> store::Result<Store> {
+        Store::open(&self.db_path(), self.lock_shared()?)
+    }
+
+    fn lock_shared(&self) -> store::Result<Option<File>> {
         let lock = self.lock_file().map_err(|e| store::Error::Invalid(format!("{e:#}")))?;
         let deadline = Instant::now() + LOCK_WAIT;
-        let lock = loop {
+        loop {
             match lock.try_lock_shared() {
-                Ok(()) => break Some(lock),
+                Ok(()) => return Ok(Some(lock)),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(25))
                 }
@@ -135,14 +142,13 @@ impl Home {
                 Err(TryLockError::Error(e)) if unsupported(&e) => {
                     static WARN: std::sync::Once = std::sync::Once::new();
                     WARN.call_once(|| eprintln!("kanzo: {NO_LOCKS}"));
-                    break None;
+                    return Ok(None);
                 }
                 Err(TryLockError::Error(e)) => {
                     return Err(store::Error::Invalid(format!("cannot lock kanzo.lock: {e}")));
                 }
             }
-        };
-        Store::open(&self.db_path(), lock)
+        }
     }
 
     pub fn images(&self) -> PathBuf {
@@ -269,6 +275,25 @@ mod tests {
         assert!(!waiting.is_finished());
         drop(lock);
         assert_eq!(waiting.join().unwrap().unwrap(), 4);
+    }
+
+    #[test]
+    fn open_waits_for_a_pull_to_put_config_toml_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        let config = home.dir.join("config.toml");
+        let lock = home.lock_exclusive().unwrap();
+        fs::write(&config, "listen = \"0.0.0.0\"\n").unwrap();
+
+        let opening = std::thread::spawn({
+            let dir = home.dir.clone();
+            move || Home::open(dir)
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!opening.is_finished());
+        fs::write(&config, "listen = \"127.0.0.1\"\n").unwrap();
+        drop(lock);
+        assert!(opening.join().unwrap().unwrap().config.listen.is_loopback());
     }
 
     #[test]
