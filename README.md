@@ -213,6 +213,8 @@ listen = "127.0.0.1"   # sharing opens the board to your network; "0.0.0.0" keep
 mcp_http = true        # MCP at /mcp
 ```
 
+These settings stay on each machine: `kanzo sync` leaves them out.
+
 Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted. The board itself reads English or Chinese: pick the language under Settings → Board, and it remembers your choice.
 
 ## Small and fast
