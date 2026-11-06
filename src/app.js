@@ -95,6 +95,7 @@ const ICONS = {
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="4"/><path d="M9 4v16"/>',
+  waits: '<path d="M6 3h12M6 21h12M7 3v4l5 5 5-5V3M7 21v-4l5-5 5 5v4"/>',
   news: '<path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.2 6.1-.7z"/>',
   comment: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>',
@@ -849,7 +850,7 @@ function urlChip(t) {
 
 // Only on cards, like the URL. Most tasks have no waiting_on at all, to keep the board's reply small.
 function waitChip(t) {
-  return t.waiting_on ? el("span", { class: "tag waits" }, `Waits on ${t.waiting_on.map((id) => `#${id}`).join(", ")}`) : null;
+  return t.waiting_on ? el("span", { class: "waits" }, icon("waits"), `Waits on ${t.waiting_on.map((id) => `#${id}`).join(", ")}`) : null;
 }
 
 // A board on an older version sends no hidden_properties.
