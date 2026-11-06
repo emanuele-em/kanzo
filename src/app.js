@@ -1720,7 +1720,7 @@ function toggleSettingsMenu() {
     el("button", { onclick: () => openSettings() }, icon("settings"), "Settings"),
     el("button", { onclick: () => { closeMenu(); checkForUpdates(); } }, icon("update"), "Check for updates",
       el("span", { class: "value" }, `v${state.board.version}`)),
-    el("button", { onclick: () => openSettings("whats-new") }, icon("news"), "What's new"),
+    el("button", { onclick: () => openSettings("about") }, icon("news"), "What's new?"),
     el("button", { onclick: sync }, icon("sync"), "Sync"));
   document.body.append(menu);
   const r = button.getBoundingClientRect();
@@ -1749,7 +1749,7 @@ function openSettings(section = "board") {
 function showSection(section) {
   document.querySelectorAll("#settings-nav button").forEach((b) => b.classList.toggle("active", b.dataset.section === section));
   document.querySelectorAll(".settings-pane").forEach((p) => { p.hidden = p.dataset.section !== section; });
-  if (section === "whats-new") loadWhatsNew();
+  if (section === "about") loadWhatsNew();
 }
 
 // Fetched when first shown, so the page doesn't carry the notes on every load.
@@ -1792,7 +1792,6 @@ $('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL
       el("span")));
 }));
 $("#settings-update").addEventListener("click", checkForUpdates);
-$("#settings-news").addEventListener("click", () => showSection("whats-new"));
 
 async function checkUpdate() {
   try {
