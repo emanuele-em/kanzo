@@ -891,6 +891,16 @@ mod tests {
         assert!(CHANGELOG.starts_with(&heading), "CHANGELOG.md should start with the notes for this release");
     }
 
+    #[test]
+    fn changelog_says_what_each_change_does() {
+        for line in CHANGELOG.lines().filter(|l| l.starts_with("- ")) {
+            assert!(
+                line.starts_with("- **") && line.contains(":** "),
+                "should read `- **Name:** how to use it`: {line}"
+            );
+        }
+    }
+
     /// The status of asking a board to open `path`, from `from`.
     async fn open_from(home: &Home, from: Option<IpAddr>, path: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
