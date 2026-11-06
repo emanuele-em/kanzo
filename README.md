@@ -99,7 +99,7 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
 > [!TIP]
 > **Just ask your agent:** *"make kanzo#12 wait on #10 and #11."*
 
-List what a task waits on in its panel, or have agents pass `waits_on`. Until those tasks are done, `next_task` skips it, and its card is dimmed and says what it waits on. Only `done` counts: a task in `review` still blocks. Nothing stops you from moving a waiting task yourself.
+In a task's panel, type in Waits on to find other tasks in its project and pick them, or have agents pass `waits_on`. Until those tasks are done, `next_task` skips it, and its card is dimmed and says what it waits on. Only `done` counts: a task in `review` still blocks. Nothing stops you from moving a waiting task yourself.
 
 ## Filter and search
 

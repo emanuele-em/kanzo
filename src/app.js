@@ -1465,12 +1465,69 @@ $("#p-url").addEventListener("blur", (e) => {
   else e.target.value = url;
 });
 
+let waitResults = [], waitSelected = 0, waitRequest = 0, waitTimer;
+
+function closeWaits() {
+  clearTimeout(waitTimer);
+  waitRequest++;
+  waitResults = [];
+  $("#p-waits-list").hidden = true;
+  $("#p-waits").setAttribute("aria-expanded", "false");
+}
+
+// The search behind the filter, for what's typed after the last comma.
+async function findWaits() {
+  const parts = $("#p-waits").value.split(",").map((part) => part.trim());
+  const words = parts[parts.length - 1];
+  if (!words || !panelTask) { closeWaits(); return; }
+  const { id, project } = panelTask;
+  const request = ++waitRequest;
+  try {
+    const found = await api("GET", "/search?q=" + encodeURIComponent(`project:${project} -status:done ${words}`));
+    if (request !== waitRequest) return;
+    waitResults = found.filter((t) => t.id !== id && !parts.includes(key(t))).slice(0, 8);
+    waitSelected = 0;
+    const list = $("#p-waits-list");
+    list.replaceChildren(...waitResults.map((t, i) => el("button", { type: "button", tabindex: "-1", role: "option", class: "result" + (i === 0 ? " selected" : ""),
+                                                                     onmousemove: () => selectWait(i),
+                                                                     // Before the field loses focus, which would save half a word.
+                                                                     onmousedown: (e) => { e.preventDefault(); pickWait(t); } },
+      el("span", { class: "mono" }, `#${t.id}`),
+      el("span", { class: "title" }, t.title),
+      el("span", { class: "meta" }, t.status))));
+    if (!waitResults.length) list.append(el("span", { class: "note" }, "No tasks match."));
+    list.hidden = false;
+    $("#p-waits").setAttribute("aria-expanded", "true");
+    highlight("search", list, wordsOf(words));
+  } catch (err) { toast(err.message); }
+}
+
+function selectWait(i) {
+  const rows = $("#p-waits-list").querySelectorAll(".result");
+  waitSelected = (i + rows.length) % rows.length;
+  rows.forEach((r, j) => r.classList.toggle("selected", j === waitSelected));
+  rows[waitSelected].scrollIntoView({ block: "nearest" });
+}
+
+function pickWait(t) {
+  const input = $("#p-waits");
+  const kept = input.value.split(",").slice(0, -1).map((part) => part.trim()).filter(Boolean);
+  input.value = [...kept, key(t)].join(", ") + ", ";
+  closeWaits();
+}
+
+$("#p-waits").addEventListener("input", () => { clearTimeout(waitTimer); waitTimer = setTimeout(findWaits, 120); });
 $("#p-waits").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+  const listed = waitResults.length > 0;
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && listed) { e.preventDefault(); selectWait(waitSelected + (e.key === "ArrowDown" ? 1 : -1)); }
+  else if (e.key === "Enter") { e.preventDefault(); if (listed) pickWait(waitResults[waitSelected]); else e.target.blur(); }
+  else if (e.key === "Escape" && !$("#p-waits-list").hidden) { e.stopPropagation(); closeWaits(); }
   else if (e.key === "Escape") cancelField(e, panelWaits);
 });
 $("#p-waits").addEventListener("blur", (e) => {
-  if (panelTask && e.target.value.trim() !== panelWaits) patchTask({ waits_on: e.target.value });
+  closeWaits();
+  e.target.value = e.target.value.replace(/[,\s]+$/, "");
+  if (panelTask && e.target.value !== panelWaits) patchTask({ waits_on: e.target.value });
 });
 
 $("#p-comment-form").addEventListener("submit", async (e) => {

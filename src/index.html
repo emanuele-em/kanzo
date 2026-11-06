@@ -332,6 +332,14 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 [data-hide~="images"] .panel .thumbs { display: none; }
 .links { display: flex; flex-wrap: wrap; gap: 4px; }
 #p-waits-links:not(:empty) { margin-top: 8px; }
+.waits-field { display: block; position: relative; }
+.suggest { position: absolute; z-index: 5; top: calc(100% + 10px); left: -10px; right: -10px; max-height: 280px; padding: 4px; background: var(--menu); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+.suggest .result { align-items: center; padding: 6px 8px; }
+.suggest .result.selected { background: var(--active); }
+.suggest .result .title { flex: 1; min-width: 0; }
+.suggest .result .meta { margin: 0; }
+.suggest .result .mono { flex: none; color: var(--faint); font-size: 12px; }
+.suggest .note { display: block; padding: 8px; }
 .links .tag { border: 0; max-width: 100%; }
 .links .tag:hover, .links .tag:focus-visible { background: var(--active); }
 .links span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
@@ -582,7 +590,7 @@ html:not(.ready) aside { visibility: hidden; }
       <div data-prop="tags">Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span></div>
       <div data-prop="url">URL <span><input class="inline" id="p-url" type="url" placeholder="Add a link, like a pull request" autocomplete="off" spellcheck="false"></span></div>
       <div data-prop="human">Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span></div>
-      <div data-prop="waiting">Waits on <span><input class="inline" id="p-waits" placeholder="Add tasks, like api#12" autocomplete="off" spellcheck="false"><span class="links" id="p-waits-links"></span></span></div>
+      <div data-prop="waiting">Waits on <span><span class="waits-field"><input class="inline" id="p-waits" placeholder="Type to find a task, or api#12" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="p-waits-list" aria-expanded="false"><span class="results suggest" id="p-waits-list" role="listbox" hidden></span></span><span class="links" id="p-waits-links"></span></span></div>
       <div data-prop="waiting" id="p-blocks-row">Blocks <span class="links" id="p-blocks"></span></div>
       <div data-prop="created">Created <span id="p-created"></span></div>
       <div data-prop="updated">Updated <span id="p-updated"></span></div>
