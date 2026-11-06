@@ -132,9 +132,9 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 header {
   display: flex; align-items: center; gap: 12px; padding: 16px 24px 14px; flex-wrap: wrap; min-height: 64px;
 }
-header .info { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; flex: 1; min-width: 0; }
+header .info { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; flex: 1 1 240px; min-width: 0; }
 header h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
-header .sub { color: var(--muted); }
+header .sub { color: var(--muted); white-space: nowrap; }
 header .repo-link {
   display: inline-flex; align-items: center; gap: 6px; align-self: center; padding: 3px 10px 3px 8px;
   border-radius: 99px; background: var(--hover); color: var(--muted); font-size: 12.5px; text-decoration: none;
@@ -231,6 +231,11 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .row .tags { margin: 0; flex-shrink: 0; max-width: 40%; flex-wrap: nowrap; overflow: hidden; }
 #list-tools { display: flex; gap: 6px; }
 #list-tools select { width: auto; height: 35px; padding: 0 28px 0 12px; border-radius: 99px; font-size: 13px; }
+/* The label sits over the select, so that clicking anywhere on the pill opens it. */
+.pick { position: relative; display: inline-flex; }
+.pick span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 13px; white-space: nowrap; pointer-events: none; }
+#list-tools #list-sort { padding-left: 64px; }
+#list-tools #list-group { padding-left: 75px; }
 .card.selected { box-shadow: inset 0 0 0 2px var(--link); }
 .marquee { position: fixed; z-index: 9; pointer-events: none; background: color-mix(in srgb, var(--link) 15%, transparent); }
 .bulk { padding-left: 14px; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: max-content; max-width: calc(100vw - 16px); }
@@ -554,8 +559,8 @@ html:not(.ready) aside { visibility: hidden; }
     <div id="filters"></div>
     <span class="query" id="filter-box" hidden><span class="query-mirror" aria-hidden="true"><span></span></span><input type="search" id="filter" placeholder="Filter board" title="Show only the tasks that match, like tag:bug or -status:done (f)" aria-label="Filter the board" autocomplete="off" spellcheck="false"></span>
     <span id="list-tools" hidden>
-      <select class="field" id="list-sort" aria-label="Sort by"><option value="">Board order</option><option value="updated_at">Updated</option><option value="created_at">Created</option><option value="title">Title</option><option value="id">ID</option></select>
-      <select class="field" id="list-group" aria-label="Group by"><option value="">No groups</option><option value="status">By status</option><option value="project">By project</option><option value="tags">By tag</option></select>
+      <label class="pick"><span aria-hidden="true">Sort by</span><select class="field" id="list-sort" aria-label="Sort by"><option value="">Board order</option><option value="updated_at">Updated</option><option value="created_at">Created</option><option value="title">Title</option><option value="id">ID</option></select></label>
+      <label class="pick"><span aria-hidden="true">Group by</span><select class="field" id="list-group" aria-label="Group by"><option value="">None</option><option value="status">Status</option><option value="project">Project</option><option value="tags">Tag</option></select></label>
     </span>
     <button class="ghost" id="view" title="Show as a list" aria-label="Show as a list" aria-pressed="false" hidden><span class="icon" data-icon="list"></span></button>
     <button class="ghost" id="human-only" title="Show only human tasks (h)" aria-label="Show only human tasks" aria-pressed="false" hidden><span class="icon" data-icon="human"></span></button>
