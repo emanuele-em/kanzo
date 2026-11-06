@@ -60,11 +60,30 @@ kanzo
 
 The board opens at http://localhost:4242. That's all the setup there is: the first run creates `~/kanzo`, and the whole board lives in it.
 
-`n` adds a task, `/` or `⌘K` searches every project, `⌘`-click or a drag on empty board space selects tasks to move, tag or delete together, and dragging one takes the rest along, `f` filters the board and `↵` keeps the filter, the list icon shows the same tasks as rows to sort and group, `Tab` moves to the description, `⌘↵` saves and closes. `Esc` leaves a description or tags with what you typed saved, and cancels other fields. In Chrome or Edge, **Install app** at the bottom of the sidebar makes the board an app of its own; on macOS `kanzo` then opens it instead of a tab, on the default port. In the app, `⌘1`–`⌘8` pick a project, `⌘9` the last one and `⌘0` all of them.
+| Key | Does |
+| --- | --- |
+| `n` | New task |
+| `/` or `⌘K` | Search every project |
+| `f` | Filter the board; `↵` keeps the filter |
+| `Tab` | Move to the description |
+| `⌘↵` | Save and close |
+| `Esc` | Keep what you typed in a description or tags; cancel other fields |
 
-Drag the left edge of a task's panel to resize it, or expand it to the whole window; double-click the edge to reset it. The panel button beside search folds the sidebar to its icons. Drag a project there to reorder the list, for everyone on a shared board.
+## Use the board
 
-Mark a task Human and agents leave it to you; the person icon shows only those. Paste or drop an image into a task or a comment to attach it. Give a task a URL, like its pull request on any site, and click the link on its card to open it; agents set it with `url`. A link to a file in a description or comment, `[name](file:///path)`, opens in your editor. When a new version is out, the sidebar offers it: one click installs it.
+> [!TIP]
+> **Just ask your agent:** *"mark kanzo#12 as human, and set its URL to github.com/acme/api/pull/482."*
+
+- **Select tasks:** `⌘`-click them, or drag on empty board space, then move, tag or delete them together. Drag one and the rest follow.
+- **List view:** the list icon shows the same tasks as rows to sort and group.
+- **Human tasks:** mark a task Human and agents leave it to you. The person icon shows only those.
+- **Images:** paste or drop one into a task or a comment.
+- **Links:** give a task a URL, like its pull request, and open it from its card. Agents set it with `url`.
+- **Files:** `[name](file:///path)` in a description or comment opens in your editor.
+- **Task panel:** drag its left edge to resize it, or expand it to the whole window. Double-click the edge to reset it.
+- **Sidebar:** the panel button beside search folds it to its icons. Drag a project to reorder the list, for everyone on a shared board.
+- **App:** in Chrome or Edge, **Install app** at the bottom of the sidebar makes the board an app of its own. `⌘1`–`⌘8` pick a project, `⌘9` the last one, `⌘0` all of them. On macOS, `kanzo` then opens it instead of a tab, on the default port.
+- **Updates:** when a new version is out, the sidebar offers it. One click installs it.
 
 ## Connect your agents
 
@@ -78,7 +97,11 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 
 Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `which kanzo`), or use the running board at `http://localhost:4242/mcp`.
 
-Then ask: *"take the next task from kanzo and do it."* The agent moves the card to `doing` and comments as it works; when it reaches `review`, a comment says how to resume its session. It finds the right project from the git remote of the repo it works in; link more repos to a project from its ⋯ menu.
+Then ask: *"take the next task from kanzo and do it."* The agent:
+
+- finds the project from the git remote of its repo; link more repos from the project's ⋯ menu;
+- moves the card to `doing` and comments as it works;
+- on `review`, comments how to resume its session.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/task-dark.jpg">
@@ -99,7 +122,10 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
 > [!TIP]
 > **Just ask your agent:** *"make kanzo#12 wait on #10 and #11."*
 
-In a task's panel, type in Waits on to find other tasks in its project and pick them, or have agents pass `waits_on`. Until those tasks are done, `next_task` skips it, and its card is dimmed and says what it waits on. Only `done` counts: a task in `review` still blocks. Nothing stops you from moving a waiting task yourself. To see only these tasks, filter by `is:waiting`.
+- **Set it:** type in Waits on, in a task's panel, to find tasks in its project and pick them. Agents pass `waits_on`.
+- **Until those tasks are done:** `next_task` skips it, and its card is dimmed and says what it waits on. You can still move it yourself.
+- **What counts:** only `done`. A task in `review` still blocks.
+- **Find them:** filter by `is:waiting`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/waits-dark.jpg">
@@ -111,7 +137,11 @@ In a task's panel, type in Waits on to find other tasks in its project and pick 
 > [!TIP]
 > **Just ask your agent:** *"take the next kanzo task tagged billing,"* or *"list what's left in kanzo with tag:billing."*
 
-The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `next_task` all understand the same words, like on GitHub. Every part must match, and `-` before a qualifier negates it: `tag:billing -status:done`. Qualifiers turn blue as you type them, so you can see what will filter.
+The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `next_task` all understand the same words, like on GitHub:
+
+- Every part must match.
+- `-` negates a qualifier: `tag:billing -status:done`.
+- Qualifiers turn blue as you type them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/filter-dark.jpg">
@@ -235,7 +265,11 @@ editor = "/usr/local/bin/cursor"   # opens file:/// links; on macOS, your text e
 
 These settings stay on each machine: `kanzo sync` leaves them out.
 
-Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted. Its About section shows what's new in this version. The board itself reads English or Chinese: pick the language under Settings → Board, and it remembers your choice.
+Settings on the board:
+
+- **Task properties:** turn one off, like tags or comments, to hide it there and leave it out of what agents get. Nothing is deleted.
+- **Language:** English or Chinese, under Board.
+- **What's new:** this version's notes, under About.
 
 ## Small and fast
 
