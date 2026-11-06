@@ -276,8 +276,8 @@ Settings on the board:
 | | |
 | --- | --- |
 | Program | 4.7 MB, SQLite included |
-| Memory | 4.5 MB idle, 8 MB with 3,000 tasks |
-| Start | 2 ms |
+| Memory | 5 MB idle, 12 MB with 3,000 tasks |
+| Start | 3 ms |
 | Board of 3,000 tasks | 17 ms to load in the browser |
 | Agents' tool list | about 1,000 tokens, once per session |
 | Agents' replies | 10 to 60 tokens of plain text |
