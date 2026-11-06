@@ -21,7 +21,7 @@ You never edit a file. Everything is done in one of three places:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, Laptop A shares the board and Laptop B joins it" src="docs/img/board-light.gif">
+  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, a task is made to wait on another, two selected tasks are dragged together, a list groups the tasks by status, the sidebar folds, Laptop A shares the board and Laptop B joins it" src="docs/img/board-light.gif">
 </picture>
 
 ## Install
@@ -78,11 +78,11 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 
 Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `which kanzo`), or use the running board at `http://localhost:4242/mcp`.
 
-Then ask: *"take the next task from kanzo and do it."* The agent moves the card to `doing` and comments as it works. It finds the right project from the git remote of the repo it works in; link more repos to a project from its ⋯ menu.
+Then ask: *"take the next task from kanzo and do it."* The agent moves the card to `doing` and comments as it works; when it reaches `review`, a comment says how to resume its session. It finds the right project from the git remote of the repo it works in; link more repos to a project from its ⋯ menu.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/task-dark.jpg">
-  <img alt="A task open on the board, with Claude Code's comments and a reply" src="docs/img/task-light.jpg">
+  <img alt="A task open on the board, with Claude Code's comments, one saying how to resume its session, and a reply" src="docs/img/task-light.jpg">
 </picture>
 
 ## Park ideas in a backlog
@@ -99,7 +99,12 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
 > [!TIP]
 > **Just ask your agent:** *"make kanzo#12 wait on #10 and #11."*
 
-In a task's panel, type in Waits on to find other tasks in its project and pick them, or have agents pass `waits_on`. Until those tasks are done, `next_task` skips it, and its card is dimmed and says what it waits on. Only `done` counts: a task in `review` still blocks. Nothing stops you from moving a waiting task yourself.
+In a task's panel, type in Waits on to find other tasks in its project and pick them, or have agents pass `waits_on`. Until those tasks are done, `next_task` skips it, and its card is dimmed and says what it waits on. Only `done` counts: a task in `review` still blocks. Nothing stops you from moving a waiting task yourself. To see only these tasks, filter by `is:waiting`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/waits-dark.jpg">
+  <img alt="A task's panel with log typed in Waits on, offering two tasks to pick, beside a dimmed card that says Waits on #7" src="docs/img/waits-light.jpg">
+</picture>
 
 ## Filter and search
 
@@ -110,7 +115,7 @@ The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `nex
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/filter-dark.jpg">
-  <img alt="The board filtered by a saved tag:backend chip and -status:todo in the filter box, with the two matching tasks and their tag highlighted" src="docs/img/filter-light.jpg">
+  <img alt="The board filtered by a saved tag:backend chip and is:waiting in the filter box, with the two matching tasks, each saying what it waits on" src="docs/img/filter-light.jpg">
 </picture>
 
 | Qualifier | Finds | Example |
