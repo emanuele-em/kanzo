@@ -45,7 +45,7 @@ async function api(method, path, body) {
 
 function plural(n, word) {
   // In zh-CN the noun's translation carries its measure word: 个任务, 条评论, 台电脑.
-  const w = LANG === "en" ? `${word}${n === 1 ? "" : "s"}` : tr(word);
+  const w = DICT?.[word] ?? `${word}${n === 1 ? "" : "s"}`;
   return `${n} ${w}`;
 }
 
