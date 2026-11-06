@@ -89,6 +89,11 @@ impl Home {
         // During a pull, config.toml can be missing or another machine's, until kanzo sync puts it back.
         let lock = home.lock_shared()?;
         let path = home.dir.join("config.toml");
+        // Holding the lock, this can only be left by a sync that died during a pull.
+        let aside = home.config_aside();
+        if aside.exists() {
+            fs::rename(&aside, &path).with_context(|| format!("cannot restore {}", path.display()))?;
+        }
         write_if_missing(&path, CONFIG_TEMPLATE)?;
         let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
         home.config = toml::from_str(&text).with_context(|| format!("{} is not valid", path.display()))?;
@@ -100,6 +105,11 @@ impl Home {
 
     pub fn db_path(&self) -> PathBuf {
         self.dir.join("kanzo.db")
+    }
+
+    /// Where `kanzo sync` keeps this machine's config.toml during a pull; git ignores `*.bak`.
+    pub fn config_aside(&self) -> PathBuf {
+        self.dir.join("config.toml.bak")
     }
 
     /// Changes when the database file itself is replaced, as `kanzo sync` does
@@ -294,6 +304,19 @@ mod tests {
         fs::write(&config, "listen = \"127.0.0.1\"\n").unwrap();
         drop(lock);
         assert!(opening.join().unwrap().unwrap().config.listen.is_loopback());
+    }
+
+    #[test]
+    fn open_restores_a_config_toml_left_aside_by_a_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.toml.bak"), "listen = \"0.0.0.0\"\n").unwrap();
+        // What git had pulled when the sync died.
+        fs::write(tmp.path().join("config.toml"), "port = 4300\n").unwrap();
+
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        assert!(!home.config.listen.is_loopback());
+        assert_eq!(home.config.port, DEFAULT_PORT);
+        assert!(!home.config_aside().exists());
     }
 
     #[test]

@@ -235,16 +235,17 @@ fn replace<T>(home: &Home, pull: impl FnOnce() -> Result<T>) -> Result<()> {
     // would otherwise apply to the pulled file.
     Store::open(&home.db_path(), None)?.settle()?;
     // A board an older Kanzo synced has a config.toml in it, which a pull could change, delete, or
-    // stop at. This machine's own steps aside, so git never sees it, and comes back as it was.
+    // stop at. This machine's own steps aside, so git never sees it, and comes back as it was. If
+    // this process dies first, it waits on disk for Home::open or the next pull.
     let config = home.dir.join("config.toml");
+    let aside = home.config_aside();
     let in_board = |at: &str| git_ok(&home.dir, false, &["cat-file", "-e", &format!("{at}:config.toml")]);
-    let mine = if in_board("HEAD") || in_board("@{upstream}") { std::fs::read(&config).ok() } else { None };
-    if mine.is_some() {
-        std::fs::remove_file(&config).context("cannot move config.toml aside")?;
+    if (in_board("HEAD") || in_board("@{upstream}")) && config.exists() && !aside.exists() {
+        std::fs::rename(&config, &aside).context("cannot move config.toml aside")?;
     }
     let pulled = pull();
-    if let Some(mine) = mine {
-        crate::home::write_whole(&config, &mine).context("cannot put config.toml back")?;
+    if aside.exists() {
+        std::fs::rename(&aside, &config).context("cannot put config.toml back")?;
     }
     pulled?;
     Store::open(&home.db_path(), None)?.migrate()?;
@@ -411,6 +412,34 @@ mod tests {
             assert!(kept.listen.is_loopback());
             assert_eq!(kept.port, crate::home::DEFAULT_PORT);
         }
+    }
+
+    #[test]
+    fn config_toml_waits_on_disk_during_a_pull_that_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, pi) = older_pi(tmp.path());
+        let pulled = replace(&pi, || -> Result<()> {
+            assert!(!pi.dir.join("config.toml").exists());
+            assert!(std::fs::read_to_string(pi.config_aside()).unwrap().contains("0.0.0.0"));
+            bail!("no network")
+        });
+
+        assert!(pulled.is_err());
+        assert!(!pi.config_aside().exists());
+        assert!(!Home::open(pi.dir.clone()).unwrap().config.listen.is_loopback());
+    }
+
+    #[test]
+    fn a_pull_keeps_the_config_toml_a_dead_sync_left_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, pi) = older_pi(tmp.path());
+        std::fs::rename(pi.dir.join("config.toml"), pi.config_aside()).unwrap();
+        // What git had pulled when the sync died.
+        std::fs::write(pi.dir.join("config.toml"), "port = 4300\n").unwrap();
+
+        replace(&pi, || Ok(())).unwrap();
+        assert!(!pi.config_aside().exists());
+        assert!(!Home::open(pi.dir.clone()).unwrap().config.listen.is_loopback());
     }
 
     #[test]
