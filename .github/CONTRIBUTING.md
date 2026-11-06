@@ -44,7 +44,7 @@ Where things are:
 | `src/store.rs` | All SQL |
 | `src/mcp.rs` | The MCP tools, over stdio and HTTP (`rmcp`, pinned on purpose: it still changes often) |
 | `src/web.rs` | The board's HTTP API, and `/mcp` |
-| `src/index.html`, `src/app.js`, `src/logo.png` | The board UI: plain HTML, CSS and JavaScript, built into the binary |
+| `src/index.html`, `src/app.js`, `src/logo.png`, `src/icon.png` | The board UI: plain HTML, CSS and JavaScript, built into the binary |
 | `src/sync.rs` | `kanzo sync` |
 | `src/share.rs` | `kanzo share`, `join` and `leave`: sharing the board on the network |
 | `src/export.rs` | `kanzo export` |
@@ -64,5 +64,7 @@ Measured on a 64-bit ARM Linux container limited to 64 MB of memory and half a C
 ## Releases and dependencies
 
 Releases are built by [cargo-dist](https://github.com/axodotdev/cargo-dist): push a tag like `v0.1.0` and GitHub Actions builds every target and the installer, on Ubuntu 26.04 LTS and macOS 26. `.github/workflows/release.yml` is generated: change `dist-workspace.toml` and run `dist generate`, never edit the file by hand.
+
+Before tagging, replace `CHANGELOG.md` with the new version's notes, under the heading `## 1.2.3 - YYYY-MM-DD`. List every feature and bug fix since the last release, under `### New features` and `### Bug fixes`, each as `- **Name:** how to use it, or what changed`, in a sentence or two. It holds only the latest release, because it's built into the binary for What's new in Settings; tests fail if it doesn't match the version or an entry has no description. cargo-dist uses it for the release's notes too, so GitHub keeps the history.
 
 Dependabot opens a weekly pull request when a crate or a GitHub Action has a new version.

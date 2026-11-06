@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
 </p>
 
-Kanzo is a kanban board in your browser and an MCP server in one 4.5 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and it works.
+Kanzo is a kanban board in your browser and an MCP server in one 4.7 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and it works.
 
 You never edit a file. Everything is done in one of three places:
 
@@ -21,7 +21,7 @@ You never edit a file. Everything is done in one of three places:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, Laptop A shares the board and Laptop B joins it" src="docs/img/board-light.gif">
+  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, a task is made to wait on another, two selected tasks are dragged together, a list groups the tasks by status, the sidebar folds, Laptop A shares the board and Laptop B joins it" src="docs/img/board-light.gif">
 </picture>
 
 ## Install
@@ -38,6 +38,8 @@ For macOS and Linux, including every Raspberry Pi. On Windows, in PowerShell:
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-installer.ps1 | iex"
 ```
+
+Both add Kanzo to your `PATH`, for terminals you open from then on. To use it in the one you installed from, run `source $HOME/.cargo/env` (`env.fish` in fish), or open a new one.
 
 Or download the Windows zip from the [latest release](https://github.com/emanuele-em/kanzo/releases/latest) and put `kanzo.exe` in a folder named `bin` on your `PATH`, like `%USERPROFILE%\.cargo\bin`: the board updates itself only there.
 
@@ -58,7 +60,30 @@ kanzo
 
 The board opens at http://localhost:4242. That's all the setup there is: the first run creates `~/kanzo`, and the whole board lives in it.
 
-`n` adds a task, `/` or `⌘K` searches every project, `f` filters the board and `↵` keeps the filter, `Tab` moves to the description, `⌘↵` saves and closes, `Esc` cancels. Mark a task Human and agents leave it to you; the person icon shows only those. Paste or drop an image into a task or a comment to attach it. Give a task a URL, like its pull request on any site, and click the link on its card to open it; agents set it with `url`. When a new version is out, the sidebar offers it: one click installs it.
+| Key | Does |
+| --- | --- |
+| `n` | New task |
+| `/` or `⌘K` | Search every project |
+| `f` | Filter the board; `↵` keeps the filter |
+| `Tab` | Move to the description |
+| `⌘↵` | Save and close |
+| `Esc` | Keep what you typed in a description or tags; cancel other fields |
+
+## Use the board
+
+> [!TIP]
+> **Just ask your agent:** *"mark kanzo#12 as human, and set its URL to github.com/acme/api/pull/482."*
+
+- **Select tasks:** `⌘`-click them, or drag on empty board space, then move, tag or delete them together. Drag one and the rest follow.
+- **List view:** the list icon shows the same tasks as rows to sort and group.
+- **Human tasks:** mark a task Human and agents leave it to you. The person icon shows only those.
+- **Images:** paste or drop one into a task or a comment.
+- **Links:** give a task a URL, like its pull request, and open it from its card. Agents set it with `url`.
+- **Files:** `[name](file:///path)` in a description or comment opens in your editor.
+- **Task panel:** drag its left edge to resize it, or expand it to the whole window. Double-click the edge to reset it.
+- **Sidebar:** the panel button beside search folds it to its icons. Drag a project to reorder the list, for everyone on a shared board.
+- **App:** in Chrome or Edge, **Install app** at the bottom of the sidebar makes the board an app of its own. `⌘1`–`⌘8` pick a project, `⌘9` the last one, `⌘0` all of them. On macOS, `kanzo` then opens it instead of a tab, on the default port.
+- **Updates:** when a new version is out, the sidebar offers it. One click installs it.
 
 ## Connect your agents
 
@@ -72,11 +97,15 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 
 Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `which kanzo`), or use the running board at `http://localhost:4242/mcp`.
 
-Then ask: *"take the next task from kanzo and do it."* The agent moves the card to `doing` and comments as it works. It finds the right project from the git remote of the repo it works in; link more repos to a project from its ⋯ menu.
+Then ask: *"take the next task from kanzo and do it."* The agent:
+
+- finds the project from the git remote of its repo; link more repos from the project's ⋯ menu;
+- moves the card to `doing` and comments as it works;
+- on `review`, comments how to resume its session.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/task-dark.jpg">
-  <img alt="A task open on the board, with Claude Code's comments and a reply" src="docs/img/task-light.jpg">
+  <img alt="A task open on the board, with Claude Code's comments, one saying how to resume its session, and a reply" src="docs/img/task-light.jpg">
 </picture>
 
 ## Park ideas in a backlog
@@ -88,16 +117,35 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
   <img alt="The board with the Backlog column on, left of Todo" src="docs/img/backlog-light.jpg">
 </picture>
 
+## Make a task wait on others
+
+> [!TIP]
+> **Just ask your agent:** *"make kanzo#12 wait on #10 and #11."*
+
+- **Set it:** type in Waits on, in a task's panel, to find tasks in its project and pick them. Agents pass `waits_on`.
+- **Until those tasks are done:** `next_task` skips it, and its card is dimmed and says what it waits on. You can still move it yourself.
+- **What counts:** only `done`. A task in `review` still blocks.
+- **Find them:** filter by `is:waiting`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/waits-dark.jpg">
+  <img alt="A task's panel with log typed in Waits on, offering two tasks to pick, beside a dimmed card that says Waits on #7" src="docs/img/waits-light.jpg">
+</picture>
+
 ## Filter and search
 
 > [!TIP]
 > **Just ask your agent:** *"take the next kanzo task tagged billing,"* or *"list what's left in kanzo with tag:billing."*
 
-The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `next_task` all understand the same words, like on GitHub. Every part must match, and `-` before a qualifier negates it: `tag:billing -status:done`. Qualifiers turn blue as you type them, so you can see what will filter.
+The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `next_task` all understand the same words, like on GitHub:
+
+- Every part must match.
+- `-` negates a qualifier: `tag:billing -status:done`.
+- Qualifiers turn blue as you type them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/filter-dark.jpg">
-  <img alt="The board filtered by a saved tag:backend chip and -status:todo in the filter box, with the two matching tasks and their tag highlighted" src="docs/img/filter-light.jpg">
+  <img alt="The board filtered by a saved tag:backend chip and is:waiting in the filter box, with the two matching tasks, each saying what it waits on" src="docs/img/filter-light.jpg">
 </picture>
 
 | Qualifier | Finds | Example |
@@ -109,6 +157,7 @@ The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `nex
 | `id:`, `comments:`, `images:` | a number, or a range | `id:12`, `comments:>2`, `images:1..3` |
 | `created:`, `updated:` | a date, or a range | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | tasks for you, not agents | `-is:human` |
+| `is:waiting` | tasks waiting on unfinished ones | `-is:waiting` |
 | `has:`, `no:` | `description`, `tags`, `url`, `comments` or `images` | `has:url`, `no:tags` |
 
 Anything else is plain text. Use quotes for a phrase, `"on hold"`, or to look for text that reads like a qualifier, `"tag:bug"`. Agents can't filter through a property you've hidden in Settings.
@@ -211,19 +260,24 @@ Everything lives in `~/kanzo`: the board in `kanzo.db`, settings in `config.toml
 port = 4242
 listen = "127.0.0.1"   # sharing opens the board to your network; "0.0.0.0" keeps it open
 mcp_http = true        # MCP at /mcp
+editor = "/usr/local/bin/cursor"   # opens file:/// links; on macOS, your text editor without it
 ```
 
 These settings stay on each machine: `kanzo sync` leaves them out.
 
-Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted. The board itself reads English or Chinese: pick the language under Settings → Board, and it remembers your choice.
+Settings on the board:
+
+- **Task properties:** turn one off, like tags or comments, to hide it there and leave it out of what agents get. Nothing is deleted.
+- **Language:** English or Chinese, under Board.
+- **What's new:** this version's notes, under About.
 
 ## Small and fast
 
 | | |
 | --- | --- |
-| Program | 4.5 MB, SQLite included |
-| Memory | 4.5 MB idle, 8 MB with 3,000 tasks |
-| Start | 2 ms |
+| Program | 4.7 MB, SQLite included |
+| Memory | 5 MB idle, 12 MB with 3,000 tasks |
+| Start | 3 ms |
 | Board of 3,000 tasks | 17 ms to load in the browser |
 | Agents' tool list | about 1,000 tokens, once per session |
 | Agents' replies | 10 to 60 tokens of plain text |

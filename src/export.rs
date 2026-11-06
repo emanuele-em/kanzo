@@ -36,6 +36,7 @@ struct TaskOut {
     tags: Vec<String>,
     url: String,
     human: bool,
+    waits_on: Vec<String>,
     images: Vec<String>,
     status: String,
     created_at: String,
@@ -44,7 +45,7 @@ struct TaskOut {
 }
 
 impl TaskOut {
-    fn new(task: Task, comments: Vec<Comment>, images: Vec<String>) -> Self {
+    fn new(task: Task, comments: Vec<Comment>, images: Vec<String>, waits_on: Vec<String>) -> Self {
         Self {
             key: task.key(),
             id: task.id,
@@ -53,6 +54,7 @@ impl TaskOut {
             tags: task.tags,
             url: task.url,
             human: task.human,
+            waits_on,
             images,
             status: task.status,
             created_at: task.created_at,
@@ -91,7 +93,8 @@ fn collect(store: &Store, only: Option<&str>, images: &Path) -> Result<Board> {
         for task in store.list_tasks(Some(project.id), None)? {
             let comments = store.list_comments(task.id)?;
             let paths = store.list_images(task.id)?.into_iter().map(|i| images.join(i.file).display().to_string());
-            tasks.push(TaskOut::new(task, comments, paths.collect()));
+            let waits = store.task_links(task.id, false)?.into_iter().map(|t| format!("{}#{}", t.project, t.id));
+            tasks.push(TaskOut::new(task, comments, paths.collect(), waits.collect()));
         }
         out.push(ProjectOut { project, tasks });
     }
@@ -140,6 +143,9 @@ fn markdown(board: &Board) -> String {
                 if !t.tags.is_empty() {
                     let _ = writeln!(md, "Tags: {}.", t.tags.join(", "));
                 }
+                if !t.waits_on.is_empty() {
+                    let _ = writeln!(md, "Waits on: {}.", t.waits_on.join(", "));
+                }
                 if !t.url.is_empty() {
                     let _ = writeln!(md, "URL: <{}>", t.url);
                 }
@@ -178,12 +184,15 @@ mod tests {
         store.add_comment(t.id, "claude-code", "Found it\nin auth.rs", &[]).unwrap();
         let done = store.create_task(api.id, "Old work", "").unwrap();
         store.move_task(done.id, "done", None).unwrap();
+        let waits = store::TaskPatch { waits_on: Some(done.key()), ..Default::default() };
+        store.update_task(t.id, waits).unwrap();
 
         let board = collect(&store, None, Path::new("/k/images")).unwrap();
         let md = markdown(&board);
         assert!(md.contains("## API `api` ([me/api](https://github.com/me/api))"), "{md}");
         assert!(md.contains("### todo\n\n#### api#1 Fix login"), "{md}");
         assert!(md.contains("Steps:\n1. log in"), "{md}");
+        assert!(md.contains("Waits on: api#2."), "{md}");
         assert!(md.contains("- **claude-code**, ") && md.contains("Found it\n  in auth.rs"), "{md}");
         assert!(md.contains("### done\n\n#### api#2 Old work"), "{md}");
         assert!(md.contains("## Web `web`"), "{md}");
@@ -192,6 +201,7 @@ mod tests {
         assert_eq!(json["statuses"][0], "todo");
         assert_eq!(json["projects"][0]["slug"], "api");
         assert_eq!(json["projects"][0]["tasks"][0]["key"], "api#1");
+        assert_eq!(json["projects"][0]["tasks"][0]["waits_on"][0], "api#2");
         assert_eq!(json["projects"][0]["tasks"][0]["comments"][0]["author"], "claude-code");
 
         let only = collect(&store, Some("web"), Path::new("/k/images")).unwrap();

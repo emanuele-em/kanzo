@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -26,6 +26,10 @@ listen = "127.0.0.1"
 # Also serve MCP over HTTP at http://localhost:<port>/mcp, for agents
 # that cannot start `kanzo mcp` themselves.
 mcp_http = true
+
+# The editor that file:/// links in tasks open in, as a full path. Without it,
+# macOS uses your default text editor, and other systems can't open them.
+# editor = "/usr/local/bin/cursor"
 "#;
 
 const GITIGNORE: &str = "\
@@ -54,11 +58,18 @@ pub struct Config {
     #[serde(rename = "statuses")]
     _statuses: Option<toml::Value>,
     pub mcp_http: bool,
+    pub editor: Option<PathBuf>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT, listen: IpAddr::V4(Ipv4Addr::LOCALHOST), _statuses: None, mcp_http: true }
+        Self {
+            port: DEFAULT_PORT,
+            listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            _statuses: None,
+            mcp_http: true,
+            editor: None,
+        }
     }
 }
 
@@ -161,6 +172,20 @@ impl Home {
         }
     }
 
+    pub fn open_file(&self, file: &Path) -> Result<(), String> {
+        let mut cmd = editor_command(self.config.editor.as_deref(), file)?;
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("cannot run {program}: {e}; set `editor` in config.toml to its full path"))?;
+        // An editor's command can run for as long as the editor does: this isn't work for a database thread.
+        std::thread::spawn(move || child.wait());
+        Ok(())
+    }
+
     pub fn images(&self) -> PathBuf {
         self.dir.join("images")
     }
@@ -198,6 +223,26 @@ impl Home {
             .open(&path)
             .with_context(|| format!("cannot open {}", path.display()))
     }
+}
+
+/// Anyone who can comment can write a file link, so opening one must never run anything. Only an
+/// editor, then, not a generic opener: `open` with no flags runs a `.command` file, `xdg-open` a
+/// `.desktop` file, and Windows `start` a program.
+fn editor_command(editor: Option<&Path>, file: &Path) -> Result<Command, String> {
+    if !file.is_absolute() || !file.is_file() {
+        return Err(format!("{} is not a file on this computer", file.display()));
+    }
+    let mut cmd = match editor {
+        Some(editor) => Command::new(editor),
+        None if cfg!(target_os = "macos") => {
+            let mut open = Command::new("open");
+            open.arg("-t");
+            open
+        }
+        None => return Err("set `editor` in config.toml to open files, as the full path of your editor".into()),
+    };
+    cmd.arg(file);
+    Ok(cmd)
 }
 
 /// Some filesystems (exFAT, network shares) have no file locks: Kanzo goes on without.
@@ -285,6 +330,30 @@ mod tests {
         assert!(!waiting.is_finished());
         drop(lock);
         assert_eq!(waiting.join().unwrap().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_file_link_opens_in_an_editor_and_only_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("run.command");
+        fs::write(&file, "").unwrap();
+        let args = |cmd: &Command| cmd.get_args().map(|a| a.to_owned()).collect::<Vec<_>>();
+
+        let cmd = editor_command(Some(Path::new("/bin/cursor")), &file).unwrap();
+        assert_eq!(cmd.get_program(), "/bin/cursor");
+        assert_eq!(args(&cmd), [file.as_os_str()]);
+        if cfg!(target_os = "macos") {
+            let cmd = editor_command(None, &file).unwrap();
+            assert_eq!(cmd.get_program(), "open");
+            assert_eq!(args(&cmd), [std::ffi::OsStr::new("-t"), file.as_os_str()]);
+        } else {
+            assert!(editor_command(None, &file).is_err_and(|e| e.contains("editor")));
+        }
+
+        let editor = Some(Path::new("/bin/cursor"));
+        for bad in [Path::new("run.command"), tmp.path(), &tmp.path().join("missing")] {
+            assert!(editor_command(editor, bad).is_err(), "{}", bad.display());
+        }
     }
 
     #[test]

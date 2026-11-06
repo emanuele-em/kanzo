@@ -29,6 +29,8 @@ const state = {
   menu: null,
   net: null,
   guests: null,
+  selected: new Set(),
+  sweeping: false,
 };
 
 async function api(method, path, body) {
@@ -96,6 +98,7 @@ const ICONS = {
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   plus: '<path d="M5 12h14M12 5v14"/>',
+  list: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
@@ -110,6 +113,9 @@ const ICONS = {
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  sidebar: '<rect x="3" y="4" width="18" height="16" rx="4"/><path d="M9 4v16"/>',
+  waits: '<path d="M6 3h12M6 21h12M7 3v4l5 5 5-5V3M7 21v-4l5-5 5 5v4"/>',
+  news: '<path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.2 6.1-.7z"/>',
   comment: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>',
 };
@@ -229,7 +235,7 @@ function inline(s) {
   s = s
     .replace(/\u0000/g, "")
     .replace(/`([^`]+)`/g, (_, code) => keep(`<code>${code}</code>`))
-    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:)[^\s)\u0000]+)\)/g, (_, text, url) => link(url, emphasis(text)))
+    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|file:\/\/\/)[^\s)\u0000]+)\)/g, (_, text, url) => link(url, emphasis(text)))
     .replace(/(^|[\s(])(https?:\/\/[^\s)\u0000]+)/g, (_, before, url) => before + link(url, url));
   const restore = (html) => html.replace(/\u0000(\d+)\u0000/g, (_, i) => restore(saved[i]));
   return restore(emphasis(s));
@@ -352,17 +358,19 @@ function render() {
 function renderNav() {
   // Redrawing would take the field away from someone renaming a project.
   if (renaming && document.contains(renaming.input)) return;
+  // Nor while dragging a project: it would cancel the drag.
+  if (movingProject) return;
   const { projects } = state.board;
   const open = projects.reduce((n, p) => n + p.open, 0);
   const link = (slug, name, count, glyph) =>
-    el("a", { href: "#" + slug, class: state.project === slug ? "active" : null,
+    el("a", { href: "#" + slug, title: name, draggable: "false", class: state.project === slug ? "active" : null,
               onclick: (e) => { e.preventDefault(); setProject(slug); } },
       glyph,
       el("span", { class: "name" }, name),
       el("span", { class: "count" }, String(count)));
   const item = (p) => renaming && renaming.slug === p.slug
     ? el("div", { class: "item renaming" }, icon("folder", projectColor(p.slug)), renaming.input)
-    : el("div", { class: "item" + (state.menu === p.slug ? " menu-open" : "") },
+    : el("div", { class: "item" + (state.menu === p.slug ? " menu-open" : ""), draggable: "true", "data-slug": p.slug },
     link(p.slug, p.name, p.open, icon("folder", projectColor(p.slug))),
     el("button", { class: "more", title: tr("More"), "aria-label": tr("More for {0}", p.name), "aria-haspopup": "menu",
                    onclick: (e) => toggleProjectMenu(p, e.currentTarget) }, icon("more")));
@@ -417,6 +425,36 @@ function toggleProjectMenu(p, button) {
 }
 
 let renaming = null;
+let movingProject = null;
+const projectLine = el("div", { class: "drop-line" });
+const projectAfter = (y) => [...$("#nav").querySelectorAll("[data-slug]")]
+  .find((i) => { const r = i.getBoundingClientRect(); return y < r.top + r.height / 2; }) || null;
+
+$("#nav").addEventListener("dragstart", (e) => {
+  // Or it's text dragged out of the field renaming a project.
+  movingProject = e.target.dataset?.slug;
+  if (!movingProject) return;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", movingProject);
+});
+$("#nav").addEventListener("dragover", (e) => {
+  if (!movingProject) return;
+  e.preventDefault();
+  $("#nav").insertBefore(projectLine, projectAfter(e.clientY));
+});
+$("#nav").addEventListener("dragleave", (e) => { if (!$("#nav").contains(e.relatedTarget)) projectLine.remove(); });
+$("#nav").addEventListener("drop", async (e) => {
+  if (!movingProject) return;
+  e.preventDefault();
+  const before = projectAfter(e.clientY)?.dataset.slug || null;
+  try { await api("POST", `/projects/${encodeURIComponent(movingProject)}/move`, { before }); } catch (err) { toast(err.message); }
+  loadBoard();
+});
+$("#nav").addEventListener("dragend", () => {
+  movingProject = null;
+  projectLine.remove();
+  renderNav();
+});
 
 function startRename(p) {
   closeMenu();
@@ -499,6 +537,8 @@ function renderHeader() {
   $("#new-task").hidden = !projects.length;
   $("#human-only").hidden = !projects.length || isPropertyHidden("human");
   $("#filter-box").hidden = !projects.length;
+  $("#view").hidden = !projects.length;
+  $("#view").setAttribute("aria-pressed", String(isList()));
   $("#filters").replaceChildren(...(projects.length ? savedFilters() : []).map((f, i) =>
     el("span", { class: "chip" }, el("span", {}, queryNodes(f)),
       el("button", { type: "button", title: tr(`Remove "{0}"`, f), "aria-label": tr("Remove the filter {0}", f),
@@ -533,6 +573,9 @@ async function deleteProject(p) {
 function renderColumns() {
   const { statuses, projects, tasks } = state.board;
   const columns = $("#columns");
+  const inList = isList() && projects.length > 0;
+  columns.hidden = inList;
+  $("#list").hidden = $("#list-tools").hidden = !inList;
   if (!projects.length) {
     state.layout = "";
     columns.style.display = "flex";
@@ -562,31 +605,165 @@ function renderColumns() {
       return col;
     }));
     showCollapsed();
+    $("#bulk-status").replaceChildren(el("option", { value: "", hidden: true }, "Move to…"), ...statuses.map((s) => el("option", { value: s }, s)));
   }
 
   // During a drag the DOM is being moved by hand; refresh once it ends.
-  if (state.dragging) return;
+  if (state.dragging || state.sweeping || state.settling) return;
   const all = state.project === "all";
   const humanOnly = isHumanOnly();
   const query = filterQuery();
   $("#filter").classList.toggle("on", query.length > 0);
-  for (const status of statuses) {
-    const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
-    const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
-    const last = status === statuses[statuses.length - 1];
-    const hidden = last && !state.allDone ? state.board.done_hidden || 0 : 0;
-    // Filtered, the server's count of older done tasks says nothing about human ones.
-    const filtered = humanOnly || query.length > 0;
-    const count = mine.length + (filtered ? 0 : hidden);
-    col.querySelector("h2 .count").textContent = count ? String(count) : "";
-    const more = hidden
-      ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
-           filtered ? tr("Show older") : tr("Show {0} older", hidden))
-      : null;
-    col.querySelector(".cards").replaceChildren(...[more].filter(Boolean), ...mine.map((t) => card(t, all)));
+  // Filtered, the server's count of older done tasks says nothing about human ones.
+  const filtered = humanOnly || query.length > 0;
+  const hiddenDone = state.allDone ? 0 : state.board.done_hidden || 0;
+  const more = hiddenDone
+    ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
+         filtered ? tr("Show older") : tr("Show {0} older", hiddenDone))
+    : null;
+  if (inList) {
+    renderList(tasks.filter((t) => !humanOnly || t.human), all, more);
+  } else {
+    for (const status of statuses) {
+      const col = columns.querySelector(`[data-status="${CSS.escape(status)}"]`);
+      const mine = tasks.filter((t) => t.status === status && (!humanOnly || t.human));
+      const last = status === statuses[statuses.length - 1];
+      const count = mine.length + (!last || filtered ? 0 : hiddenDone);
+      col.querySelector("h2 .count").textContent = count ? String(count) : "";
+      col.querySelector(".cards").replaceChildren(...(last && more ? [more] : []), ...mine.map((t) => card(t, all)));
+    }
   }
-  highlight("filter", columns, wordsOf(query));
+  highlight("filter", inList ? $("#list") : columns, wordsOf(query));
+  for (const id of [...state.selected]) {
+    if (!document.querySelector(`.card[data-id="${id}"]`)) state.selected.delete(id);
+  }
+  showSelection();
 }
+
+function isList() {
+  return localStorageGet("kanzo.view") === "list";
+}
+
+// Only the view on screen is rendered: every refresh would otherwise build both.
+$("#view").addEventListener("click", () => {
+  localStorageSet("kanzo.view", isList() ? "" : "list");
+  state.layout = "";
+  render();
+});
+for (const [select, name] of [[$("#list-sort"), "kanzo.sort"], [$("#list-group"), "kanzo.group"]]) {
+  select.value = localStorageGet(name) || "";
+  select.addEventListener("change", () => { localStorageSet(name, select.value); renderColumns(); });
+}
+
+function renderList(tasks, all, more) {
+  const { statuses, projects } = state.board;
+  const by = $("#list-sort").value, group = $("#list-group").value;
+  const sorted = !by ? tasks : [...tasks].sort((a, b) =>
+    by === "id" ? a.id - b.id : by === "title" ? a.title.localeCompare(b.title) : b[by].localeCompare(a[by]));
+  const groups = new Map((group === "status" ? statuses : group === "project" ? projects.map((p) => p.slug) : []).map((g) => [g, []]));
+  for (const t of sorted) {
+    for (const g of group === "tags" ? (t.tags.length ? t.tags : [""]) : [group ? t[group] : ""]) {
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(t);
+    }
+  }
+  const names = group === "tags" ? [...groups.keys()].sort((a, b) => !a - !b || a.localeCompare(b)) : [...groups.keys()];
+  $("#list").replaceChildren(...names.flatMap((g) => !groups.get(g).length ? [] : [
+    group ? el("h2", { style: group === "status" ? "text-transform:capitalize" : null }, g || "No tag", el("span", { class: "count" }, String(groups.get(g).length))) : null,
+    ...groups.get(g).map((t) => card(t, all, true)),
+  ]).filter(Boolean), ...(more ? [more] : []));
+}
+
+function showSelection() {
+  $("#bulk").hidden = !state.selected.size;
+  $("#bulk-count").textContent = `${state.selected.size} selected`;
+}
+
+function setSelected(id, on) {
+  if (on) state.selected.add(id); else state.selected.delete(id);
+  // Grouped by tag, a task can have several rows.
+  document.querySelectorAll(`.card[data-id="${id}"]`).forEach((n) => n.classList.toggle("selected", on));
+}
+
+function clearSelection() {
+  state.selected.forEach((id) => setSelected(id, false));
+  showSelection();
+}
+
+// Closes the panel: one or the other, so the bar can't cover it.
+function toggleSelected(id) {
+  if (state.task) closeTask();
+  setSelected(id, !state.selected.has(id));
+  showSelection();
+}
+
+// Drag on empty board space to select, with ⌘ to add to what's selected. Cards are measured once, when
+// the drag starts, so moving the mouse never forces a layout.
+function sweep(down) {
+  const marquee = el("div", { class: "marquee" });
+  const kept = new Set(down.metaKey || down.ctrlKey ? state.selected : []);
+  let cards, x, y, frame = 0;
+  const paint = () => {
+    frame = 0;
+    const x1 = Math.min(down.clientX, x), x2 = Math.max(down.clientX, x), y1 = Math.min(down.clientY, y), y2 = Math.max(down.clientY, y);
+    marquee.style.cssText = `left:${x1}px;top:${y1}px;width:${x2 - x1}px;height:${y2 - y1}px`;
+    for (const { id, r, list } of cards) {
+      // A card scrolled out of its column can't be under the box.
+      const hit = r.right > x1 && r.left < x2 && r.bottom > Math.max(y1, list.top) && r.top < Math.min(y2, list.bottom);
+      if ((hit || kept.has(id)) !== state.selected.has(id)) setSelected(id, !state.selected.has(id));
+    }
+    showSelection();
+  };
+  const move = (e) => {
+    x = e.clientX; y = e.clientY;
+    if (!cards) {
+      if (Math.hypot(x - down.clientX, y - down.clientY) < 4) return;
+      state.sweeping = true;
+      document.body.append(marquee);
+      cards = [...$("#columns").querySelectorAll(".column:not(.collapsed) .card")].map((n) =>
+        ({ id: +n.dataset.id, r: n.getBoundingClientRect(), list: n.parentNode.getBoundingClientRect() }));
+    }
+    if (!frame) frame = requestAnimationFrame(paint);
+  };
+  const up = () => {
+    cancelAnimationFrame(frame);
+    document.removeEventListener("mousemove", move);
+    document.removeEventListener("mouseup", up);
+    marquee.remove();
+    state.sweeping = false;
+    if (cards) renderColumns();
+    else if (!kept.size) clearSelection();
+  };
+  document.addEventListener("mousemove", move);
+  document.addEventListener("mouseup", up);
+}
+
+$("#columns").addEventListener("mousedown", (e) => {
+  const onScrollbar = e.offsetX > e.target.clientWidth || e.offsetY > e.target.clientHeight;
+  if (e.button || onScrollbar || e.target.closest(".card, button, a, .collapsed")) return;
+  e.preventDefault();
+  sweep(e);
+});
+
+async function changeSelected(change) {
+  const ids = state.board.tasks.filter((t) => state.selected.has(t.id)).map((t) => t.id);
+  try { await api("POST", "/tasks/bulk", { ids, ...change }); } catch (err) { toast(err.message); }
+  loadBoard();
+}
+
+$("#bulk").addEventListener("keydown", (e) => {
+  const { name, value } = e.target;
+  if (e.key === "Escape") { e.stopPropagation(); e.target.blur(); clearSelection(); }
+  else if (e.key === "Enter" && name && value.trim()) { changeSelected({ [name]: value }); e.target.value = ""; }
+});
+$("#bulk-status").addEventListener("change", (e) => {
+  changeSelected({ status: e.target.value });
+  e.target.value = "";
+});
+$("#bulk-delete").addEventListener("click", () => {
+  if (confirm(`Delete ${plural(state.selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true });
+});
+$("#bulk-clear").addEventListener("click", clearSelection);
 
 function savedFilters() {
   try { return JSON.parse(localStorageGet("kanzo.filters")) || []; } catch { return []; }
@@ -614,7 +791,7 @@ const QUALIFIERS = new Map([
   ["tag", anyText], ["status", anyText], ["project", anyText], ["title", anyText], ["description", anyText],
   ["url", anyText], ["comment", anyText], ["id", inRange(isNumber)], ["comments", inRange(isNumber)],
   ["images", inRange(isNumber)], ["created", inRange(isDate)], ["updated", inRange(isDate)],
-  ["is", (v) => v === "human"], ["has", isField], ["no", isField],
+  ["is", (v) => v === "human" || v === "waiting"], ["has", isField], ["no", isField],
 ]);
 
 // A part of a query, read as the server reads it. Null for a word.
@@ -674,8 +851,8 @@ function highlight(name, root, words) {
   CSS.highlights.set(name, new Highlight(...ranges));
 }
 
-function summary(t, link = null) {
-  const chips = [...(link ? [link] : []), ...(isPropertyHidden("tags") ? [] : t.tags.map((tag) => el("span", { class: "tag" }, tag)))];
+function summary(t, ...extra) {
+  const chips = [...extra.filter(Boolean), ...(isPropertyHidden("tags") ? [] : t.tags.map((tag) => el("span", { class: "tag" }, tag)))];
   return [
     t.description ? el("span", { class: "desc" }, plainText(t.description)) : null,
     chips.length ? el("span", { class: "tags" }, chips) : null,
@@ -688,6 +865,11 @@ function urlChip(t) {
   return el("a", { class: "tag url", href: t.url, target: "_blank", rel: "noopener", title: t.url, draggable: "false",
                    onclick: (e) => e.stopPropagation() },
     icon("url"), t.url.split("/")[2].replace(/^www\./, ""));
+}
+
+// Only on cards, like the URL. Most tasks have no waiting_on at all, to keep the board's reply small.
+function waitChip(t) {
+  return t.waiting_on ? el("span", { class: "waits" }, icon("waits"), `Waits on ${t.waiting_on.map((id) => `#${id}`).join(", ")}`) : null;
 }
 
 // A board on an older version sends no hidden_properties.
@@ -743,28 +925,115 @@ function plainText(md) {
     .trim();
 }
 
-function card(t, showProject) {
-  const node = el("div", { class: "card" + (state.task === t.id ? " open" : ""), draggable: "true", "data-id": t.id,
-                           onclick: () => openTask(t.id) },
+// Dragging a selected card takes the others along: they fly behind it, and spread out where it lands.
+const MOTION = { duration: 180, easing: "ease-out" };
+const MOST_FLYING = 30;
+const STACK_TOP = 8;
+
+function calm() {
+  return matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function inView(card) {
+  const r = card.getBoundingClientRect(), list = card.parentNode.getBoundingClientRect();
+  return r.width > 0 && r.bottom > list.top && r.top < list.bottom;
+}
+
+// The browser draws the dragged image, and only from what's on the page when the drag starts.
+function stackImage(card, count) {
+  const stack = el("div", { class: "stack", style: `width:${card.offsetWidth}px` },
+    card.cloneNode(true), el("span", { class: "stack-count" }, String(count)));
+  document.body.append(stack);
+  requestAnimationFrame(() => stack.remove());
+  return stack;
+}
+
+// A copy above the board, so that its column can't clip it.
+function fly(card, from, to, fade) {
+  const { width, height } = card.getBoundingClientRect();
+  const ghost = card.cloneNode(true);
+  ghost.classList.add("flying");
+  ghost.style.cssText = `left:${from.left}px;top:${from.top}px;width:${width}px;height:${height}px`;
+  document.body.append(ghost);
+  const end = `translate(${to.left - from.left}px,${to.top - from.top}px)`;
+  const flight = ghost.animate([{ transform: "none", opacity: 1 }, { transform: end, opacity: fade ? 0 : 1 }], MOTION);
+  return new Promise((done) => { flight.onfinish = () => { ghost.remove(); done(); }; });
+}
+
+// Makes a change to the board, then glides the cards it moved from where they were.
+function shift(change) {
+  const tops = new Map(calm() ? [] : [...$("#columns").querySelectorAll(".card:not(.gathered)")].filter(inView)
+    .map((c) => [c, c.getBoundingClientRect().top]));
+  change();
+  tops.forEach((top, c) => {
+    const r = c.getBoundingClientRect();
+    if (r.width && r.top !== top) c.animate([{ transform: `translateY(${top - r.top}px)` }, { transform: "none" }], MOTION);
+  });
+}
+
+function gather(group, grabbed) {
+  const to = grabbed.getBoundingClientRect();
+  const others = group.filter((c) => c !== grabbed);
+  if (!calm()) others.filter(inView).slice(0, MOST_FLYING).forEach((c) => fly(c, c.getBoundingClientRect(), to, true));
+  shift(() => {
+    grabbed.classList.add("dragging");
+    others.forEach((c) => c.classList.add("dragging", "gathered"));
+  });
+}
+
+// `place` puts the cards where they land. A refresh waits, as it would replace what's flying.
+async function spread(group, grabbed, from, place) {
+  state.settling = true;
+  shift(() => {
+    place();
+    group.forEach((c) => c.classList.remove("dragging", "gathered"));
+  });
+  const others = calm() ? [] : group.filter((c) => c !== grabbed && inView(c)).slice(0, MOST_FLYING);
+  const flying = calm() || !inView(grabbed) ? others : [...others, grabbed];
+  await Promise.all(flying.map((c) => {
+    const landed = fly(c, from, c.getBoundingClientRect(), false);
+    c.classList.add("landing");
+    return landed.then(() => c.classList.remove("landing"));
+  }));
+  state.settling = false;
+}
+
+// In the list, a row: no drag to reorder, since a sorted list has no one position to drop into.
+function card(t, showProject, row) {
+  const node = el("div", { class: "card" + (row ? " row" : "") + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (state.selected.has(t.id) ? " selected" : ""),
+                           draggable: row ? null : "true", "data-id": t.id,
+                           onclick: (e) => { if (e.metaKey || e.ctrlKey) toggleSelected(t.id); else openTask(t.id); } },
+    row ? statusIcon(t.status) : null,
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
       t.human ? el("span", { class: "human-mark", title: tr("Human task: agents skip it") }, icon("human")) : null,
       el("span", { class: "num", title: tr("Copy {0}", key(t)), onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
-    ...summary(t, urlChip(t)));
+    ...summary(t, waitChip(t), urlChip(t)).slice(row ? 1 : 0));
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(t.id));
-    requestAnimationFrame(() => node.classList.add("dragging"));
+    const selected = state.selected.has(t.id) ? [...$("#columns").querySelectorAll(".card.selected")] : [];
+    const group = state.group = selected.length > 1 ? selected : null;
+    if (group) {
+      const r = node.getBoundingClientRect();
+      state.grip = { x: e.clientX - r.left, y: e.clientY - r.top };
+      e.dataTransfer.setDragImage(stackImage(node, group.length), state.grip.x, state.grip.y + STACK_TOP);
+    }
+    requestAnimationFrame(() => { if (group) gather(group, node); else node.classList.add("dragging"); });
   });
-  node.addEventListener("dragend", () => {
+  node.addEventListener("dragend", async () => {
     node.classList.remove("dragging");
     document.querySelectorAll(".drop-line").forEach((d) => d.remove());
     state.dragging = null;
-    // A drop reloads once the move is saved; a cancelled drag puts the card back.
-    if (!state.dropped) loadBoard();
+    const { dropped, group } = state;
     state.dropped = false;
+    state.group = null;
+    // A drop reloads once the move is saved; a cancelled drag puts the card back.
+    if (dropped) return;
+    if (group) await spread(group, node, node.getBoundingClientRect(), () => {});
+    loadBoard();
   });
   return node;
 }
@@ -791,11 +1060,28 @@ function wireDrop(col, list, status) {
     if (!id) return;
     const after = cardAfter(e.clientY);
     const dragged = document.querySelector(`.card[data-id="${id}"]`);
-    if (dragged) list.insertBefore(dragged, line.parentNode === list ? line : null);
-    line.remove();
+    const spot = line.parentNode === list ? line : null;
     state.dropped = true;
     if (fresh === id) fresh = null;
     const before = after ? Number(after.dataset.id) : null;
+    const { group } = state;
+    if (group) {
+      const from = { left: e.clientX - state.grip.x, top: e.clientY - state.grip.y };
+      const ids = group.map((c) => Number(c.dataset.id));
+      const landed = spread(group, dragged, from, () => {
+        group.forEach((c) => list.insertBefore(c, spot));
+        line.remove();
+      });
+      try {
+        await api("POST", "/tasks/move", { ids, status, before });
+        if (ids.includes(state.task)) refreshTask();
+      } catch (err) { toast(err.message); }
+      await landed;
+      loadBoard();
+      return;
+    }
+    if (dragged) list.insertBefore(dragged, spot);
+    line.remove();
     try {
       await api("POST", `/tasks/${id}/move`, { status, before });
       if (state.task === id) refreshTask();
@@ -830,7 +1116,18 @@ function dropFresh() {
   api("DELETE", `/tasks/${id}`).then(loadBoard, () => {});
 }
 
+// A reload or a closed tab may never blur the field being typed in.
 window.addEventListener("pagehide", () => {
+  const active = document.activeElement;
+  const fields = !panelTask ? null
+    : active === $("#p-desc") && active.value.trim() !== panelTask.description ? { description: active.value }
+    : active === $("#p-tags") && cleanTags(active.value).join() !== panelTask.tags.join() ? { tags: cleanTags(active.value).join() }
+    : null;
+  if (fields) {
+    fresh = null;
+    fetch(`/api/tasks/${panelTask.id}`, { method: "PATCH", keepalive: true,
+                                          headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) });
+  }
   if (fresh) fetch(`/api/tasks/${fresh}`, { method: "DELETE", keepalive: true });
 });
 
@@ -868,14 +1165,21 @@ $("#new-project").addEventListener("submit", async (e) => {
 
 const panel = $("#panel");
 let panelTask = null;
+let panelWaits = "";
+// Unsent comments by task, so closing the panel doesn't lose one.
+const drafts = new Map();
+
+const taskLink = (t) => el("button", { type: "button", class: "tag", title: key(t), onclick: () => pick(t) },
+  statusIcon(t.status), el("span", {}, t.title));
 
 async function openTask(id) {
+  clearSelection();
   leavePanelField();
   if (fresh !== id) dropFresh();
   state.task = id;
   document.querySelectorAll(".card.open").forEach((c) => c.classList.remove("open"));
   document.querySelector(`.card[data-id="${id}"]`)?.classList.add("open");
-  $("#p-comment").value = "";
+  $("#p-comment").value = drafts.get(id) || "";
   pending = [];
   renderPending();
   fit($("#p-comment"));
@@ -914,13 +1218,15 @@ async function refreshTask() {
   }
   // Another task may have taken the panel meanwhile.
   if (state.task !== id) return;
-  const { task, comments, images } = data;
+  // A board on an older version sends neither list.
+  const { task, comments, images, waits_on = [], blocks = [] } = data;
   panelTask = task;
+  panelWaits = waits_on.map(key).join(", ");
   $("#p-key").textContent = key(task);
   $("#p-key").title = tr("Copy {0}", key(task));
   // Never overwrite what is being typed or picked.
   if (!$("#p-project").contains(document.activeElement)) renderProjectPick(task);
-  for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")], [$("#p-url"), task.url || ""]]) {
+  for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")], [$("#p-url"), task.url || ""], [$("#p-waits"), panelWaits]]) {
     if (document.activeElement !== field) { field.value = value; fit(field); }
   }
   showDesc();
@@ -930,6 +1236,9 @@ async function refreshTask() {
   if (!statuses.includes(task.status)) status.append(el("option", { value: task.status }, task.status));
   status.value = task.status;
   $("#p-human").checked = task.human;
+  $("#p-waits-links").replaceChildren(...waits_on.map(taskLink));
+  $("#p-blocks").replaceChildren(...blocks.map(taskLink));
+  $("#p-blocks-row").hidden = !blocks.length;
   $("#p-created").replaceChildren(timeEl(task.created_at));
   $("#p-updated").replaceChildren(timeEl(task.updated_at));
   $("#p-comment-count").textContent = comments.length ? String(comments.length) : "";
@@ -997,6 +1306,46 @@ function cancelField(e, saved) {
   e.target.blur();
 }
 
+// For writing worth keeping: Esc leaves the field, and leaving it saves. Closing a new task
+// saves what was typed, and drops the task if nothing was.
+function leaveField(e) {
+  e.stopPropagation();
+  if (fresh && fresh === state.task) closeTask();
+  else e.target.blur();
+}
+
+// A page can't open a file: link, so the board does, on the computer it runs on.
+panel.addEventListener("click", async (e) => {
+  const link = e.target.closest('a[href^="file:///"]');
+  if (!link) return;
+  e.preventDefault();
+  try {
+    const path = decodeURIComponent(link.getAttribute("href").slice(7)).replace(/^\/([a-zA-Z]:)/, "$1");
+    await api("POST", "/open", { path });
+  } catch (err) { toast(err.message); }
+});
+
+// "" is the default width. A drag saves and refits only when it ends: browsers send one move a frame.
+function setPanelWidth(width, save) {
+  panel.style.setProperty("--panel-width", width);
+  if (!save) return;
+  localStorageSet("kanzo.panelWidth", width);
+  [$("#p-title"), $("#p-desc"), $("#p-comment")].forEach(fit);
+}
+
+setPanelWidth(localStorageGet("kanzo.panelWidth") || "");
+$("#p-wide").addEventListener("click", () => setPanelWidth(panel.style.getPropertyValue("--panel-width") === "100vw" ? "" : "100vw", true));
+$("#p-edge").addEventListener("dblclick", () => setPanelWidth("", true));
+$("#p-edge").addEventListener("pointerdown", (down) => {
+  const edge = down.target;
+  edge.setPointerCapture(down.pointerId);
+  edge.onpointermove = (e) => setPanelWidth(`${Math.max(360, innerWidth - e.clientX)}px`);
+  edge.onpointerup = () => {
+    edge.onpointermove = edge.onpointerup = null;
+    setPanelWidth(panel.style.getPropertyValue("--panel-width"), true);
+  };
+});
+
 $("#p-close").addEventListener("click", closeTask);
 $("#p-key").addEventListener("click", () => { if (panelTask) copyKey(key(panelTask)); });
 for (const field of [$("#p-title"), $("#p-desc")]) field.addEventListener("input", () => fit(field));
@@ -1015,7 +1364,7 @@ $("#p-title").addEventListener("blur", (e) => {
 
 $("#p-desc").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); closeTask(); }
-  else if (e.key === "Escape") cancelField(e, panelTask ? panelTask.description : "");
+  else if (e.key === "Escape") leaveField(e);
 });
 $("#p-desc").addEventListener("blur", (e) => {
   if (panelTask && e.target.value.trim() !== panelTask.description) patchTask({ description: e.target.value });
@@ -1028,7 +1377,9 @@ function showDesc() {
   const editing = document.activeElement === desc || !desc.value.trim();
   desc.hidden = !editing;
   view.hidden = editing;
-  if (!editing) view.innerHTML = markdown(desc.value);
+  // Hidden, it measured 0, as it does when the task before this one had a description.
+  if (editing) fit(desc);
+  else view.innerHTML = markdown(desc.value);
 }
 
 function editDesc() {
@@ -1114,7 +1465,7 @@ for (const [zone, toComment] of [[$("#p-desc").closest(".section"), false], [$("
 const cleanTags = (text) => [...new Set(text.split(",").map((t) => t.trim().replace(/\s+/g, " ").toLowerCase()).filter(Boolean))];
 $("#p-tags").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
-  else if (e.key === "Escape") cancelField(e, panelTask ? panelTask.tags.join(", ") : "");
+  else if (e.key === "Escape") leaveField(e);
 });
 $("#p-tags").addEventListener("blur", (e) => {
   if (!panelTask) return;
@@ -1134,6 +1485,71 @@ $("#p-url").addEventListener("blur", (e) => {
   else e.target.value = url;
 });
 
+let waitResults = [], waitSelected = 0, waitRequest = 0, waitTimer;
+
+function closeWaits() {
+  clearTimeout(waitTimer);
+  waitRequest++;
+  waitResults = [];
+  $("#p-waits-list").hidden = true;
+  $("#p-waits").setAttribute("aria-expanded", "false");
+}
+
+// The search behind the filter, for what's typed after the last comma.
+async function findWaits() {
+  const parts = $("#p-waits").value.split(",").map((part) => part.trim());
+  const words = parts[parts.length - 1];
+  if (!words || !panelTask) { closeWaits(); return; }
+  const { id, project } = panelTask;
+  const request = ++waitRequest;
+  try {
+    const found = await api("GET", "/search?q=" + encodeURIComponent(`project:${project} -status:done ${words}`));
+    if (request !== waitRequest) return;
+    waitResults = found.filter((t) => t.id !== id && !parts.includes(key(t))).slice(0, 8);
+    waitSelected = 0;
+    const list = $("#p-waits-list");
+    list.replaceChildren(...waitResults.map((t, i) => el("button", { type: "button", tabindex: "-1", role: "option", class: "result" + (i === 0 ? " selected" : ""),
+                                                                     onmousemove: () => selectWait(i),
+                                                                     // Before the field loses focus, which would save half a word.
+                                                                     onmousedown: (e) => { e.preventDefault(); pickWait(t); } },
+      el("span", { class: "mono" }, `#${t.id}`),
+      el("span", { class: "title" }, t.title),
+      el("span", { class: "meta" }, t.status))));
+    if (!waitResults.length) list.append(el("span", { class: "note" }, "No tasks match."));
+    list.hidden = false;
+    $("#p-waits").setAttribute("aria-expanded", "true");
+    highlight("search", list, wordsOf(words));
+  } catch (err) { toast(err.message); }
+}
+
+function selectWait(i) {
+  const rows = $("#p-waits-list").querySelectorAll(".result");
+  waitSelected = (i + rows.length) % rows.length;
+  rows.forEach((r, j) => r.classList.toggle("selected", j === waitSelected));
+  rows[waitSelected].scrollIntoView({ block: "nearest" });
+}
+
+function pickWait(t) {
+  const input = $("#p-waits");
+  const kept = input.value.split(",").slice(0, -1).map((part) => part.trim()).filter(Boolean);
+  input.value = [...kept, key(t)].join(", ") + ", ";
+  closeWaits();
+}
+
+$("#p-waits").addEventListener("input", () => { clearTimeout(waitTimer); waitTimer = setTimeout(findWaits, 120); });
+$("#p-waits").addEventListener("keydown", (e) => {
+  const listed = waitResults.length > 0;
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && listed) { e.preventDefault(); selectWait(waitSelected + (e.key === "ArrowDown" ? 1 : -1)); }
+  else if (e.key === "Enter") { e.preventDefault(); if (listed) pickWait(waitResults[waitSelected]); else e.target.blur(); }
+  else if (e.key === "Escape" && !$("#p-waits-list").hidden) { e.stopPropagation(); closeWaits(); }
+  else if (e.key === "Escape") cancelField(e, panelWaits);
+});
+$("#p-waits").addEventListener("blur", (e) => {
+  closeWaits();
+  e.target.value = e.target.value.replace(/[,\s]+$/, "");
+  if (panelTask && e.target.value !== panelWaits) patchTask({ waits_on: e.target.value });
+});
+
 $("#p-comment-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const body = $("#p-comment").value.trim();
@@ -1141,6 +1557,7 @@ $("#p-comment-form").addEventListener("submit", async (e) => {
   try {
     await api("POST", `/tasks/${panelTask.id}/comments`, { body, images: pending });
     if (fresh === panelTask.id) fresh = null;
+    drafts.delete(panelTask.id);
     $("#p-comment").value = "";
     pending = [];
     renderPending();
@@ -1149,7 +1566,11 @@ $("#p-comment-form").addEventListener("submit", async (e) => {
     loadBoard();
   } catch (err) { toast(err.message); }
 });
-$("#p-comment").addEventListener("input", (e) => { $("#p-send").disabled = !e.target.value.trim() && !pending.length; fit(e.target); });
+$("#p-comment").addEventListener("input", (e) => {
+  if (e.target.value) drafts.set(state.task, e.target.value); else drafts.delete(state.task);
+  $("#p-send").disabled = !e.target.value.trim() && !pending.length;
+  fit(e.target);
+});
 $("#p-comment").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#p-comment-form").requestSubmit(); }
 });
@@ -1229,7 +1650,15 @@ document.addEventListener("keydown", (e) => {
   const typing = e.target.closest("input, textarea, select");
   const plain = !typing && !e.metaKey && !e.ctrlKey;
   if (e.key === "Escape" && state.menu) { closeMenu(); return; }
+  // Only in the installed app: in a browser tab, these keys belong to the browser.
+  if (/^\d$/.test(e.key) && (e.metaKey || e.ctrlKey) && state.board && matchMedia("(display-mode: standalone)").matches) {
+    const { projects } = state.board;
+    const slug = e.key === "0" ? "all" : projects[e.key === "9" ? projects.length - 1 : e.key - 1]?.slug;
+    e.preventDefault();
+    if (slug) setProject(slug);
+  }
   if (e.key === "Escape" && state.task && !typing) closeTask();
+  if (e.key === "Escape" && !typing) clearSelection();
   if ((e.key === "/" && plain) || (e.key === "k" && (e.metaKey || e.ctrlKey))) {
     e.preventDefault();
     openSearch();
@@ -1469,6 +1898,7 @@ function toggleSettingsMenu() {
     el("button", { onclick: () => openSettings() }, icon("settings"), tr("Settings")),
     el("button", { onclick: () => { closeMenu(); checkForUpdates(); } }, icon("update"), tr("Check for updates"),
       el("span", { class: "value" }, `v${state.board.version}`)),
+    el("button", { onclick: () => openSettings("about") }, icon("news"), tr("What's new?")),
     el("button", { onclick: sync }, icon("sync"), tr("Sync")));
   document.body.append(menu);
   const r = button.getBoundingClientRect();
@@ -1497,6 +1927,17 @@ function openSettings(section = "board") {
 function showSection(section) {
   document.querySelectorAll("#settings-nav button").forEach((b) => b.classList.toggle("active", b.dataset.section === section));
   document.querySelectorAll(".settings-pane").forEach((p) => { p.hidden = p.dataset.section !== section; });
+  if (section === "about") loadWhatsNew();
+}
+
+// Fetched when first shown, so the page doesn't carry the notes on every load.
+async function loadWhatsNew() {
+  const notes = $("#whats-new");
+  if (notes.firstChild) return;
+  try {
+    const res = await fetch("/changelog.md");
+    if (res.ok) notes.innerHTML = markdown(await res.text());
+  } catch {}
 }
 
 function closeSettings() {
@@ -1520,7 +1961,7 @@ async function saveSetting(box, fields) {
   } catch (err) { box.checked = !box.checked; toast(err.message); }
 }
 $("#settings-backlog").addEventListener("change", (e) => saveSetting(e.target, { backlog: e.target.checked }));
-$('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL", "Human", "Created", "Updated", "Comments", "Images"].map((name) => {
+$('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL", "Human", "Waiting", "Created", "Updated", "Comments", "Images"].map((name) => {
   const property = name.toLowerCase();
   return el("label", { class: "setting" }, el("span", { class: "text" }, tr(name)),
     el("span", { class: "switch" },
@@ -1602,6 +2043,25 @@ async function installUpdate(available) {
   }
   location.reload();
 }
+
+function setRail(on) {
+  document.documentElement.classList.toggle("rail", on);
+  $("#rail").setAttribute("aria-expanded", String(!on));
+  localStorageSet("kanzo.rail", on ? "1" : "");
+}
+setRail(localStorageGet("kanzo.rail") === "1");
+document.documentElement.classList.add("ready");
+$("#rail").addEventListener("click", () => setRail($("#rail").getAttribute("aria-expanded") === "true"));
+
+// Chromium's browsers ask this only while the board isn't installed; the others never do.
+let installPrompt;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  $("#install").hidden = false;
+});
+window.addEventListener("appinstalled", () => { $("#install").hidden = true; });
+$("#install").addEventListener("click", () => installPrompt.prompt());
 
 setInterval(() => {
   document.querySelectorAll("time[datetime]").forEach((t) => { t.textContent = ago(t.getAttribute("datetime")); });

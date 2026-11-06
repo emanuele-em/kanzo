@@ -3,6 +3,7 @@
 //! on every request; the rollback journal makes a read touch no extra files at all and
 //! measured about 3x faster per operation.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
@@ -44,6 +45,15 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER images_delete AFTER DELETE ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     "ALTER TABLE tasks ADD COLUMN human INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE tasks ADD COLUMN url TEXT NOT NULL DEFAULT '';",
+    "CREATE TABLE task_waits (
+         task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+         waits_on_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+         PRIMARY KEY (task_id, waits_on_id)
+     ) WITHOUT ROWID;
+     CREATE INDEX task_waits_by_blocker ON task_waits(waits_on_id);
+     CREATE TRIGGER task_waits_insert AFTER INSERT ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
+     CREATE TRIGGER task_waits_delete AFTER DELETE ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
+    "ALTER TABLE projects ADD COLUMN position REAL;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -111,12 +121,24 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub comments: i64,
+    /// The tasks this one waits on that aren't done yet. Left out when there are none, as on most tasks.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waiting_on: Vec<i64>,
 }
 
 impl Task {
     pub fn key(&self) -> String {
         format!("{}#{}", self.project, self.id)
     }
+}
+
+/// A task another one waits on or blocks.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskLink {
+    pub id: i64,
+    pub project: String,
+    pub title: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +167,8 @@ pub struct TaskPatch {
     pub tags: Option<String>,
     pub url: Option<String>,
     pub human: Option<bool>,
+    /// Task keys, comma-separated; it replaces the list.
+    pub waits_on: Option<String>,
 }
 
 const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
@@ -154,7 +178,8 @@ pub const DONE: &str = STATUSES[3];
 pub const BACKLOG: &str = "backlog";
 
 /// What a task shows besides its id, title and status; each can be turned off in Settings.
-const PROPERTIES: [&str; 8] = ["description", "tags", "url", "human", "created", "updated", "comments", "images"];
+const PROPERTIES: [&str; 9] =
+    ["description", "tags", "url", "human", "waiting", "created", "updated", "comments", "images"];
 
 pub struct Store {
     conn: Connection,
@@ -324,7 +349,7 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> Result<Vec<Project>> {
-        let sql = format!("{} ORDER BY p.slug", Self::PROJECT_SELECT);
+        let sql = format!("{} ORDER BY p.position IS NULL, p.position, p.slug", Self::PROJECT_SELECT);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([DONE], Self::project_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -448,6 +473,41 @@ impl Store {
         self.find_project(&project.slug)
     }
 
+    /// Before `before`, or last. A project never moved has no position and comes after those that
+    /// have one, by slug, so only a move that lands among those has to number them all.
+    pub fn move_project(&self, slug: &str, before: Option<&str>) -> Result<Project> {
+        let project = self.find_project(slug)?;
+        let before = before.map(|b| self.find_project(b)).transpose()?;
+        if before.as_ref().is_some_and(|b| b.id == project.id) {
+            return Ok(project);
+        }
+        self.write(|c| {
+            let mut others: Vec<(i64, Option<f64>)> = c
+                .prepare("SELECT id, position FROM projects WHERE id <> ?1 ORDER BY position IS NULL, position, slug")?
+                .query_map([project.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let at = before.and_then(|b| others.iter().position(|o| o.0 == b.id)).unwrap_or(others.len());
+            let position = match (at.checked_sub(1).map(|i| others[i].1), others.get(at).map(|o| o.1)) {
+                (None, Some(Some(next))) => Some(next - 1.0),
+                (None, _) => Some(1.0),
+                (Some(Some(prev)), Some(Some(next))) if next - prev >= 1e-9 => Some((prev + next) / 2.0),
+                (Some(Some(prev)), Some(None) | None) => Some(prev + 1.0),
+                _ => None,
+            };
+            let mut update = c.prepare("UPDATE projects SET position = ?1 WHERE id = ?2")?;
+            if let Some(position) = position {
+                update.execute(params![position, project.id])?;
+            } else {
+                others.insert(at, (project.id, None));
+                for (i, (id, _)) in others.iter().enumerate() {
+                    update.execute(params![(i + 1) as f64, id])?;
+                }
+            }
+            Ok(())
+        })?;
+        self.find_project(&project.slug)
+    }
+
     pub fn delete_project(&self, slug: &str) -> Result<Project> {
         let project = self.find_project(slug)?;
         // Tasks and comments go with it through ON DELETE CASCADE.
@@ -474,7 +534,28 @@ impl Store {
             created_at: r.get(6)?,
             updated_at: r.get(7)?,
             comments: r.get(8)?,
+            waiting_on: Vec::new(),
         })
+    }
+
+    /// One query for all of them, not a subquery per task: on a board of 3,000 tasks that took
+    /// /api/board from 5.3 ms to 7.3 ms even with nothing waiting. Now tasks pay only for actual links.
+    fn add_waiting(&self, tasks: &mut [Task]) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT w.task_id, w.waits_on_id FROM task_waits w JOIN tasks b ON b.id = w.waits_on_id
+             WHERE b.status <> 'done' ORDER BY w.waits_on_id",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut waiting: HashMap<i64, Vec<i64>> = HashMap::new();
+        while let Some(r) = rows.next()? {
+            waiting.entry(r.get(0)?).or_default().push(r.get(1)?);
+        }
+        if !waiting.is_empty() {
+            for t in tasks {
+                t.waiting_on = waiting.remove(&t.id).unwrap_or_default();
+            }
+        }
+        Ok(())
     }
 
     pub fn list_tasks(&self, project_id: Option<i64>, status: Option<&str>) -> Result<Vec<Task>> {
@@ -502,6 +583,7 @@ impl Store {
         let mut tasks: Vec<Task> = stmt
             .query_map(params![project_id, status, done, limit], Self::task_row)?
             .collect::<rusqlite::Result<_>>()?;
+        self.add_waiting(&mut tasks)?;
         let column = |t: &Task| self.statuses().iter().position(|s| *s == t.status).unwrap_or(usize::MAX);
         tasks.sort_by_key(column);
         let hidden = match keep_done {
@@ -551,16 +633,21 @@ impl Store {
         values.extend(filter.values);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), Self::task_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut tasks: Vec<Task> = rows.collect::<rusqlite::Result<_>>()?;
+        self.add_waiting(&mut tasks)?;
+        Ok(tasks)
     }
 
     pub fn get_task(&self, id: i64) -> Result<Task> {
         let sql = format!("{} WHERE t.id = ?1", Self::TASK_SELECT);
-        self.conn
+        let mut task = self
+            .conn
             .prepare_cached(&sql)?
             .query_row([id], Self::task_row)
             .optional()?
-            .ok_or_else(|| Error::NotFound(format!("no task #{id}")))
+            .ok_or_else(|| Error::NotFound(format!("no task #{id}")))?;
+        task.waiting_on = self.task_links(id, false)?.into_iter().filter(|t| t.status != DONE).map(|t| t.id).collect();
+        Ok(task)
     }
 
     pub fn find_task(&self, key: &str) -> Result<Task> {
@@ -596,7 +683,8 @@ impl Store {
         self.create_task_in(project, title, TaskPatch { description: Some(description.into()), ..Default::default() })
     }
 
-    // One write, or an agent could take a task before it's human. Uses description, status, tags, human.
+    // One write, or an agent could take a task before it's human, or before it waits.
+    // Uses description, status, tags, human, waits_on.
     pub fn create_task_in(&self, project_id: i64, title: &str, patch: TaskPatch) -> Result<Task> {
         let title = clean_title(title)?;
         let status = patch.status.as_deref().unwrap_or(STATUSES[0]);
@@ -610,9 +698,56 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false)],
             )?;
-            Ok(c.last_insert_rowid())
+            let id = c.last_insert_rowid();
+            if let Some(keys) = &patch.waits_on {
+                self.set_waits(c, id, keys)?;
+            }
+            Ok(id)
         })?;
         self.get_task(id)
+    }
+
+    /// Replaces what a task waits on. Part of the task's write, so a refused list changes nothing.
+    fn set_waits(&self, c: &Connection, id: i64, keys: &str) -> Result<()> {
+        let mut ids = Vec::new();
+        for key in keys.split(',').map(str::trim).filter(|k| !k.is_empty()) {
+            ids.push(self.find_task(key)?.id);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.iter().copied().eq(self.task_links(id, false)?.iter().map(|t| t.id)) {
+            return Ok(());
+        }
+        c.execute("DELETE FROM task_waits WHERE task_id = ?1", [id])?;
+        for other in ids {
+            let loops: bool = c.query_row(
+                "WITH RECURSIVE chain(id) AS (
+                     SELECT ?1 UNION SELECT w.waits_on_id FROM task_waits w JOIN chain ON w.task_id = chain.id
+                 ) SELECT EXISTS (SELECT 1 FROM chain WHERE id = ?2)",
+                [other, id],
+                |r| r.get(0),
+            )?;
+            if loops {
+                return Err(Error::Invalid(format!("#{id} can't wait on #{other}: that would make a loop")));
+            }
+            c.execute("INSERT INTO task_waits (task_id, waits_on_id) VALUES (?1, ?2)", [id, other])?;
+        }
+        c.execute(&format!("UPDATE tasks SET updated_at = {NOW} WHERE id = ?1"), [id])?;
+        Ok(())
+    }
+
+    /// What a task waits on, done or not, or with `blocks`, the tasks waiting on it.
+    pub fn task_links(&self, id: i64, blocks: bool) -> Result<Vec<TaskLink>> {
+        let (this, other) = if blocks { ("waits_on_id", "task_id") } else { ("task_id", "waits_on_id") };
+        let sql = format!(
+            "SELECT t.id, p.slug, t.title, t.status FROM task_waits w JOIN tasks t ON t.id = w.{other}
+             JOIN projects p ON p.id = t.project_id WHERE w.{this} = ?1 ORDER BY t.id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([id], |r| {
+            Ok(TaskLink { id: r.get(0)?, project: r.get(1)?, title: r.get(2)?, status: r.get(3)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
@@ -653,56 +788,101 @@ impl Store {
                     params![s, position, id],
                 )?;
             }
+            if let Some(keys) = &patch.waits_on {
+                self.set_waits(c, id, keys)?;
+            }
             Ok(())
         })?;
         self.get_task(id)
     }
 
-    pub fn move_task(&self, id: i64, status: &str, before: Option<i64>) -> Result<Task> {
-        self.check_status(status)?;
+    /// In one write: all or nothing, and about 60 times faster than one write per task. Tags are
+    /// added and removed, not replaced, so each task keeps its others.
+    pub fn update_tasks(&self, ids: &[i64], status: Option<&str>, add_tags: &str, remove_tags: &str) -> Result<()> {
+        if let Some(s) = status {
+            self.check_status(s)?;
+        }
+        let (add, remove) = (clean_tags(add_tags), clean_tags(remove_tags));
         self.write(|c| {
-            let current = self.get_task(id)?;
-            let before = before.filter(|b| *b != id);
-            let anchor: Option<(i64, f64)> = match before {
-                Some(b) => c
-                    .query_row("SELECT position FROM tasks WHERE id = ?1 AND status = ?2", params![b, status], |r| {
-                        r.get(0)
-                    })
-                    .optional()?
-                    .map(|p| (b, p)),
-                None => None,
-            };
-            let position = match anchor {
-                None => Self::end_of_column(c, status, id)?,
-                Some((before, mut next)) => {
-                    let prev_of = |next: f64| -> Result<Option<f64>> {
-                        Ok(c.query_row(
-                            "SELECT max(position) FROM tasks WHERE status = ?1 AND position < ?2 AND id <> ?3",
-                            params![status, next, id],
-                            |r| r.get(0),
-                        )?)
-                    };
-                    let mut prev = prev_of(next)?;
-                    if prev.is_some_and(|p| next - p < 1e-9) {
-                        // Out of float room between two neighbours.
-                        Self::renumber(c, status)?;
-                        next = c.query_row("SELECT position FROM tasks WHERE id = ?1", [before], |r| r.get(0))?;
-                        prev = prev_of(next)?;
-                    }
-                    match prev {
-                        Some(p) => (p + next) / 2.0,
-                        None => next - 1.0,
+            for &id in ids {
+                let task = self.get_task(id)?;
+                let mut tags = task.tags.clone();
+                tags.retain(|t| !remove.contains(t));
+                for tag in &add {
+                    if !tags.contains(tag) {
+                        tags.push(tag.clone());
                     }
                 }
-            };
-            let touched = if current.status != status { format!(", updated_at = {NOW}") } else { String::new() };
-            c.execute(
-                &format!("UPDATE tasks SET status = ?1, position = ?2{touched} WHERE id = ?3"),
-                params![status, position, id],
-            )?;
+                if tags != task.tags {
+                    c.execute(
+                        &format!("UPDATE tasks SET tags = ?1, updated_at = {NOW} WHERE id = ?2"),
+                        params![tags.join(","), id],
+                    )?;
+                }
+                if let Some(s) = status.filter(|s| *s != task.status) {
+                    let position = Self::end_of_column(c, s, id)?;
+                    c.execute(
+                        &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
+                        params![s, position, id],
+                    )?;
+                }
+            }
             Ok(())
-        })?;
+        })
+    }
+
+    pub fn move_task(&self, id: i64, status: &str, before: Option<i64>) -> Result<Task> {
+        self.check_status(status)?;
+        self.write(|c| self.place(c, id, status, before))?;
         self.get_task(id)
+    }
+
+    /// In one write, so nobody sees the group half moved. They keep the order of `ids`.
+    pub fn move_tasks(&self, ids: &[i64], status: &str, before: Option<i64>) -> Result<()> {
+        self.check_status(status)?;
+        let before = before.filter(|b| !ids.contains(b));
+        self.write(|c| ids.iter().try_for_each(|&id| self.place(c, id, status, before)))
+    }
+
+    fn place(&self, c: &Connection, id: i64, status: &str, before: Option<i64>) -> Result<()> {
+        let current = self.get_task(id)?;
+        let before = before.filter(|b| *b != id);
+        let anchor: Option<(i64, f64)> = match before {
+            Some(b) => c
+                .query_row("SELECT position FROM tasks WHERE id = ?1 AND status = ?2", params![b, status], |r| r.get(0))
+                .optional()?
+                .map(|p| (b, p)),
+            None => None,
+        };
+        let position = match anchor {
+            None => Self::end_of_column(c, status, id)?,
+            Some((before, mut next)) => {
+                let prev_of = |next: f64| -> Result<Option<f64>> {
+                    Ok(c.query_row(
+                        "SELECT max(position) FROM tasks WHERE status = ?1 AND position < ?2 AND id <> ?3",
+                        params![status, next, id],
+                        |r| r.get(0),
+                    )?)
+                };
+                let mut prev = prev_of(next)?;
+                if prev.is_some_and(|p| next - p < 1e-9) {
+                    // Out of float room between two neighbours.
+                    Self::renumber(c, status)?;
+                    next = c.query_row("SELECT position FROM tasks WHERE id = ?1", [before], |r| r.get(0))?;
+                    prev = prev_of(next)?;
+                }
+                match prev {
+                    Some(p) => (p + next) / 2.0,
+                    None => next - 1.0,
+                }
+            }
+        };
+        let touched = if current.status != status { format!(", updated_at = {NOW}") } else { String::new() };
+        c.execute(
+            &format!("UPDATE tasks SET status = ?1, position = ?2{touched} WHERE id = ?3"),
+            params![status, position, id],
+        )?;
+        Ok(())
     }
 
     fn renumber(c: &Connection, status: &str) -> Result<()> {
@@ -722,23 +902,36 @@ impl Store {
         self.next_task_matching(project_id, "")
     }
 
-    pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
+    /// The todo tasks for agents that match `query`, from FROM on, with its values.
+    fn agents_todo(&self, project_id: Option<i64>, query: &str) -> Result<(String, Vec<Value>)> {
         let filter = if query.trim().is_empty() {
             Filter::default()
         } else {
             self.add_has_word()?;
             Filter::new(query, 3, &self.hidden_properties()?)
         };
-        let [from, to, ..] = STATUSES;
+        let sql = format!(
+            "FROM tasks t JOIN projects p ON p.id = t.project_id
+             WHERE t.status = ?1 AND t.human = 0 AND (?2 IS NULL OR t.project_id = ?2){}",
+            filter.sql
+        );
+        let mut values: Vec<Value> = vec![STATUSES[0].to_string().into(), project_id.into()];
+        values.extend(filter.values.into_iter().map(Value::from));
+        Ok((sql, values))
+    }
+
+    /// How many tasks `next_task` skips because they wait on others.
+    pub fn waiting_in_todo(&self, project_id: Option<i64>, query: &str) -> Result<i64> {
+        let (todo, values) = self.agents_todo(project_id, query)?;
+        let sql = format!("SELECT count(*) {todo} AND {WAITING}");
+        Ok(self.conn.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0))?)
+    }
+
+    pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
+        let (todo, values) = self.agents_todo(project_id, query)?;
+        let to = STATUSES[1];
         let id = self.write(|c| {
-            let sql = format!(
-                "SELECT t.id FROM tasks t JOIN projects p ON p.id = t.project_id
-                 WHERE t.status = ?1 AND t.human = 0 AND (?2 IS NULL OR t.project_id = ?2){}
-                 ORDER BY t.position LIMIT 1",
-                filter.sql
-            );
-            let mut values: Vec<Value> = vec![from.to_string().into(), project_id.into()];
-            values.extend(filter.values.iter().cloned().map(Value::from));
+            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY t.position LIMIT 1");
             let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
             if let Some(id) = id {
                 let position = Self::end_of_column(c, to, id)?;
@@ -756,6 +949,15 @@ impl Store {
         let task = self.get_task(id)?;
         self.conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
         Ok(task)
+    }
+
+    pub fn delete_tasks(&self, ids: &[i64]) -> Result<()> {
+        self.write(|c| {
+            for id in ids {
+                c.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+            }
+            Ok(())
+        })
     }
 
     pub fn list_comments(&self, task_id: i64) -> Result<Vec<Comment>> {
@@ -840,6 +1042,13 @@ impl Store {
 
     pub fn image_files(&self, of: ImagesOf) -> Result<Vec<String>> {
         let (sql, id) = match of {
+            ImagesOf::Tasks(ids) => {
+                let mut files = Vec::new();
+                for id in ids {
+                    files.extend(self.image_files(ImagesOf::Task(id))?);
+                }
+                return Ok(files);
+            }
             ImagesOf::Image(id) => ("SELECT file FROM images WHERE id = ?1", id),
             ImagesOf::Comment(id) => ("SELECT DISTINCT file FROM images WHERE comment_id = ?1", id),
             ImagesOf::Task(id) => ("SELECT DISTINCT file FROM images WHERE task_id = ?1", id),
@@ -868,6 +1077,7 @@ pub enum ImagesOf {
     Image(i64),
     Comment(i64),
     Task(i64),
+    Tasks(Vec<i64>),
     Project(i64),
 }
 
@@ -910,6 +1120,9 @@ pub fn short_time(ts: &str) -> String {
 
 const COMMENT_COUNT: &str = "(SELECT count(*) FROM comments WHERE task_id = t.id)";
 const IMAGE_COUNT: &str = "(SELECT count(*) FROM images WHERE task_id = t.id)";
+/// Computed, never stored: reopening a task blocks what waits on it again, with nothing to keep in step.
+const WAITING: &str = "EXISTS (SELECT 1 FROM task_waits w JOIN tasks b ON b.id = w.waits_on_id
+    WHERE w.task_id = t.id AND b.status <> 'done')";
 const QUALIFIERS: [&str; 15] = [
     "tag",
     "status",
@@ -981,8 +1194,7 @@ impl Filter {
         let property = match name {
             "tag" => "tags",
             "comment" => "comments",
-            "is" => "human",
-            "has" | "no" => value,
+            "is" | "has" | "no" => value,
             other => other,
         };
         if hidden.iter().any(|h| h == property) {
@@ -1007,6 +1219,7 @@ impl Filter {
             ("created", range) => range_sql("substr(t.created_at, 1, 10)", range, date)?,
             ("updated", range) => range_sql("substr(t.updated_at, 1, 10)", range, date)?,
             ("is", "human") => "t.human".to_string(),
+            ("is", "waiting") => WAITING.to_string(),
             ("has" | "no", "description") => "t.description <> ''".to_string(),
             ("has" | "no", "tags") => "t.tags <> ''".to_string(),
             ("has" | "no", "url") => "t.url <> ''".to_string(),
@@ -1170,6 +1383,181 @@ mod tests {
         let v: String =
             s.conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
         assert_eq!(v, MIGRATIONS.len().to_string());
+    }
+
+    fn waits(keys: &str) -> TaskPatch {
+        TaskPatch { waits_on: Some(keys.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn next_task_skips_a_task_until_what_it_waits_on_is_done() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocked = s.create_task_in(p.id, "blocked", TaskPatch { tags: Some("bug".into()), ..Default::default() });
+        let blocked = blocked.unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let other = s.create_task(p.id, "other", "").unwrap();
+        s.move_task(blocker.id, "review", None).unwrap();
+        s.update_task(blocked.id, waits(&format!("#{}, api#{}", blocker.id, other.id))).unwrap();
+        assert_eq!(s.get_task(blocked.id).unwrap().waiting_on, [blocker.id, other.id]);
+
+        assert_eq!(s.next_task_matching(None, "tag:bug").unwrap().map(|t| t.id), None);
+        assert_eq!(s.waiting_in_todo(None, "tag:bug").unwrap(), 1);
+        assert_eq!(s.waiting_in_todo(None, "tag:nope").unwrap(), 0);
+        assert_eq!(s.next_task(None).unwrap().map(|t| t.id), Some(other.id));
+        s.move_task(other.id, "done", None).unwrap();
+        assert_eq!(s.get_task(blocked.id).unwrap().waiting_on, [blocker.id]);
+        assert_eq!(s.next_task(None).unwrap().map(|t| t.id), None, "review isn't done");
+
+        s.move_task(blocker.id, "done", None).unwrap();
+        assert!(s.get_task(blocked.id).unwrap().waiting_on.is_empty());
+        s.move_task(blocker.id, "doing", None).unwrap();
+        assert_eq!(s.next_task(None).unwrap().map(|t| t.id), None, "reopening blocks it again");
+        s.move_task(blocker.id, "done", None).unwrap();
+        assert_eq!(s.next_task(None).unwrap().map(|t| t.id), Some(blocked.id));
+    }
+
+    #[test]
+    fn a_loop_or_a_bad_key_changes_nothing() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let [a, b, c] = ["a", "b", "c"].map(|t| s.create_task(p.id, t, "").unwrap().id);
+        s.update_task(a, waits(&b.to_string())).unwrap();
+        s.update_task(b, waits(&c.to_string())).unwrap();
+        for keys in [a.to_string(), format!("{c}"), "999".to_string(), format!("nope#{a}")] {
+            assert!(s.update_task(c, waits(&keys)).is_err(), "{keys}");
+            assert!(s.get_task(c).unwrap().waiting_on.is_empty(), "{keys}");
+        }
+        assert!(s.update_task(a, waits(&format!("{c}, {a}"))).is_err());
+        assert_eq!(s.get_task(a).unwrap().waiting_on, [b], "a refused list keeps the old one");
+
+        let new = TaskPatch { waits_on: Some("999".into()), ..Default::default() };
+        assert!(s.create_task_in(p.id, "bad", new).is_err());
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 3, "a bad key creates no task");
+
+        s.update_task(a, waits("")).unwrap();
+        assert!(s.get_task(a).unwrap().waiting_on.is_empty());
+    }
+
+    #[test]
+    fn deleting_what_a_task_waits_on_frees_it() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        s.move_task(blocker.id, "doing", None).unwrap();
+        let new = TaskPatch { waits_on: Some(blocker.id.to_string()), ..Default::default() };
+        let task = s.create_task_in(p.id, "task", new).unwrap();
+        assert_eq!(task.waiting_on, [blocker.id]);
+        assert_eq!(s.task_links(blocker.id, true).unwrap()[0].id, task.id);
+        assert_eq!(s.task_links(task.id, false).unwrap()[0].id, blocker.id);
+        s.delete_task(blocker.id).unwrap();
+        assert_eq!(s.next_task(None).unwrap().map(|t| t.id), Some(task.id));
+    }
+
+    #[test]
+    fn editing_the_same_list_changes_nothing() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let task = s.create_task(p.id, "task", "").unwrap();
+        s.update_task(task.id, waits(&blocker.id.to_string())).unwrap();
+        let before = s.changes().unwrap();
+        s.update_task(task.id, waits(&format!("#{}", blocker.id))).unwrap();
+        assert_eq!(s.changes().unwrap(), before);
+    }
+
+    #[test]
+    fn filters_by_waiting_and_leaves_it_out_of_json_when_empty() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let task = s.create_task(p.id, "task", "").unwrap();
+        s.update_task(task.id, waits(&blocker.id.to_string())).unwrap();
+        assert_eq!(titles(&s.search("is:waiting", None).unwrap()), ["task"]);
+        assert_eq!(s.search("is:waiting", None).unwrap()[0].waiting_on, [blocker.id]);
+        assert_eq!(s.list_tasks(None, None).unwrap()[1].waiting_on, [blocker.id]);
+        assert!(s.list_tasks(None, None).unwrap()[0].waiting_on.is_empty());
+        assert_eq!(titles(&s.search("-is:waiting", None).unwrap()), ["blocker"]);
+        let json = serde_json::to_value(s.get_task(blocker.id).unwrap()).unwrap();
+        assert!(json.get("waiting_on").is_none(), "{json}");
+        let json = serde_json::to_value(s.get_task(task.id).unwrap()).unwrap();
+        assert_eq!(json["waiting_on"], serde_json::json!([blocker.id]));
+
+        s.set_property("waiting", false).unwrap();
+        assert_eq!(s.search_for_agent("is:waiting").unwrap().len(), 0, "a hidden property finds nothing");
+    }
+
+    #[test]
+    fn changes_many_tasks_at_once_or_not_at_all() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let task = |title, tags: &str| {
+            let tags = Some(tags.to_string());
+            s.create_task_in(p.id, title, TaskPatch { tags, ..Default::default() }).unwrap().id
+        };
+        let (a, b, c) = (task("a", "bug, ui"), task("b", "ui"), task("c", "keep"));
+
+        s.update_tasks(&[a, b], Some("doing"), "New, bug", "ui").unwrap();
+        let tags = |id| s.get_task(id).unwrap().tags;
+        assert_eq!(
+            (tags(a), tags(b), tags(c)),
+            (vec!["bug".into(), "new".into()], vec!["new".into(), "bug".into()], vec!["keep".into()])
+        );
+        assert_eq!(titles(&s.list_tasks(None, Some("doing")).unwrap()), ["a", "b"], "they keep their order");
+
+        let before = s.changes().unwrap();
+        assert!(s.update_tasks(&[c, 999], Some("done"), "x", "").is_err());
+        assert!(s.update_tasks(&[c], Some("nope"), "", "").is_err());
+        assert_eq!(
+            (s.get_task(c).unwrap().status.as_str(), tags(c), s.changes().unwrap()),
+            ("todo", vec!["keep".into()], before)
+        );
+
+        let before = s.get_task(a).unwrap();
+        s.update_tasks(&[a], Some("doing"), "bug", "absent").unwrap();
+        assert_eq!(s.get_task(a).unwrap().position, before.position, "nothing to change moves nothing");
+
+        s.delete_tasks(&[a, 999, b]).unwrap();
+        assert_eq!(titles(&s.list_tasks(None, None).unwrap()), ["c"]);
+    }
+
+    #[test]
+    fn projects_keep_the_order_they_are_moved_to() {
+        let (_dir, s) = store();
+        for slug in ["a", "b", "c", "d"] {
+            s.create_project(slug, "", None).unwrap();
+        }
+        let order = || s.list_projects().unwrap().into_iter().map(|p| p.slug).collect::<Vec<_>>().join("");
+        let move_to = |slug, before| s.move_project(slug, before).unwrap();
+        assert_eq!(order(), "abcd", "never moved: by slug");
+
+        move_to("c", Some("a"));
+        assert_eq!(order(), "cabd", "first");
+        let positioned: i64 = s.conn.query_row("SELECT count(position) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(positioned, 1, "only the moved project needed a position");
+
+        move_to("d", Some("b"));
+        assert_eq!(order(), "cadb", "among projects with no position");
+        move_to("c", None);
+        assert_eq!(order(), "adbc", "last");
+        move_to("b", Some("d"));
+        assert_eq!(order(), "abdc", "between two");
+        move_to("b", Some("b"));
+        assert_eq!(order(), "abdc", "onto itself");
+
+        s.create_project("0new", "", None).unwrap();
+        assert_eq!(order(), "abdc0new", "a new project goes last");
+        move_to("0new", Some("b"));
+        assert_eq!(order(), "a0newbdc");
+
+        for _ in 0..80 {
+            // Out of float room between two neighbours: numbers them again.
+            move_to("c", Some("b"));
+            move_to("d", Some("b"));
+        }
+        assert_eq!(order(), "a0newcdb");
+        assert!(s.move_project("a", Some("nope")).is_err());
+        assert!(s.move_project("nope", None).is_err());
     }
 
     #[test]
@@ -1751,5 +2139,38 @@ mod tests {
         assert_eq!(api.repos, ["acme/backend/api"]);
         assert_eq!(s.project_by_repo("acme/backend/web").unwrap().unwrap().id, web.id);
         assert!(s.create_project("api2", "", Some("acme/backend/api")).is_err(), "still one project per repo");
+    }
+
+    #[test]
+    fn moves_several_tasks_in_one_write() {
+        let (_tmp, s) = store();
+        let p = s.create_project("api", "", None).unwrap().id;
+        let task = |title: &str| s.create_task(p, title, "").unwrap().id;
+        let (a, b, c, d, x, y) = (task("a"), task("b"), task("c"), task("d"), task("x"), task("y"));
+        s.move_tasks(&[x, y], "doing", None).unwrap();
+        let order =
+            |status: &str| -> Vec<i64> { s.list_tasks(None, Some(status)).unwrap().iter().map(|t| t.id).collect() };
+
+        s.move_tasks(&[c, a], "doing", Some(y)).unwrap();
+        assert_eq!(order("doing"), [x, c, a, y]);
+        assert_eq!(order("todo"), [b, d]);
+
+        // To the end, within a column, and past an anchor that's moving too.
+        s.move_tasks(&[x, c], "doing", None).unwrap();
+        assert_eq!(order("doing"), [a, y, x, c]);
+        s.move_tasks(&[a, y], "doing", Some(a)).unwrap();
+        assert_eq!(order("doing"), [x, c, a, y]);
+
+        // More moves than there is float room between two neighbours.
+        let many: Vec<i64> = (0..80).map(|i| task(&format!("m{i}"))).collect();
+        s.move_tasks(&many, "doing", Some(y)).unwrap();
+        let doing = order("doing");
+        assert_eq!(&doing[3..83], &many[..]);
+        assert_eq!(doing.last(), Some(&y));
+
+        // All or nothing.
+        assert!(s.move_tasks(&[b, 99999], "doing", None).is_err());
+        assert!(order("todo").contains(&b));
+        assert!(s.move_tasks(&[b], "nope", None).is_err());
     }
 }

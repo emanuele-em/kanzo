@@ -26,10 +26,13 @@ const IMAGE_LIMIT: usize = 25 * 1024 * 1024;
 const APP_JS: &str = include_str!("app.js");
 const ZH_CN_JS: &str = include_str!("zh-cn.js");
 const LOGO: &[u8] = include_bytes!("logo.png");
+const ICON: &[u8] = include_bytes!("icon.png");
+const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+const MANIFEST: &str = r##"{"id":"/","name":"Kanzo","start_url":"/","display":"standalone","background_color":"#ffffff","icons":[{"src":"/icon.png","sizes":"192x192 512x512","type":"image/png"}]}"##;
 
 /// Scripts only from this server, so even a bug in the Markdown renderer cannot run injected script.
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-                   connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+                   connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 pub async fn serve(home: Home, open: bool) -> Result<()> {
     let port = home.config.port;
@@ -41,7 +44,7 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
             if share::is_kanzo(&format!("127.0.0.1:{port}")).await {
                 println!("Kanzo is already running at {url}");
                 if open {
-                    open_browser(&url);
+                    open_board(&url, port);
                 }
                 return Ok(());
             }
@@ -64,7 +67,9 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
         println!("MCP over HTTP at {url}/mcp");
     }
     if open {
-        open_browser(&url);
+        // It waits to see if there's an app, which must not hold up the board.
+        let url = url.clone();
+        tokio::task::spawn_blocking(move || open_board(&url, port));
     }
     // Cancelling this also ends open MCP streams, which would otherwise hold up shutdown.
     let shutdown = CancellationToken::new();
@@ -156,7 +161,10 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/projects", post(create_project))
         .route("/api/projects/{slug}", patch(update_project).delete(delete_project))
         .route("/api/projects/{slug}/repos", post(link_repo).delete(unlink_repo))
+        .route("/api/projects/{slug}/move", post(move_project))
         .route("/api/tasks", post(create_task))
+        .route("/api/tasks/bulk", post(bulk_tasks))
+        .route("/api/tasks/move", post(move_tasks))
         .route("/api/tasks/{id}", get(get_task).patch(update_task).delete(delete_task))
         .route("/api/tasks/{id}/move", post(move_task))
         .route("/api/tasks/{id}/comments", post(add_comment))
@@ -175,9 +183,17 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
             get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], ZH_CN_JS) }),
         )
         .route("/logo.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], LOGO) }))
+        .route("/icon.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], ICON) }))
+        .route("/changelog.md", get(|| async { ([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], CHANGELOG) }))
+        .route(
+            "/manifest.webmanifest",
+            get(|| async { ([(header::CONTENT_TYPE, "application/manifest+json")], MANIFEST) }),
+        )
         .route("/api/ping", get(|| async { "kanzo" }))
         .route("/api/update", get(update_status).post(update_now))
         .route("/api/network", get(network).post(change_network).route_layer(middleware::from_fn(this_computer)))
+        // Not forwarded by a joined board either: the files are on this computer.
+        .route("/api/open", post(open_file).route_layer(middleware::from_fn(this_computer)))
         .merge(shared)
         .layer(Extension(guard.clone()))
         .layer(middleware::from_fn_with_state(guard, protect))
@@ -296,7 +312,7 @@ async fn forward(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> R
 
 async fn this_computer(req: Request, next: Next) -> Response {
     match guest(&req) {
-        Some(_) => (StatusCode::FORBIDDEN, "only the computer with the board can change its network").into_response(),
+        Some(_) => fail(StatusCode::FORBIDDEN, "only the computer with the board can do that").into_response(),
         None => next.run(req).await,
     }
 }
@@ -480,6 +496,15 @@ async fn update_project(State(home): Shared, Path(slug): Path<String>, Json(p): 
 }
 
 #[derive(Deserialize)]
+struct ProjectMove {
+    before: Option<String>,
+}
+
+async fn move_project(State(home): Shared, Path(slug): Path<String>, Json(m): Json<ProjectMove>) -> Response {
+    with_store(home, move |_, s| s.move_project(&slug, m.before.as_deref())).await
+}
+
+#[derive(Deserialize)]
 struct RepoLink {
     repo: String,
 }
@@ -532,14 +557,22 @@ async fn update_settings(State(home): Shared, Json(r): Json<Settings>) -> Respon
 
 #[derive(Serialize)]
 struct TaskReply {
+    blocks: Vec<store::TaskLink>,
     comments: Vec<store::Comment>,
     images: Vec<store::Image>,
     task: store::Task,
+    waits_on: Vec<store::TaskLink>,
 }
 
 async fn get_task(State(home): Shared, Path(id): Path<i64>) -> Response {
     with_store(home, move |_, s| {
-        Ok(TaskReply { comments: s.list_comments(id)?, images: s.list_images(id)?, task: s.get_task(id)? })
+        Ok(TaskReply {
+            blocks: s.task_links(id, true)?,
+            comments: s.list_comments(id)?,
+            images: s.list_images(id)?,
+            task: s.get_task(id)?,
+            waits_on: s.task_links(id, false)?,
+        })
     })
     .await
 }
@@ -553,6 +586,7 @@ struct Patch {
     tags: Option<String>,
     human: Option<bool>,
     url: Option<String>,
+    waits_on: Option<String>,
 }
 
 async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Patch>) -> Response {
@@ -568,6 +602,7 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 tags: p.tags,
                 human: p.human,
                 url: p.url,
+                waits_on: p.waits_on,
             },
         )
     })
@@ -584,8 +619,42 @@ async fn move_task(State(home): Shared, Path(id): Path<i64>, Json(m): Json<Move>
     with_store(home, move |_, s| s.move_task(id, &m.status, m.before)).await
 }
 
+#[derive(Deserialize)]
+struct MoveMany {
+    ids: Vec<i64>,
+    status: String,
+    before: Option<i64>,
+}
+
+async fn move_tasks(State(home): Shared, Json(m): Json<MoveMany>) -> Response {
+    with_store(home, move |_, s| s.move_tasks(&m.ids, &m.status, m.before)).await
+}
+
 async fn delete_task(State(home): Shared, Path(id): Path<i64>) -> Response {
     with_store(home, move |h, s| h.deleting_images(s, ImagesOf::Task(id), || s.delete_task(id))).await
+}
+
+#[derive(Deserialize)]
+struct Bulk {
+    ids: Vec<i64>,
+    status: Option<String>,
+    #[serde(default)]
+    add_tags: String,
+    #[serde(default)]
+    remove_tags: String,
+    #[serde(default)]
+    delete: bool,
+}
+
+async fn bulk_tasks(State(home): Shared, Json(b): Json<Bulk>) -> Response {
+    with_store(home, move |h, s| {
+        if b.delete {
+            h.deleting_images(s, ImagesOf::Tasks(b.ids.clone()), || s.delete_tasks(&b.ids))
+        } else {
+            s.update_tasks(&b.ids, b.status.as_deref(), &b.add_tags, &b.remove_tags)
+        }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -697,6 +766,16 @@ async fn change_network(
 }
 
 #[derive(Deserialize)]
+struct OpenFile {
+    path: std::path::PathBuf,
+}
+
+async fn open_file(State(home): Shared, Json(o): Json<OpenFile>) -> Reply {
+    blocking(move || home.open_file(&o.path)).await?.map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({})).into_response())
+}
+
+#[derive(Deserialize)]
 struct SyncRequest {
     #[serde(default)]
     keep: Option<String>,
@@ -785,6 +864,21 @@ fn exit_with_console() {
     }
 }
 
+/// The installed app if there is one, or else a browser tab. An app opens the address it was
+/// installed from, so only on the default port, where that's this board.
+fn open_board(url: &str, port: u16) {
+    let app = cfg!(target_os = "macos")
+        && port == crate::home::DEFAULT_PORT
+        && std::process::Command::new("open")
+            .args(["-a", "Kanzo"])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+    if !app {
+        open_browser(url);
+    }
+}
+
 fn open_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -804,7 +898,68 @@ fn open_browser(url: &str) {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
+
+    #[test]
+    fn changelog_is_for_this_version() {
+        let heading = format!("## {} - ", update::CURRENT);
+        assert!(CHANGELOG.starts_with(&heading), "CHANGELOG.md should start with the notes for this release");
+    }
+
+    #[test]
+    fn changelog_says_what_each_change_does() {
+        for line in CHANGELOG.lines().filter(|l| l.starts_with("- ")) {
+            assert!(
+                line.starts_with("- **") && line.contains(":** "),
+                "should read `- **Name:** how to use it`: {line}"
+            );
+        }
+    }
+
+    /// The status of asking a board to open `path`, from `from`.
+    async fn open_from(home: &Home, from: Option<IpAddr>, path: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), Net::Sharing));
+        let mut app = router(home.clone(), guard, CancellationToken::new());
+        if let Some(ip) = from {
+            app = app.layer(Extension(ConnectInfo(SocketAddr::new(ip, 1))));
+        }
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let body = json!({ "path": path }).to_string();
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let head = format!(
+            "POST /api/open HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        conn.write_all(format!("{head}{body}").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).await.unwrap();
+        reply.split(' ').nth(1).unwrap().to_string()
+    }
+
+    #[test]
+    fn only_this_computer_opens_a_file_and_only_a_file() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut home = Home::open(tmp.path().to_path_buf()).unwrap();
+            home.config.editor = Some("true".into());
+            let file = tmp.path().join("notes.md");
+            std::fs::write(&file, "").unwrap();
+            let file = file.to_str().unwrap();
+
+            let guest = Some(IpAddr::from([192, 168, 1, 9]));
+            assert_eq!(open_from(&home, guest, file).await, "403");
+            assert_eq!(open_from(&home, None, "notes.md").await, "400");
+            assert_eq!(open_from(&home, None, tmp.path().to_str().unwrap()).await, "400");
+            assert_eq!(open_from(&home, None, &format!("{file}.missing")).await, "400");
+            #[cfg(unix)]
+            assert_eq!(open_from(&home, None, file).await, "200");
+        });
+    }
 
     #[test]
     fn hosts() {
