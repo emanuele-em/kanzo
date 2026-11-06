@@ -11,6 +11,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
 </p>
 
+<p align="center">
+  English | <a href="README.zh.md">简体中文</a>
+</p>
+
 Kanzo is a kanban board in your browser and an MCP server in one 4.7 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and it works.
 
 You never edit a file. Everything is done in one of three places:
