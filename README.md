@@ -213,7 +213,7 @@ listen = "127.0.0.1"   # sharing opens the board to your network; "0.0.0.0" keep
 mcp_http = true        # MCP at /mcp
 ```
 
-Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted.
+Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted. The board itself reads English or Chinese: pick the language under Settings → Board, and it remembers your choice.
 
 ## Small and fast
 

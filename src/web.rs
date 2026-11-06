@@ -24,6 +24,7 @@ use crate::{sync, update};
 const INDEX: &str = include_str!("index.html");
 const IMAGE_LIMIT: usize = 25 * 1024 * 1024;
 const APP_JS: &str = include_str!("app.js");
+const ZH_CN_JS: &str = include_str!("zh-cn.js");
 const LOGO: &[u8] = include_bytes!("logo.png");
 
 /// Scripts only from this server, so even a bug in the Markdown renderer cannot run injected script.
@@ -169,6 +170,10 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
     Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
+        .route(
+            "/i18n/zh-cn.js",
+            get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], ZH_CN_JS) }),
+        )
         .route("/logo.png", get(|| async { ([(header::CONTENT_TYPE, "image/png")], LOGO) }))
         .route("/api/ping", get(|| async { "kanzo" }))
         .route("/api/update", get(update_status).post(update_now))
