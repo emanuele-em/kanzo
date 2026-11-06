@@ -237,6 +237,15 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .bulk .field { width: 120px; padding: 5px 12px; }
 .bulk select { text-transform: capitalize; }
 .card.dragging { opacity: .4; }
+.card.gathered { display: none; }
+.card.landing { visibility: hidden; }
+.card.flying { position: fixed; z-index: 20; margin: 0; pointer-events: none; }
+.stack { position: fixed; left: -9999px; top: 0; isolation: isolate; box-sizing: content-box; padding: 8px 10px 10px 0; }
+.stack .card { position: relative; box-sizing: border-box; }
+.stack::before, .stack::after { content: ""; position: absolute; z-index: -1; background: var(--card-hover); border: 1px solid var(--active); border-radius: 14px; }
+.stack::before { top: 18px; left: 10px; right: 0; bottom: 0; }
+.stack::after { top: 13px; left: 5px; right: 5px; bottom: 5px; }
+.stack-count { position: absolute; top: 0; right: 2px; min-width: 22px; padding: 2px 6px; border-radius: 99px; background: var(--link); color: #fff; font-size: 12px; font-weight: 600; text-align: center; }
 .card .head { display: flex; align-items: flex-start; gap: 10px; }
 .card .title { overflow-wrap: anywhere; flex: 1; min-width: 0; }
 .card .num {

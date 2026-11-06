@@ -589,7 +589,7 @@ function renderColumns() {
   }
 
   // During a drag the DOM is being moved by hand; refresh once it ends.
-  if (state.dragging || state.sweeping) return;
+  if (state.dragging || state.sweeping || state.settling) return;
   const all = state.project === "all";
   const humanOnly = isHumanOnly();
   const query = filterQuery();
@@ -905,6 +905,79 @@ function plainText(md) {
     .trim();
 }
 
+// Dragging a selected card takes the others along: they fly behind it, and spread out where it lands.
+const MOTION = { duration: 180, easing: "ease-out" };
+const MOST_FLYING = 30;
+const STACK_TOP = 8;
+
+function calm() {
+  return matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function inView(card) {
+  const r = card.getBoundingClientRect(), list = card.parentNode.getBoundingClientRect();
+  return r.width > 0 && r.bottom > list.top && r.top < list.bottom;
+}
+
+// The browser draws the dragged image, and only from what's on the page when the drag starts.
+function stackImage(card, count) {
+  const stack = el("div", { class: "stack", style: `width:${card.offsetWidth}px` },
+    card.cloneNode(true), el("span", { class: "stack-count" }, String(count)));
+  document.body.append(stack);
+  requestAnimationFrame(() => stack.remove());
+  return stack;
+}
+
+// A copy above the board, so that its column can't clip it.
+function fly(card, from, to, fade) {
+  const { width, height } = card.getBoundingClientRect();
+  const ghost = card.cloneNode(true);
+  ghost.classList.add("flying");
+  ghost.style.cssText = `left:${from.left}px;top:${from.top}px;width:${width}px;height:${height}px`;
+  document.body.append(ghost);
+  const end = `translate(${to.left - from.left}px,${to.top - from.top}px)`;
+  const flight = ghost.animate([{ transform: "none", opacity: 1 }, { transform: end, opacity: fade ? 0 : 1 }], MOTION);
+  return new Promise((done) => { flight.onfinish = () => { ghost.remove(); done(); }; });
+}
+
+// Makes a change to the board, then glides the cards it moved from where they were.
+function shift(change) {
+  const tops = new Map(calm() ? [] : [...$("#columns").querySelectorAll(".card:not(.gathered)")].filter(inView)
+    .map((c) => [c, c.getBoundingClientRect().top]));
+  change();
+  tops.forEach((top, c) => {
+    const r = c.getBoundingClientRect();
+    if (r.width && r.top !== top) c.animate([{ transform: `translateY(${top - r.top}px)` }, { transform: "none" }], MOTION);
+  });
+}
+
+function gather(group, grabbed) {
+  const to = grabbed.getBoundingClientRect();
+  const others = group.filter((c) => c !== grabbed);
+  if (!calm()) others.filter(inView).slice(0, MOST_FLYING).forEach((c) => fly(c, c.getBoundingClientRect(), to, true));
+  shift(() => {
+    grabbed.classList.add("dragging");
+    others.forEach((c) => c.classList.add("dragging", "gathered"));
+  });
+}
+
+// `place` puts the cards where they land. A refresh waits, as it would replace what's flying.
+async function spread(group, grabbed, from, place) {
+  state.settling = true;
+  shift(() => {
+    place();
+    group.forEach((c) => c.classList.remove("dragging", "gathered"));
+  });
+  const others = calm() ? [] : group.filter((c) => c !== grabbed && inView(c)).slice(0, MOST_FLYING);
+  const flying = calm() || !inView(grabbed) ? others : [...others, grabbed];
+  await Promise.all(flying.map((c) => {
+    const landed = fly(c, from, c.getBoundingClientRect(), false);
+    c.classList.add("landing");
+    return landed.then(() => c.classList.remove("landing"));
+  }));
+  state.settling = false;
+}
+
 // In the list, a row: no drag to reorder, since a sorted list has no one position to drop into.
 function card(t, showProject, row) {
   const node = el("div", { class: "card" + (row ? " row" : "") + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (state.selected.has(t.id) ? " selected" : ""),
@@ -921,15 +994,26 @@ function card(t, showProject, row) {
     state.dragging = t.id;
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(t.id));
-    requestAnimationFrame(() => node.classList.add("dragging"));
+    const selected = state.selected.has(t.id) ? [...$("#columns").querySelectorAll(".card.selected")] : [];
+    const group = state.group = selected.length > 1 ? selected : null;
+    if (group) {
+      const r = node.getBoundingClientRect();
+      state.grip = { x: e.clientX - r.left, y: e.clientY - r.top };
+      e.dataTransfer.setDragImage(stackImage(node, group.length), state.grip.x, state.grip.y + STACK_TOP);
+    }
+    requestAnimationFrame(() => { if (group) gather(group, node); else node.classList.add("dragging"); });
   });
-  node.addEventListener("dragend", () => {
+  node.addEventListener("dragend", async () => {
     node.classList.remove("dragging");
     document.querySelectorAll(".drop-line").forEach((d) => d.remove());
     state.dragging = null;
-    // A drop reloads once the move is saved; a cancelled drag puts the card back.
-    if (!state.dropped) loadBoard();
+    const { dropped, group } = state;
     state.dropped = false;
+    state.group = null;
+    // A drop reloads once the move is saved; a cancelled drag puts the card back.
+    if (dropped) return;
+    if (group) await spread(group, node, node.getBoundingClientRect(), () => {});
+    loadBoard();
   });
   return node;
 }
@@ -956,11 +1040,28 @@ function wireDrop(col, list, status) {
     if (!id) return;
     const after = cardAfter(e.clientY);
     const dragged = document.querySelector(`.card[data-id="${id}"]`);
-    if (dragged) list.insertBefore(dragged, line.parentNode === list ? line : null);
-    line.remove();
+    const spot = line.parentNode === list ? line : null;
     state.dropped = true;
     if (fresh === id) fresh = null;
     const before = after ? Number(after.dataset.id) : null;
+    const { group } = state;
+    if (group) {
+      const from = { left: e.clientX - state.grip.x, top: e.clientY - state.grip.y };
+      const ids = group.map((c) => Number(c.dataset.id));
+      const landed = spread(group, dragged, from, () => {
+        group.forEach((c) => list.insertBefore(c, spot));
+        line.remove();
+      });
+      try {
+        await api("POST", "/tasks/move", { ids, status, before });
+        if (ids.includes(state.task)) refreshTask();
+      } catch (err) { toast(err.message); }
+      await landed;
+      loadBoard();
+      return;
+    }
+    if (dragged) list.insertBefore(dragged, spot);
+    line.remove();
     try {
       await api("POST", `/tasks/${id}/move`, { status, before });
       if (state.task === id) refreshTask();

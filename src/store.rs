@@ -833,49 +833,56 @@ impl Store {
 
     pub fn move_task(&self, id: i64, status: &str, before: Option<i64>) -> Result<Task> {
         self.check_status(status)?;
-        self.write(|c| {
-            let current = self.get_task(id)?;
-            let before = before.filter(|b| *b != id);
-            let anchor: Option<(i64, f64)> = match before {
-                Some(b) => c
-                    .query_row("SELECT position FROM tasks WHERE id = ?1 AND status = ?2", params![b, status], |r| {
-                        r.get(0)
-                    })
-                    .optional()?
-                    .map(|p| (b, p)),
-                None => None,
-            };
-            let position = match anchor {
-                None => Self::end_of_column(c, status, id)?,
-                Some((before, mut next)) => {
-                    let prev_of = |next: f64| -> Result<Option<f64>> {
-                        Ok(c.query_row(
-                            "SELECT max(position) FROM tasks WHERE status = ?1 AND position < ?2 AND id <> ?3",
-                            params![status, next, id],
-                            |r| r.get(0),
-                        )?)
-                    };
-                    let mut prev = prev_of(next)?;
-                    if prev.is_some_and(|p| next - p < 1e-9) {
-                        // Out of float room between two neighbours.
-                        Self::renumber(c, status)?;
-                        next = c.query_row("SELECT position FROM tasks WHERE id = ?1", [before], |r| r.get(0))?;
-                        prev = prev_of(next)?;
-                    }
-                    match prev {
-                        Some(p) => (p + next) / 2.0,
-                        None => next - 1.0,
-                    }
-                }
-            };
-            let touched = if current.status != status { format!(", updated_at = {NOW}") } else { String::new() };
-            c.execute(
-                &format!("UPDATE tasks SET status = ?1, position = ?2{touched} WHERE id = ?3"),
-                params![status, position, id],
-            )?;
-            Ok(())
-        })?;
+        self.write(|c| self.place(c, id, status, before))?;
         self.get_task(id)
+    }
+
+    /// In one write, so nobody sees the group half moved. They keep the order of `ids`.
+    pub fn move_tasks(&self, ids: &[i64], status: &str, before: Option<i64>) -> Result<()> {
+        self.check_status(status)?;
+        let before = before.filter(|b| !ids.contains(b));
+        self.write(|c| ids.iter().try_for_each(|&id| self.place(c, id, status, before)))
+    }
+
+    fn place(&self, c: &Connection, id: i64, status: &str, before: Option<i64>) -> Result<()> {
+        let current = self.get_task(id)?;
+        let before = before.filter(|b| *b != id);
+        let anchor: Option<(i64, f64)> = match before {
+            Some(b) => c
+                .query_row("SELECT position FROM tasks WHERE id = ?1 AND status = ?2", params![b, status], |r| r.get(0))
+                .optional()?
+                .map(|p| (b, p)),
+            None => None,
+        };
+        let position = match anchor {
+            None => Self::end_of_column(c, status, id)?,
+            Some((before, mut next)) => {
+                let prev_of = |next: f64| -> Result<Option<f64>> {
+                    Ok(c.query_row(
+                        "SELECT max(position) FROM tasks WHERE status = ?1 AND position < ?2 AND id <> ?3",
+                        params![status, next, id],
+                        |r| r.get(0),
+                    )?)
+                };
+                let mut prev = prev_of(next)?;
+                if prev.is_some_and(|p| next - p < 1e-9) {
+                    // Out of float room between two neighbours.
+                    Self::renumber(c, status)?;
+                    next = c.query_row("SELECT position FROM tasks WHERE id = ?1", [before], |r| r.get(0))?;
+                    prev = prev_of(next)?;
+                }
+                match prev {
+                    Some(p) => (p + next) / 2.0,
+                    None => next - 1.0,
+                }
+            }
+        };
+        let touched = if current.status != status { format!(", updated_at = {NOW}") } else { String::new() };
+        c.execute(
+            &format!("UPDATE tasks SET status = ?1, position = ?2{touched} WHERE id = ?3"),
+            params![status, position, id],
+        )?;
+        Ok(())
     }
 
     fn renumber(c: &Connection, status: &str) -> Result<()> {
@@ -2132,5 +2139,38 @@ mod tests {
         assert_eq!(api.repos, ["acme/backend/api"]);
         assert_eq!(s.project_by_repo("acme/backend/web").unwrap().unwrap().id, web.id);
         assert!(s.create_project("api2", "", Some("acme/backend/api")).is_err(), "still one project per repo");
+    }
+
+    #[test]
+    fn moves_several_tasks_in_one_write() {
+        let (_tmp, s) = store();
+        let p = s.create_project("api", "", None).unwrap().id;
+        let task = |title: &str| s.create_task(p, title, "").unwrap().id;
+        let (a, b, c, d, x, y) = (task("a"), task("b"), task("c"), task("d"), task("x"), task("y"));
+        s.move_tasks(&[x, y], "doing", None).unwrap();
+        let order =
+            |status: &str| -> Vec<i64> { s.list_tasks(None, Some(status)).unwrap().iter().map(|t| t.id).collect() };
+
+        s.move_tasks(&[c, a], "doing", Some(y)).unwrap();
+        assert_eq!(order("doing"), [x, c, a, y]);
+        assert_eq!(order("todo"), [b, d]);
+
+        // To the end, within a column, and past an anchor that's moving too.
+        s.move_tasks(&[x, c], "doing", None).unwrap();
+        assert_eq!(order("doing"), [a, y, x, c]);
+        s.move_tasks(&[a, y], "doing", Some(a)).unwrap();
+        assert_eq!(order("doing"), [x, c, a, y]);
+
+        // More moves than there is float room between two neighbours.
+        let many: Vec<i64> = (0..80).map(|i| task(&format!("m{i}"))).collect();
+        s.move_tasks(&many, "doing", Some(y)).unwrap();
+        let doing = order("doing");
+        assert_eq!(&doing[3..83], &many[..]);
+        assert_eq!(doing.last(), Some(&y));
+
+        // All or nothing.
+        assert!(s.move_tasks(&[b, 99999], "doing", None).is_err());
+        assert!(order("todo").contains(&b));
+        assert!(s.move_tasks(&[b], "nope", None).is_err());
     }
 }

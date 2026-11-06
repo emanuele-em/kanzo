@@ -163,6 +163,7 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/projects/{slug}/move", post(move_project))
         .route("/api/tasks", post(create_task))
         .route("/api/tasks/bulk", post(bulk_tasks))
+        .route("/api/tasks/move", post(move_tasks))
         .route("/api/tasks/{id}", get(get_task).patch(update_task).delete(delete_task))
         .route("/api/tasks/{id}/move", post(move_task))
         .route("/api/tasks/{id}/comments", post(add_comment))
@@ -611,6 +612,17 @@ struct Move {
 
 async fn move_task(State(home): Shared, Path(id): Path<i64>, Json(m): Json<Move>) -> Response {
     with_store(home, move |_, s| s.move_task(id, &m.status, m.before)).await
+}
+
+#[derive(Deserialize)]
+struct MoveMany {
+    ids: Vec<i64>,
+    status: String,
+    before: Option<i64>,
+}
+
+async fn move_tasks(State(home): Shared, Json(m): Json<MoveMany>) -> Response {
+    with_store(home, move |_, s| s.move_tasks(&m.ids, &m.status, m.before)).await
 }
 
 async fn delete_task(State(home): Shared, Path(id): Path<i64>) -> Response {

@@ -60,7 +60,7 @@ kanzo
 
 The board opens at http://localhost:4242. That's all the setup there is: the first run creates `~/kanzo`, and the whole board lives in it.
 
-`n` adds a task, `/` or `⌘K` searches every project, `⌘`-click or a drag on empty board space selects tasks to move, tag or delete together, `f` filters the board and `↵` keeps the filter, the list icon shows the same tasks as rows to sort and group, `Tab` moves to the description, `⌘↵` saves and closes. `Esc` leaves a description or tags with what you typed saved, and cancels other fields. In Chrome or Edge, **Install app** at the bottom of the sidebar makes the board an app of its own; on macOS `kanzo` then opens it instead of a tab, on the default port. In the app, `⌘1`–`⌘8` pick a project, `⌘9` the last one and `⌘0` all of them.
+`n` adds a task, `/` or `⌘K` searches every project, `⌘`-click or a drag on empty board space selects tasks to move, tag or delete together, and dragging one takes the rest along, `f` filters the board and `↵` keeps the filter, the list icon shows the same tasks as rows to sort and group, `Tab` moves to the description, `⌘↵` saves and closes. `Esc` leaves a description or tags with what you typed saved, and cancels other fields. In Chrome or Edge, **Install app** at the bottom of the sidebar makes the board an app of its own; on macOS `kanzo` then opens it instead of a tab, on the default port. In the app, `⌘1`–`⌘8` pick a project, `⌘9` the last one and `⌘0` all of them.
 
 Drag the left edge of a task's panel to resize it, or expand it to the whole window; double-click the edge to reset it. The panel button beside search folds the sidebar to its icons. Drag a project there to reorder the list, for everyone on a shared board.
 
