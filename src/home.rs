@@ -94,20 +94,33 @@ impl Home {
     pub fn open(dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let dir = dir.canonicalize().unwrap_or(dir);
-        write_if_missing(&dir.join("config.toml"), CONFIG_TEMPLATE)?;
         write_if_missing(&dir.join(".gitignore"), GITIGNORE)?;
 
-        let path = dir.join("config.toml");
+        let mut home = Self { dir, config: Config::default() };
+        // During a pull, config.toml can be missing or another machine's, until kanzo sync puts it back.
+        let lock = home.lock_shared()?;
+        let path = home.dir.join("config.toml");
+        // Holding the lock, this can only be left by a sync that died during a pull.
+        let aside = home.config_aside();
+        if aside.exists() {
+            fs::rename(&aside, &path).with_context(|| format!("cannot restore {}", path.display()))?;
+        }
+        write_if_missing(&path, CONFIG_TEMPLATE)?;
         let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let config: Config = toml::from_str(&text).with_context(|| format!("{} is not valid", path.display()))?;
+        home.config = toml::from_str(&text).with_context(|| format!("{} is not valid", path.display()))?;
+        drop(lock);
 
-        let home = Self { dir, config };
         home.store()?.migrate()?;
         Ok(home)
     }
 
     pub fn db_path(&self) -> PathBuf {
         self.dir.join("kanzo.db")
+    }
+
+    /// Where `kanzo sync` keeps this machine's config.toml during a pull; git ignores `*.bak`.
+    pub fn config_aside(&self) -> PathBuf {
+        self.dir.join("config.toml.bak")
     }
 
     /// Changes when the database file itself is replaced, as `kanzo sync` does
@@ -132,11 +145,15 @@ impl Home {
     /// Callers keep it for one operation only, so a database replaced by `kanzo sync`
     /// is picked up on the next one. The shared lock lets sync wait for it to finish.
     pub fn store(&self) -> store::Result<Store> {
+        Store::open(&self.db_path(), self.lock_shared()?)
+    }
+
+    fn lock_shared(&self) -> store::Result<Option<File>> {
         let lock = self.lock_file().map_err(|e| store::Error::Invalid(format!("{e:#}")))?;
         let deadline = Instant::now() + LOCK_WAIT;
-        let lock = loop {
+        loop {
             match lock.try_lock_shared() {
-                Ok(()) => break Some(lock),
+                Ok(()) => return Ok(Some(lock)),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(25))
                 }
@@ -146,14 +163,13 @@ impl Home {
                 Err(TryLockError::Error(e)) if unsupported(&e) => {
                     static WARN: std::sync::Once = std::sync::Once::new();
                     WARN.call_once(|| eprintln!("kanzo: {NO_LOCKS}"));
-                    break None;
+                    return Ok(None);
                 }
                 Err(TryLockError::Error(e)) => {
                     return Err(store::Error::Invalid(format!("cannot lock kanzo.lock: {e}")));
                 }
             }
-        };
-        Store::open(&self.db_path(), lock)
+        }
     }
 
     pub fn open_file(&self, file: &Path) -> Result<(), String> {
@@ -338,6 +354,38 @@ mod tests {
         for bad in [Path::new("run.command"), tmp.path(), &tmp.path().join("missing")] {
             assert!(editor_command(editor, bad).is_err(), "{}", bad.display());
         }
+    }
+
+    #[test]
+    fn open_waits_for_a_pull_to_put_config_toml_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        let config = home.dir.join("config.toml");
+        let lock = home.lock_exclusive().unwrap();
+        fs::write(&config, "listen = \"0.0.0.0\"\n").unwrap();
+
+        let opening = std::thread::spawn({
+            let dir = home.dir.clone();
+            move || Home::open(dir)
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!opening.is_finished());
+        fs::write(&config, "listen = \"127.0.0.1\"\n").unwrap();
+        drop(lock);
+        assert!(opening.join().unwrap().unwrap().config.listen.is_loopback());
+    }
+
+    #[test]
+    fn open_restores_a_config_toml_left_aside_by_a_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.toml.bak"), "listen = \"0.0.0.0\"\n").unwrap();
+        // What git had pulled when the sync died.
+        fs::write(tmp.path().join("config.toml"), "port = 4300\n").unwrap();
+
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        assert!(!home.config.listen.is_loopback());
+        assert_eq!(home.config.port, DEFAULT_PORT);
+        assert!(!home.config_aside().exists());
     }
 
     #[test]

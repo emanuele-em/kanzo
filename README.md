@@ -228,6 +228,8 @@ mcp_http = true        # MCP at /mcp
 editor = "/usr/local/bin/cursor"   # opens file:/// links; on macOS, your text editor without it
 ```
 
+These settings stay on each machine: `kanzo sync` leaves them out.
+
 Settings on the board lists each task's properties, like tags or comments. Turn one off to hide it there and leave it out of what agents get; nothing is deleted. Its About section shows what's new in this version. The board itself reads English or Chinese: pick the language under Settings → Board, and it remembers your choice.
 
 ## Small and fast
