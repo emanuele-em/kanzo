@@ -46,7 +46,9 @@ async function api(method, path, body) {
 }
 
 function plural(n, word) {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
+  // In zh-CN the noun's translation carries its measure word: 个任务, 条评论, 台电脑.
+  const w = DICT?.[word] ?? `${word}${n === 1 ? "" : "s"}`;
+  return `${n} ${w}`;
 }
 
 // Storage can be off, as in private windows.
@@ -56,6 +58,23 @@ function localStorageGet(k) {
 
 function localStorageSet(k, v) {
   try { localStorage.setItem(k, v); } catch {}
+}
+
+// The board's language: a saved choice wins, else the browser's. English is the
+// source strings, so it runs with no dictionary at all.
+const LANG = (() => {
+  const saved = localStorageGet("kanzo.lang");
+  if (saved === "zh-cn" || saved === "en") return saved;
+  return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-cn" : "en";
+})();
+
+let DICT = null;
+
+// Looks a string up in the dictionary; {0}, {1}… fill in the pieces that move
+// around in another language. Without a dictionary every string is itself.
+function tr(s, ...args) {
+  const out = LANG === "en" || !DICT ? s : (DICT[s] ?? s);
+  return out.replace(/\{(\d+)\}/g, (_, i) => args[i] ?? "");
 }
 
 function el(tag, attrs = {}, ...children) {
@@ -123,7 +142,7 @@ async function copyKey(text) {
     document.execCommand("copy");
     area.remove();
   }
-  toast(`Copied ${text}`);
+  toast(tr("Copied {0}", text));
 }
 
 function toast(message) {
@@ -191,10 +210,10 @@ function parseTime(ts) {
 
 function ago(ts) {
   const s = (Date.now() - parseTime(ts)) / 1000;
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  if (s < 86400 * 7) return `${Math.floor(s / 86400)}d ago`;
+  if (s < 60) return tr("just now");
+  if (s < 3600) return tr("{0}m ago", Math.floor(s / 60));
+  if (s < 86400) return tr("{0}h ago", Math.floor(s / 3600));
+  if (s < 86400 * 7) return tr("{0}d ago", Math.floor(s / 86400));
   return parseTime(ts).toLocaleDateString();
 }
 
@@ -353,11 +372,11 @@ function renderNav() {
     ? el("div", { class: "item renaming" }, icon("folder", projectColor(p.slug)), renaming.input)
     : el("div", { class: "item" + (state.menu === p.slug ? " menu-open" : ""), draggable: "true", "data-slug": p.slug },
     link(p.slug, p.name, p.open, icon("folder", projectColor(p.slug))),
-    el("button", { class: "more", title: "More", "aria-label": `More for ${p.name}`, "aria-haspopup": "menu",
+    el("button", { class: "more", title: tr("More"), "aria-label": tr("More for {0}", p.name), "aria-haspopup": "menu",
                    onclick: (e) => toggleProjectMenu(p, e.currentTarget) }, icon("more")));
   $("#nav").replaceChildren(
-    link("all", "All projects", open, icon("board")),
-    ...(projects.length ? [el("div", { class: "label" }, "Projects")] : []),
+    link("all", tr("All projects"), open, icon("board")),
+    ...(projects.length ? [el("div", { class: "label" }, tr("Projects"))] : []),
     ...projects.map(item),
   );
 }
@@ -366,17 +385,17 @@ function renderNav() {
 function toggleProjectMenu(p, button) {
   if (!toggleMenu(p.slug)) return;
   button.closest(".item").classList.add("menu-open");
-  const swatches = el("div", { class: "swatches", role: "group", "aria-label": "Color" });
+  const swatches = el("div", { class: "swatches", role: "group", "aria-label": tr("Color") });
   const drawSwatches = () => swatches.replaceChildren(...Object.entries(PROJECT_COLORS).map(([name, hex]) => {
     const current = projectColorName(p.slug) === name;
-    return el("button", { class: "swatch", style: `background:${hex}`, title: name, "aria-label": name,
+    return el("button", { class: "swatch", style: `background:${hex}`, title: tr(name), "aria-label": tr(name),
                           "aria-pressed": String(current), onclick: () => pickColor(p.slug, name).then(drawSwatches) },
       current ? icon("check") : null);
   }));
   drawSwatches();
   const repos = el("div", { class: "repos" });
   const drawRepos = (list, focus) => {
-    const input = el("input", { class: "field", placeholder: "Link a repo: owner/repo", "aria-label": "Link a GitHub repo",
+    const input = el("input", { class: "field", placeholder: tr("Link a repo: owner/repo"), "aria-label": tr("Link a GitHub repo"),
                                 autocomplete: "off", spellcheck: "false" });
     input.addEventListener("keydown", async (e) => {
       if (e.key !== "Enter" || !input.value.trim()) return;
@@ -384,17 +403,17 @@ function toggleProjectMenu(p, button) {
       if (q) drawRepos(q.repos, true);
     });
     repos.replaceChildren(...list.map((r) => el("div", { class: "repo" }, el("span", { class: "name" }, r),
-      el("button", { class: "unlink", title: `Unlink ${r}`, "aria-label": `Unlink ${r}`,
+      el("button", { class: "unlink", title: tr("Unlink {0}", r), "aria-label": tr("Unlink {0}", r),
                      onclick: async () => { const q = await changeRepo(p.slug, "DELETE", r); if (q) drawRepos(q.repos); } },
         icon("close")))), input);
     if (focus) input.focus();
   };
   drawRepos(p.repos);
-  const rename = el("button", { onclick: () => startRename(p) }, icon("rename"), "Rename");
+  const rename = el("button", { onclick: () => startRename(p) }, icon("rename"), tr("Rename"));
   const remove = el("button", { class: "danger", onclick: () => { closeMenu(); deleteProject(p); } },
-    icon("trash"), "Delete project");
+    icon("trash"), tr("Delete project"));
   const menu = el("div", { class: "menu", role: "menu", tabindex: "-1" },
-    el("div", { class: "label" }, "Color"), swatches, el("div", { class: "label" }, "Repos"), repos,
+    el("div", { class: "label" }, tr("Color")), swatches, el("div", { class: "label" }, tr("Repos")), repos,
     el("div", { class: "sep" }), rename, remove);
   document.body.append(menu);
   const r = button.getBoundingClientRect();
@@ -439,7 +458,7 @@ $("#nav").addEventListener("dragend", () => {
 
 function startRename(p) {
   closeMenu();
-  const input = el("input", { class: "field", "aria-label": `Rename ${p.name}`, spellcheck: "false", autocomplete: "off" });
+  const input = el("input", { class: "field", "aria-label": tr("Rename {0}", p.name), spellcheck: "false", autocomplete: "off" });
   input.value = p.name;
   renaming = { slug: p.slug, input };
   let finished = false;
@@ -522,28 +541,28 @@ function renderHeader() {
   $("#view").setAttribute("aria-pressed", String(isList()));
   $("#filters").replaceChildren(...(projects.length ? savedFilters() : []).map((f, i) =>
     el("span", { class: "chip" }, el("span", {}, queryNodes(f)),
-      el("button", { type: "button", title: `Remove "${f}"`, "aria-label": `Remove the filter ${f}`,
+      el("button", { type: "button", title: tr(`Remove "{0}"`, f), "aria-label": tr("Remove the filter {0}", f),
                      onclick: () => setFilters(savedFilters().filter((_, j) => j !== i)) }, icon("close")))));
   $("#human-only").setAttribute("aria-pressed", String(isHumanOnly()));
   if (!projects.length) { header.replaceChildren(); return; }
   const open = (n) => plural(n, "open task");
   if (!p) {
     const count = projects.reduce((n, p) => n + p.open, 0);
-    header.replaceChildren(el("h1", {}, "All projects"),
-      el("span", { class: "sub" }, `${open(count)} in ${plural(projects.length, "project")}`));
+    header.replaceChildren(el("h1", {}, tr("All projects")),
+      el("span", { class: "sub" }, tr("{0} in {1}", open(count), plural(projects.length, "project"))));
     return;
   }
   header.replaceChildren(
     el("h1", {}, p.name),
     el("span", { class: "sub" }, open(p.open)),
     ...p.repos.map((r) => el("a", { class: "repo-link", href: `https://github.com/${r}`, target: "_blank", rel: "noopener",
-                                    title: `Open ${r} on GitHub` }, icon("github"), r)),
+                                    title: tr("Open {0} on GitHub", r) }, icon("github"), r)),
   );
 }
 
 async function deleteProject(p) {
-  const tasks = p.total ? ` and its ${plural(p.total, "task")}, with their comments` : "";
-  if (!confirm(`Delete project ${p.slug}${tasks}? This cannot be undone.`)) return;
+  const tasks = p.total ? tr(" and its {0}, with their comments", plural(p.total, "task")) : "";
+  if (!confirm(tr("Delete project {0}{1}? This cannot be undone.", p.slug, tasks))) return;
   try {
     await api("DELETE", `/projects/${encodeURIComponent(p.slug)}`);
     if (panelTask?.project === p.slug) { fresh = null; closeTask(); }
@@ -561,9 +580,9 @@ function renderColumns() {
     state.layout = "";
     columns.style.display = "flex";
     columns.replaceChildren(el("div", { class: "empty" },
-      el("h1", {}, "Welcome to Kanzo"),
-      el("p", {}, "Create your first project in the sidebar. Link it to a GitHub repo and agents working in that repo will find it on their own."),
-      el("button", { class: "btn primary", onclick: showNewProject }, "New project")));
+      el("h1", {}, tr("Welcome to Kanzo")),
+      el("p", {}, tr("Create your first project in the sidebar. Link it to a GitHub repo and agents working in that repo will find it on their own.")),
+      el("button", { class: "btn primary", onclick: showNewProject }, tr("New project"))));
     return;
   }
   columns.style.display = "";
@@ -576,7 +595,7 @@ function renderColumns() {
       const collapsible = status === "backlog" || status === "done";
       const col = el("section", { class: "column", "data-status": status },
         el("h2", {},
-          statusIcon(status), status,
+          statusIcon(status), tr(status),
           el("span", { class: "count" }),
           collapsible ? el("button", { class: "collapse", onclick: (e) => { e.stopPropagation(); setCollapsed(status, !isCollapsed(status)); } }) : null),
         el("div", { class: "cards" }),
@@ -600,7 +619,7 @@ function renderColumns() {
   const hiddenDone = state.allDone ? 0 : state.board.done_hidden || 0;
   const more = hiddenDone
     ? el("button", { class: "ghost more", onclick: () => { state.allDone = true; loadBoard(); } },
-         filtered ? "Show older" : `Show ${hiddenDone} older`)
+         filtered ? tr("Show older") : tr("Show {0} older", hiddenDone))
     : null;
   if (inList) {
     renderList(tasks.filter((t) => !humanOnly || t.human), all, more);
@@ -890,7 +909,7 @@ function showCollapsed() {
     // to the left one.
     const left = status === "backlog";
     button.replaceChildren(icon(collapsed !== left ? "expand" : "collapse"));
-    button.title = collapsed ? `Show ${status}` : `Collapse ${status}`;
+    button.title = collapsed ? tr("Show {0}", tr(status)) : tr("Collapse {0}", tr(status));
     button.setAttribute("aria-label", button.title);
   }
   columns.style.gridTemplateColumns = cols.map((c) => (c.classList.contains("collapsed") ? "48px" : "minmax(260px, 1fr)")).join(" ");
@@ -987,8 +1006,8 @@ function card(t, showProject, row) {
     row ? statusIcon(t.status) : null,
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
-      t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
-      el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
+      t.human ? el("span", { class: "human-mark", title: tr("Human task: agents skip it") }, icon("human")) : null,
+      el("span", { class: "num", title: tr("Copy {0}", key(t)), onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
     ...summary(t, waitChip(t), urlChip(t)).slice(row ? 1 : 0));
   node.addEventListener("dragstart", (e) => {
@@ -1076,7 +1095,7 @@ let fresh = null;
 
 async function newTask() {
   const { projects } = state.board;
-  if (!projects.length) { toast("Create a project first"); return; }
+  if (!projects.length) { toast(tr("Create a project first")); return; }
   const last = localStorageGet("kanzo.newTaskProject");
   const project = state.project !== "all" ? state.project
     : projects.some((p) => p.slug === last) ? last : projects[0].slug;
@@ -1194,7 +1213,7 @@ async function refreshTask() {
   try {
     data = await api("GET", `/tasks/${id}`);
   } catch (e) {
-    if (state.task === id && /no task/.test(e.message)) { toast("That task was deleted"); closeTask(); }
+    if (state.task === id && /no task/.test(e.message)) { toast(tr("That task was deleted")); closeTask(); }
     return;
   }
   // Another task may have taken the panel meanwhile.
@@ -1204,7 +1223,7 @@ async function refreshTask() {
   panelTask = task;
   panelWaits = waits_on.map(key).join(", ");
   $("#p-key").textContent = key(task);
-  $("#p-key").title = `Copy ${key(task)}`;
+  $("#p-key").title = tr("Copy {0}", key(task));
   // Never overwrite what is being typed or picked.
   if (!$("#p-project").contains(document.activeElement)) renderProjectPick(task);
   for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")], [$("#p-url"), task.url || ""], [$("#p-waits"), panelWaits]]) {
@@ -1233,7 +1252,7 @@ async function refreshTask() {
     const attached = images.filter((i) => i.comment_id === c.id);
     return el("div", { class: "comment" },
       el("div", { class: "who" }, el("b", {}, c.author), " · ", timeEl(c.created_at),
-        el("button", { class: "remove", title: "Delete comment", "aria-label": "Delete comment",
+        el("button", { class: "remove", title: tr("Delete comment"), "aria-label": tr("Delete comment"),
                        onclick: () => deleteComment(c) }, icon("trash"))),
       c.body ? body : null,
       attached.length ? el("div", { class: "thumbs" }, attached.map((i) => thumb(i.file))) : null);
@@ -1241,7 +1260,7 @@ async function refreshTask() {
 }
 
 async function deleteComment(c) {
-  if (!confirm("Delete this comment? This cannot be undone.")) return;
+  if (!confirm(tr("Delete this comment? This cannot be undone."))) return;
   try {
     await api("DELETE", `/comments/${c.id}`);
     await refreshTask();
@@ -1252,7 +1271,7 @@ async function deleteComment(c) {
 function renderProjectPick(task) {
   const projects = state.board ? state.board.projects.map((p) => p.slug) : [];
   if (!projects.includes(task.project)) projects.push(task.project);
-  const select = el("select", { title: "Project", "aria-label": "Project" },
+  const select = el("select", { title: tr("Project"), "aria-label": tr("Project") },
     ...projects.map((slug) => el("option", { value: slug }, slug)));
   select.value = task.project;
   select.addEventListener("change", () => {
@@ -1410,8 +1429,8 @@ async function attachImages(images, toComment) {
 
 function thumb(file, onRemove) {
   return el("div", { class: "thumb" },
-    el("a", { href: `/images/${file}`, target: "_blank", rel: "noopener" }, el("img", { src: `/images/${file}`, alt: "Attached image" })),
-    onRemove ? el("button", { type: "button", class: "remove-image", title: "Remove image", "aria-label": "Remove image", onclick: onRemove }, icon("close")) : null);
+    el("a", { href: `/images/${file}`, target: "_blank", rel: "noopener" }, el("img", { src: `/images/${file}`, alt: tr("Attached image") })),
+    onRemove ? el("button", { type: "button", class: "remove-image", title: tr("Remove image"), "aria-label": tr("Remove image"), onclick: onRemove }, icon("close")) : null);
 }
 
 function renderPending() {
@@ -1558,8 +1577,8 @@ $("#p-comment").addEventListener("keydown", (e) => {
 
 $("#p-delete").addEventListener("click", async () => {
   if (!panelTask) return;
-  const extra = panelTask.comments ? ` and its ${plural(panelTask.comments, "comment")}` : "";
-  if (!confirm(`Delete ${key(panelTask)}${extra}? This cannot be undone.`)) return;
+  const extra = panelTask.comments ? tr(" and its {0}", plural(panelTask.comments, "comment")) : "";
+  if (!confirm(tr("Delete {0}{1}? This cannot be undone.", key(panelTask), extra))) return;
   try {
     if (fresh === panelTask.id) fresh = null;
     await api("DELETE", `/tasks/${panelTask.id}`);
@@ -1592,16 +1611,16 @@ async function runSearch() {
     results = found;
     selected = 0;
     $("#search-results").replaceChildren(
-      ...(results.length ? [el("div", { class: "label" }, q ? "Tasks" : "Recent")] : []),
+      ...(results.length ? [el("div", { class: "label" }, q ? tr("Tasks") : tr("Recent"))] : []),
       ...results.map((t, i) => el("button", { type: "button", class: "result" + (i === 0 ? " selected" : ""),
                                              onmousemove: () => select(i), onclick: () => pick(t) },
         el("span", { class: "dot", style: `background:${projectColor(t.project)}` }),
         el("span", { class: "body" }, el("span", { class: "title" }, t.title), ...summary(t)),
         el("span", { class: "meta" },
-          t.comments ? el("span", { class: "comments", title: `${t.comments} comment${t.comments > 1 ? "s" : ""}` },
+          t.comments ? el("span", { class: "comments", title: plural(t.comments, "comment") },
                           icon("comment"), String(t.comments)) : null,
           el("span", { class: "mono" }, key(t)), t.status))),
-      ...(results.length ? [] : [el("div", { class: "note" }, q ? "No tasks match." : "No tasks yet.")]));
+      ...(results.length ? [] : [el("div", { class: "note" }, q ? tr("No tasks match.") : tr("No tasks yet."))]));
     highlight("search", $("#search-results"), wordsOf(q));
   } catch (err) { toast(err.message); }
 }
@@ -1684,14 +1703,13 @@ async function poll() {
 function schedulePoll() {
   setTimeout(poll, 2000);
 }
-schedulePoll();
 
 let syncing = false;
 
 async function syncNow(keep) {
   if (syncing) return;
   syncing = true;
-  toast("Syncing…");
+  toast(tr("Syncing…"));
   let diverged = null;
   try {
     toast((await api("POST", "/sync", { keep })).message);
@@ -1707,12 +1725,12 @@ async function syncNow(keep) {
 function chooseSide({ first }) {
   const repo = repoName(syncRemote);
   if (first) {
-    if (confirm(`${repo} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.`)) syncNow("remote");
-    else if (confirm(`Replace the board in ${repo} with this machine's board instead?`)) syncNow("local");
+    if (confirm(tr("{0} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.", repo))) syncNow("remote");
+    else if (confirm(tr("Replace the board in {0} with this machine's board instead?", repo))) syncNow("local");
     return;
   }
-  if (confirm("This machine and another one both changed the board since the last sync, and boards can't be merged.\n\nKeep THIS machine's board, and overwrite the other one?")) syncNow("local");
-  else if (confirm("Take the other machine's board instead? This machine's board is kept in kanzo.db.bak.")) syncNow("remote");
+  if (confirm(tr("This machine and another one both changed the board since the last sync, and boards can't be merged.\n\nKeep THIS machine's board, and overwrite the other one?"))) syncNow("local");
+  else if (confirm(tr("Take the other machine's board instead? This machine's board is kept in kanzo.db.bak."))) syncNow("remote");
 }
 
 let syncRemote = null;
@@ -1736,7 +1754,7 @@ $("#sync-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const save = $("#sync-save");
   save.disabled = true;
-  save.textContent = "Checking…";
+  save.textContent = tr("Checking…");
   try {
     syncRemote = (await api("PUT", "/sync", { url: $("#sync-url").value })).remote;
     closeSettings();
@@ -1746,7 +1764,7 @@ $("#sync-form").addEventListener("submit", async (e) => {
     $("#sync-error").hidden = false;
   }
   save.disabled = false;
-  save.textContent = "Save and sync";
+  save.textContent = tr("Save and sync");
 });
 
 async function loadNetwork() {
@@ -1771,10 +1789,11 @@ function renderNetwork() {
   const host = net?.host?.replace(/:4242$/, "") || location.hostname;
   const n = state.guests;
   const shared = hosted || n != null;
-  const computers = n == null ? "" : `: ${plural(n, "computer")} connected`;
-  button.replaceChildren(icon("share"), ...(shared ? ["Shared"] : []), ...(shared && n != null ? [el("span", { class: "count" }, String(n))] : []));
+  const computers = n == null ? "" : tr(": {0} connected", plural(n, "computer"));
+  button.replaceChildren(icon("share"), ...(shared ? [tr("Shared")] : []), ...(shared && n != null ? [el("span", { class: "count" }, String(n))] : []));
   button.classList.toggle("on", shared);
-  button.title = hosted ? `Shared by ${host}${computers}` : shared ? `Shared on your network${computers}` : "Share this board, or join another";
+  button.title = hosted ? tr("Shared by {0}{1}", host, computers)
+    : shared ? tr("Shared on your network{0}", computers) : tr("Share this board, or join another");
   if (state.menu === "network") renderNetworkMenu();
 }
 
@@ -1790,32 +1809,32 @@ function renderNetworkMenu() {
   share.disabled = !net || now === "joined";
   $("#network-share-row").classList.toggle("disabled", share.disabled);
   $("#network-share-note").textContent =
-    !net ? "Only the computer with the board can change this"
-    : now === "sharing" ? `Other computers join it at ${net.addresses.length > 1 ? "the address for their network"
-      : net.addresses.length ? "this address" : "this computer's IP address"}`
-    : now === "joined" ? "Leave the shared board to share this one"
-    : "Other computers on your network can use it";
+    !net ? tr("Only the computer with the board can change this")
+    : now === "sharing" ? tr("Other computers join it at {0}", net.addresses.length > 1 ? tr("the address for their network")
+      : net.addresses.length ? tr("this address") : tr("this computer's IP address"))
+    : now === "joined" ? tr("Leave the shared board to share this one")
+    : tr("Other computers on your network can use it");
   const addresses = $("#network-addresses");
   addresses.hidden = now !== "sharing" || !net.addresses.length;
   if (now === "sharing") {
-    addresses.replaceChildren(...net.addresses.map((a) => el("button", { class: "copy", type: "button", title: "Copy the address" },
+    addresses.replaceChildren(...net.addresses.map((a) => el("button", { class: "copy", type: "button", title: tr("Copy the address") },
       el("span", { class: "mono" }, a), icon("copy"))));
   }
   const guests = $("#network-guests");
   guests.hidden = now !== "sharing";
   if (now === "sharing") {
     guests.replaceChildren(
-      el("span", { class: "label" }, net.guests.length ? "Connected now" : "No other computer is connected yet"),
+      el("span", { class: "label" }, net.guests.length ? tr("Connected now") : tr("No other computer is connected yet")),
       ...net.guests.map((g) => el("div", { class: "guest" },
-        el("span", { class: "dot" }), g.name || "A browser", el("span", { class: "address" }, g.address))));
+        el("span", { class: "dot" }), g.name || tr("A browser"), el("span", { class: "address" }, g.address))));
   }
   const joined = now === "joined";
   $("#network-join").hidden = !net;
   $("#network-join").classList.toggle("disabled", now === "sharing");
-  $("#network-join-text").replaceChildren(joined ? `Connected to ${net.host}` : "Join a shared board",
-    el("span", {}, joined ? "This computer uses that board"
-      : now === "sharing" ? "Stop sharing to join another board"
-      : "The address the sharing computer shows"));
+  $("#network-join-text").replaceChildren(joined ? tr("Connected to {0}", net.host) : tr("Join a shared board"),
+    el("span", {}, joined ? tr("This computer uses that board")
+      : now === "sharing" ? tr("Stop sharing to join another board")
+      : tr("The address the sharing computer shows")));
   $("#network-leave").hidden = !joined;
   $("#network-join-fields").hidden = joined;
   $("#join-host").disabled = $("#join-submit").disabled = now === "sharing";
@@ -1865,10 +1884,10 @@ $("#network-join").addEventListener("submit", async (e) => {
   e.preventDefault();
   const submit = $("#join-submit");
   submit.disabled = true;
-  submit.textContent = "Joining…";
+  submit.textContent = tr("Joining…");
   await changeNetwork({ action: "join", host: $("#join-host").value });
   submit.disabled = false;
-  submit.textContent = "Join";
+  submit.textContent = tr("Join");
 });
 
 function toggleSettingsMenu() {
@@ -1876,11 +1895,11 @@ function toggleSettingsMenu() {
   const button = $("#settings");
   button.classList.add("open");
   const menu = el("div", { class: "menu", role: "menu", tabindex: "-1" },
-    el("button", { onclick: () => openSettings() }, icon("settings"), "Settings"),
-    el("button", { onclick: () => { closeMenu(); checkForUpdates(); } }, icon("update"), "Check for updates",
+    el("button", { onclick: () => openSettings() }, icon("settings"), tr("Settings")),
+    el("button", { onclick: () => { closeMenu(); checkForUpdates(); } }, icon("update"), tr("Check for updates"),
       el("span", { class: "value" }, `v${state.board.version}`)),
-    el("button", { onclick: () => openSettings("about") }, icon("news"), "What's new?"),
-    el("button", { onclick: sync }, icon("sync"), "Sync"));
+    el("button", { onclick: () => openSettings("about") }, icon("news"), tr("What's new?")),
+    el("button", { onclick: sync }, icon("sync"), tr("Sync")));
   document.body.append(menu);
   const r = button.getBoundingClientRect();
   menu.style.width = `${r.width}px`;
@@ -1944,12 +1963,24 @@ async function saveSetting(box, fields) {
 $("#settings-backlog").addEventListener("change", (e) => saveSetting(e.target, { backlog: e.target.checked }));
 $('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL", "Human", "Waiting", "Created", "Updated", "Comments", "Images"].map((name) => {
   const property = name.toLowerCase();
-  return el("label", { class: "setting" }, el("span", { class: "text" }, name),
+  return el("label", { class: "setting" }, el("span", { class: "text" }, tr(name)),
     el("span", { class: "switch" },
-      el("input", { type: "checkbox", "data-property": property, "aria-label": name,
+      el("input", { type: "checkbox", "data-property": property, "aria-label": tr(name),
                     onchange: (e) => saveSetting(e.target, { property, visible: e.target.checked }) }),
       el("span")));
 }));
+{
+  // The language choice, held in localStorage like the filters. Changing it
+  // reloads, so every string and <html lang> come back in one piece.
+  const pane = $('.settings-pane[data-section="board"]');
+  const choose = el("select", { class: "field", style: "width:auto", "aria-label": tr("Language"),
+                                onchange: (e) => { localStorageSet("kanzo.lang", e.target.value); location.reload(); } },
+    el("option", { value: "en" }, "English"), el("option", { value: "zh-cn" }, "中文"));
+  choose.value = LANG;
+  pane.insertBefore(el("label", { class: "setting" },
+    el("span", { class: "text" }, tr("Language"), el("span", {}, tr("The language of the board's interface"))), choose),
+    pane.querySelector(".setting"));
+}
 $("#settings-update").addEventListener("click", checkForUpdates);
 
 async function checkUpdate() {
@@ -1962,26 +1993,26 @@ function showUpdate({ current, available }) {
   const button = $("#update");
   button.hidden = !available;
   if (!available) return;
-  $("#update-label").textContent = `Update to ${available}`;
-  button.title = `You have ${current}`;
+  $("#update-label").textContent = tr("Update to {0}", available);
+  button.title = tr("You have {0}", current);
   button.onclick = () => {
-    if (confirm(`Update Kanzo from ${current} to ${available}? The board restarts, which takes a few seconds.`)) installUpdate(available);
+    if (confirm(tr("Update Kanzo from {0} to {1}? The board restarts, which takes a few seconds.", current, available))) installUpdate(available);
   };
 }
 
 async function checkForUpdates() {
-  toast("Checking for updates…");
+  toast(tr("Checking for updates…"));
   try {
     const status = await api("GET", "/update?now=1");
     showUpdate(status);
     if (status.available) {
-      if (confirm(`Kanzo ${status.available} is out (you have ${status.current}). Download and install it now? The board restarts.`)) {
+      if (confirm(tr("Kanzo {0} is out (you have {1}). Download and install it now? The board restarts.", status.available, status.current))) {
         installUpdate(status.available);
       }
     } else if (status.latest) {
-      toast(`Kanzo is up to date (${status.current})`);
+      toast(tr("Kanzo is up to date ({0})", status.current));
     } else {
-      toast("Can't reach GitHub to check for updates");
+      toast(tr("Can't reach GitHub to check for updates"));
     }
   } catch (err) { toast(err.message); }
 }
@@ -1990,19 +2021,19 @@ async function installUpdate(available) {
   const button = $("#update");
   button.hidden = false;
   button.disabled = true;
-  $("#update-label").textContent = "Updating…";
+  $("#update-label").textContent = tr("Updating…");
   let res;
   try {
     res = await api("POST", "/update");
   } catch (err) {
     toast(err.message);
     button.disabled = false;
-    $("#update-label").textContent = `Update to ${available}`;
+    $("#update-label").textContent = tr("Update to {0}", available);
     return;
   }
   if (!res.restarting) {
-    $("#update-label").textContent = "Restart Kanzo to finish";
-    toast(`Kanzo ${available} is installed. Restart Kanzo to use it.`);
+    $("#update-label").textContent = tr("Restart Kanzo to finish");
+    toast(tr("Kanzo {0} is installed. Restart Kanzo to use it.", available));
     return;
   }
   // The old program answered, then gives way to the new one: wait for it, then reload.
@@ -2032,17 +2063,52 @@ window.addEventListener("beforeinstallprompt", (e) => {
 window.addEventListener("appinstalled", () => { $("#install").hidden = true; });
 $("#install").addEventListener("click", () => installPrompt.prompt());
 
-checkUpdate();
-setInterval(checkUpdate, 24 * 60 * 60 * 1000);
-loadSyncRemote();
-loadNetwork();
-
 setInterval(() => {
   document.querySelectorAll("time[datetime]").forEach((t) => { t.textContent = ago(t.getAttribute("datetime")); });
 }, 60000);
 
-{
-  const { slug, task } = readHash();
-  state.project = slug || localStorageGet("kanzo.project") || "all";
-  loadBoard().then(() => { if (task) openTask(task); });
+// The dictionary is served separately and only fetched when the board isn't
+// English. Everything below waits for it, so the first paint is never half
+// translated, and a missing dictionary just stays English.
+function loadDictionary() {
+  if (LANG === "en") return Promise.resolve();
+  return new Promise((resolve) => {
+    const script = el("script", { src: `/i18n/${LANG}.js` });
+    script.addEventListener("load", () => { try { DICT = ZH_CN; } catch { DICT = null; } resolve(); });
+    script.addEventListener("error", () => resolve());
+    document.head.append(script);
+  });
 }
+
+// Text, title, aria-label and placeholder from index.html: an exact dictionary
+// match swaps them, anything else keeps the English original. Runs once, while
+// the board's dynamic parts are still empty, so no task content is touched.
+function walkStatic() {
+  if (!DICT) return;
+  document.documentElement.lang = LANG === "zh-cn" ? "zh-CN" : "en";
+  for (const node of document.body.querySelectorAll("*")) {
+    for (const attr of ["title", "aria-label", "placeholder"]) {
+      const value = node.getAttribute(attr);
+      if (value && DICT[value]) node.setAttribute(attr, DICT[value]);
+    }
+  }
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node.textContent, hit = DICT[text.trim()];
+    if (hit) node.textContent = text.replace(text.trim(), hit);
+  }
+}
+
+loadDictionary().then(() => {
+  walkStatic();
+  checkUpdate();
+  setInterval(checkUpdate, 24 * 60 * 60 * 1000);
+  loadSyncRemote();
+  loadNetwork();
+  schedulePoll();
+  {
+    const { slug, task } = readHash();
+    state.project = slug || localStorageGet("kanzo.project") || "all";
+    loadBoard().then(() => { if (task) openTask(task); });
+  }
+});
