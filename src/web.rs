@@ -941,11 +941,11 @@ mod tests {
     }
 
     #[test]
-    fn changelog_says_what_each_change_does() {
+    fn changelog_links_each_change() {
         for line in CHANGELOG.lines().filter(|l| l.starts_with("- ")) {
             assert!(
-                line.starts_with("- **") && line.contains(":** "),
-                "should read `- **Name:** how to use it`: {line}"
+                line.ends_with(')') && line.contains("](https://github.com/emanuele-em/kanzo/"),
+                "should end with a link to its pull request or commit, after any `thanks @name`: {line}"
             );
         }
     }
