@@ -18,7 +18,7 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use rmcp::{ErrorData, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -57,6 +57,16 @@ pub async fn serve(home: Home) -> Result<()> {
     let images = home.images();
     let ctx = Ctx { home, cwd: Some(cwd), repos, images, host: Default::default() };
     let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
+    serve_stdio(server).await
+}
+
+#[cfg(unix)]
+use crate::stdio::serve as serve_stdio;
+
+/// Windows can't replace a running program, so there an agent's `kanzo mcp` keeps its version.
+#[cfg(not(unix))]
+async fn serve_stdio(server: Kanzo) -> Result<()> {
+    use rmcp::ServiceExt;
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -603,7 +613,7 @@ impl ServerHandler for Kanzo {
     }
 
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_tool_list_changed().build())
             .with_server_info(Implementation::new("kanzo", env!("CARGO_PKG_VERSION")))
             .with_instructions(if self.ctx.cwd.is_some() { INSTRUCTIONS } else { HTTP_INSTRUCTIONS })
     }
@@ -711,6 +721,8 @@ mod tests {
     use tokio::io::{
         AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
     };
+
+    use rmcp::ServiceExt;
 
     use super::*;
 

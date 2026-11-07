@@ -135,8 +135,9 @@ fn run_installer(script: &[u8], dir: &Path) -> Result<Output, String> {
 #[cfg(unix)]
 fn restart_args(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
     let mut args: Vec<OsString> = args.collect();
+    // First, since it isn't an option of a subcommand like `network on`.
     if !args.iter().any(|a| a == "--no-open") {
-        args.push("--no-open".into());
+        args.insert(0, "--no-open".into());
     }
     args
 }
@@ -160,6 +161,61 @@ pub fn restart(_exe: &Path) -> std::io::Error {
 /// On Windows only the service's board can restart: a running program can't replace itself there.
 pub fn can_restart(home: &Path) -> bool {
     cfg!(unix) || crate::service::is_task_board(home)
+}
+
+/// The program file this process started from. `kanzo update`, the installer, Homebrew or
+/// `cargo install` replace it with a new file, and a running process keeps the old one, so
+/// each long-running process watches for that and runs the new program in its place.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct Exe {
+    path: PathBuf,
+    stamp: (u64, std::time::SystemTime),
+}
+
+#[cfg(unix)]
+impl Exe {
+    pub fn current() -> Option<Exe> {
+        let path = std::env::current_exe().ok()?;
+        let stamp = stamp(&path)?;
+        Some(Exe { path, stamp })
+    }
+
+    /// One `stat`, cheap enough to check on every message.
+    pub fn changed(&self) -> bool {
+        stamp(&self.path).is_some_and(|s| s != self.stamp)
+    }
+
+    /// The new program, once it runs: a file still being written doesn't, and the next check tries again.
+    pub fn replacement(&self) -> Option<&Path> {
+        let runs = Command::new(&self.path)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        (self.changed() && runs).then_some(&self.path)
+    }
+}
+
+#[cfg(unix)]
+fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.ino(), meta.modified().ok()?))
+}
+
+/// Runs the new program as this process, with the same arguments.
+#[cfg(unix)]
+pub fn exec(exe: &Path, env: Option<(&str, &std::ffi::OsStr)>) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(exe);
+    cmd.args(std::env::args_os().skip(1));
+    if let Some((key, value)) = env {
+        cmd.env(key, value);
+    }
+    cmd.exec()
 }
 
 #[cfg(test)]
@@ -192,7 +248,8 @@ mod tests {
     #[cfg(unix)]
     fn restarts_without_opening_a_tab() {
         let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
-        assert_eq!(restart_args(args(&["--port", "4300"]).into_iter()), args(&["--port", "4300", "--no-open"]));
+        assert_eq!(restart_args(args(&["--port", "4300"]).into_iter()), args(&["--no-open", "--port", "4300"]));
+        assert_eq!(restart_args(args(&["network", "on"]).into_iter()), args(&["--no-open", "network", "on"]));
         assert_eq!(restart_args(args(&["--no-open"]).into_iter()), args(&["--no-open"]));
     }
 }
