@@ -40,9 +40,20 @@ async function api(method, path, body) {
     headers: body ? { "Content-Type": image ? body.type : "application/json" } : {},
     body: image || !body ? body : JSON.stringify(body),
   });
+  noticeVersion(res.headers.get("x-kanzo-version"));
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { data });
   return data;
+}
+
+// An update restarts the board under the page, which then reloads to match it. Not while
+// someone types, though: the next reply tries again.
+let pageVersion = null;
+
+function noticeVersion(version) {
+  if (!version) return;
+  pageVersion ??= version;
+  if (version !== pageVersion && !document.activeElement?.matches("input, textarea, select")) location.reload();
 }
 
 function plural(n, word) {

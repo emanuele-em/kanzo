@@ -3,6 +3,8 @@ mod home;
 mod mcp;
 mod service;
 mod share;
+#[cfg(unix)]
+mod stdio;
 mod store;
 mod sync;
 mod update;

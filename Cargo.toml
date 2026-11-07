@@ -1,6 +1,6 @@
 [package]
 name = "kanzo"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Self-hosted kanban for humans and agents. One 4.7 MB binary, starts in 3 ms, zero setup."

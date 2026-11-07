@@ -94,6 +94,8 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
         stop_signal().await;
         stopper.cancel();
     });
+    #[cfg(unix)]
+    tokio::spawn(restart_when_replaced());
     let mut listener = listener;
     loop {
         let rebind = shutdown.child_token();
@@ -115,6 +117,28 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
         task.await??;
     }
     Ok(())
+}
+
+/// However Kanzo was updated, from Settings, `kanzo update` or a package manager, the board
+/// restarts on the new program, keeping its port and data folder. Open pages then reload.
+#[cfg(unix)]
+async fn restart_when_replaced() {
+    let Some(exe) = update::Exe::current() else { return };
+    let mut tick = tokio::time::interval(Duration::from_secs(3));
+    loop {
+        tick.tick().await;
+        if !exe.changed() {
+            continue;
+        }
+        let check = exe.clone();
+        let Ok(Some(new)) = tokio::task::spawn_blocking(move || check.replacement().map(|p| p.to_path_buf())).await
+        else {
+            continue;
+        };
+        println!("Kanzo was updated; restarting the board.");
+        eprintln!("kanzo: updated, but cannot restart: {}", update::restart(&new));
+        return;
+    }
 }
 
 /// The old listener takes a moment to let go of the port.
@@ -197,7 +221,15 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .merge(shared)
         .layer(Extension(guard.clone()))
         .layer(middleware::from_fn_with_state(guard, protect))
+        .layer(middleware::map_response(stamp_version))
         .with_state(Arc::new(home))
+}
+
+/// Pages compare it with the version they loaded with, and reload after an update. Set on
+/// the way out, so a joined board's forwarded replies carry this computer's version, not the host's.
+async fn stamp_version(mut res: Response) -> Response {
+    res.headers_mut().insert("x-kanzo-version", HeaderValue::from_static(update::CURRENT));
+    res
 }
 
 /// DNS rebinding needs a domain name the attacker controls, so the board only accepts
