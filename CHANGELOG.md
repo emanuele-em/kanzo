@@ -1,3 +1,15 @@
+## 0.4.1 - 2026-11-07
+
+### New features
+
+- **Updates reach your agents:** on macOS and Linux, after an update each agent's Kanzo switches to the new version at its next call and gets the new tools, without reconnecting.
+- **The board follows updates:** on macOS and Linux, however you update, from Settings, with `kanzo update`, the installer or `cargo install`, the running board restarts on the new version within seconds, and open pages reload.
+- **Once, for this update:** what is already running is the old version, which can't switch by itself. Reconnect Kanzo in open agent sessions (in Claude Code, `/mcp`), and restart the board unless you updated from Settings or it runs as a service.
+
+### Bug fixes
+
+- **Updating a shared board:** a board started with `kanzo network on` no longer stops when an update restarts it.
+
 ## 0.4.0 - 2026-11-06
 
 ### New features
