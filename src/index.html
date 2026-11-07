@@ -399,7 +399,7 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 .6em; }
+.md p, .md ul, .md ol, .md pre, .md blockquote, .md .table { margin: 0 0 .6em; }
 .md h1, .md h2, .md h3, .md h4 { margin: .8em 0 .4em; font-size: 15px; }
 .md h1 { font-size: 17px; }
 .md ul, .md ol { padding-left: 1.3em; }
@@ -408,6 +408,10 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .md pre { background: var(--code); border-radius: 12px; padding: 10px 12px; overflow-x: auto; }
 .md pre code { padding: 0; background: none; }
 .md blockquote { border-left: 3px solid var(--active); padding-left: 10px; color: var(--muted); }
+.md .table { overflow-x: auto; }
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--active); padding: 4px 10px; text-align: left; vertical-align: top; }
+.md th { background: var(--code); font-weight: 600; }
 .md a { color: var(--link); }
 
 .search-dialog {

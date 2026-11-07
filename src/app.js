@@ -249,6 +249,14 @@ function emphasis(s) {
     .replace(/~~(.+?)~~/g, "<del>$1</del>");
 }
 
+// The cells of a table row, with its outer pipes dropped. An escaped \| stays in its cell.
+function tableCells(line) {
+  const row = line.trim().replace(/\\\|/g, "\u0001").replace(/^\|/, "").replace(/\|$/, "");
+  return row.split("|").map((c) => c.trim().replace(/\u0001/g, "|"));
+}
+
+const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
 function markdown(src) {
   const lines = escapeHtml(src.replace(/\r\n?/g, "\n")).split("\n");
   const out = [];
@@ -272,6 +280,19 @@ function markdown(src) {
       flushPara(); flushList();
       const n = Math.min(m[1].length, 4);
       out.push(`<h${n}>${inline(m[2])}</h${n}>`);
+    } else if (line.includes("|") && TABLE_DELIMITER.test(lines[i + 1] || "")
+               && tableCells(line).length === tableCells(lines[i + 1]).length) {
+      // A table may follow a line of text directly, as on GitHub. Its body runs to the
+      // first line with no pipe; short rows get empty cells and long ones are cut.
+      flushPara(); flushList();
+      const align = tableCells(lines[++i]).map((d) =>
+        d.startsWith(":") ? (d.endsWith(":") ? "center" : "left") : d.endsWith(":") ? "right" : "");
+      const row = (tag, cells) => "<tr>" + align.map((a, j) =>
+        `<${tag}${a ? ` style="text-align:${a}"` : ""}>${inline(cells[j] || "")}</${tag}>`).join("") + "</tr>";
+      const body = [];
+      while (i + 1 < lines.length && lines[i + 1].includes("|")) body.push(row("td", tableCells(lines[++i])));
+      out.push(`<div class="table"><table><thead>${row("th", tableCells(line))}</thead>`
+        + (body.length ? `<tbody>${body.join("")}</tbody>` : "") + "</table></div>");
     } else if ((m = line.match(/^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/))) {
       flushPara();
       const type = m[1] ? "ol" : "ul";
