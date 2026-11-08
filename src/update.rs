@@ -52,7 +52,7 @@ pub fn newer(version: &str) -> bool {
 }
 
 pub fn install() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| e.to_string())?;
+    let exe = program().map_err(|e| e.to_string())?;
     // The installer writes to <dir>/bin, so it can only replace a program kept in a bin folder.
     let dir = match exe.parent() {
         Some(bin) if bin.file_name().is_some_and(|n| n == "bin") => bin.parent().unwrap_or(bin).to_path_buf(),
@@ -81,6 +81,16 @@ pub fn install() -> Result<PathBuf, String> {
         return Err(format!("the installer failed: {}", last.trim()));
     }
     Ok(exe)
+}
+
+/// Where this program is, past any symlink. On Windows that comes back as `\\?\C:\…`, which
+/// the PowerShell installer can't install to, so it goes back to `C:\…`.
+fn program() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?.canonicalize()?;
+    match exe.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) if plain.as_bytes().get(1) == Some(&b':') => Ok(PathBuf::from(plain)),
+        _ => Ok(exe),
+    }
 }
 
 /// Named for its version: an agent's `kanzo mcp` can keep an older one running, and locked.
@@ -242,6 +252,13 @@ mod tests {
             std::fs::read_dir(tmp.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         left.sort();
         assert_eq!(left, ["kanzo.exe", "kanzo.exe.bak", "kanzo.old", "other.exe.old"]);
+    }
+
+    #[test]
+    fn the_installer_gets_a_folder_it_can_use() {
+        let exe = program().unwrap();
+        assert!(exe.is_absolute() && exe.is_file(), "{}", exe.display());
+        assert!(!exe.to_string_lossy().starts_with(r"\\?\"), "{}", exe.display());
     }
 
     #[test]
