@@ -1,0 +1,7 @@
+target/
+.git/
+.cargo/
+docs/
+*.bak
+*.db*
+.DS_Store

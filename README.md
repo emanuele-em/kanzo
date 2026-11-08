@@ -53,6 +53,31 @@ Every release is signed by GitHub: check a download with `gh attestation verify 
 cargo install kanzo
 ```
 
+### Containers (Podman and Docker)
+
+```sh
+podman run -d --name kanzo --restart unless-stopped -p 4242:4242 -v kanzo-data:/data:Z ghcr.io/emanuele-em/kanzo:latest
+```
+
+Or with Docker:
+
+```sh
+docker run -d --name kanzo --restart unless-stopped -p 4242:4242 -v kanzo-data:/data ghcr.io/emanuele-em/kanzo:latest
+```
+
+Or with Docker Compose: `docker compose up -d` using the included [compose.yaml](compose.yaml).
+
+### Quadlet (systemd on Linux with Podman)
+
+Copy `quadlet/kanzo.container` and `quadlet/kanzo-data.volume` into `~/.config/containers/systemd/`, then:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now kanzo
+```
+
+Kanzo runs as a systemd service, starts on boot, and updates automatically with `podman-auto-update`. See [quadlet/README.md](quadlet/README.md).
+
 ## Start
 
 > [!TIP]
@@ -240,7 +265,7 @@ From then on, choose Sync, or run `kanzo sync`, when you switch machines. It com
 
 | Command | Does |
 | --- | --- |
-| `kanzo` | Starts the board at http://localhost:4242 and opens it; `--port` for another port, `--no-open` to not open it |
+| `kanzo` | Starts the board at http://localhost:4242 and opens it; `--port` for another port, `--listen` for another address, `--no-open` to not open it |
 | `kanzo service install` | Keeps the board running and starts it at login; `uninstall` removes it |
 | `kanzo mcp` | The MCP server for agents: they start it, not you |
 | `kanzo share on` | Shares the board with the other computers on your network; `off` stops, while the board keeps running |
@@ -258,7 +283,7 @@ Every command takes `--home <dir>` to use another data folder.
 > [!TIP]
 > **Just ask your agent:** *"run Kanzo on port 4300."*
 
-Everything lives in `~/kanzo`: the board in `kanzo.db`, settings in `config.toml`. You never need to open either; use another folder with `--home` or `KANZO_HOME`.
+Everything lives in `~/kanzo`: the board in `kanzo.db`, settings in `config.toml`. You never need to open either; use another folder with `--home` or `KANZO_HOME`. Port and listen address can also be set with `KANZO_PORT` and `KANZO_LISTEN`.
 
 ```toml
 port = 4242
