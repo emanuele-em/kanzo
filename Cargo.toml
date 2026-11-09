@@ -23,7 +23,7 @@ dirs = "7.0.0"
 if-addrs = "0.15.0"
 # Already built in by other crates; tells which lock errors mean "no locks here".
 libc = "0.2.191"
-rmcp = { version = "=3.8.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+rmcp = { version = "=3.9.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
 rusqlite = { version = "0.41.0", features = ["bundled", "functions"] }
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
