@@ -112,6 +112,20 @@ Then ask: *"take the next task from kanzo and do it."* The agent:
   <img alt="A task open on the board, with Claude Code's comments, one saying how to resume its session, and a reply" src="docs/img/task-light.jpg">
 </picture>
 
+### Don't overwrite a newer edit
+
+Two agents that read the same task can overwrite each other with `update_task`. To prevent that, an agent can opt in to a guard. Without it, nothing changes.
+
+- **Read the version:** `get_task` with `include_version: true` adds a line like `version: 12.9c1f0a7e3b5d42688d0e1a4c7f2b9e35`. Without that flag its reply is as it always was. The version is opaque: pass it back as it is.
+- **Guard the edit:** `update_task` with `if_version` makes the change only if the task is still at that version. The check and the change are one database write, so of two edits made from the same read, one wins. The other gets `api#12 changed since you read it…`, and nothing is written, not even in the same second. Reread, reconcile and retry. A guarded edit's reply ends with the task's new version, to chain the next one. The task is found, the guard checked, the edit made and the reply written in that one write, so the reply tells what that edit saw, not what others wrote after it.
+- **What changes the version:** the title, description, column (also from the board, bulk edits and `next_task`), project, tags, url, `human`, and the task's own `waits_on` list, including a blocker being deleted. It also reflects writes by older Kanzo versions, since the database keeps it.
+- **What doesn't:** reordering within a column, `updated_at`, comments, images, other tasks, other tasks starting to wait on it, or a blocker getting done, moved or renamed.
+- **An edit that changes nothing** keeps the version. But a stale `if_version` is refused even then.
+- **Changed and changed back** is two new versions: the version names a state of the task, not its content, so a read from before them is stale even if the task looks the same. Reread.
+- **A wrong version** is refused, with nothing changed: one that isn't a version, or is from another task, or an empty `if_version`.
+- **What it is:** the task's number and 128 random bits that SQLite draws anew at each such change. It is not a counter and not a hash of the task. So copies of a board file that are edited apart, as with `kanzo sync` or a backup, get different versions, and a version read from one copy is refused by the other's different task, even if both made the same number of edits. Two copies that weren't edited apart, or a backup restored to exactly the state a version was read at, have the same version for the same task: that is the same snapshot, so it is accepted. Kanzo can't tell a restore from the time before it, so a restore to an older snapshot is a decision for you, not something a version can detect.
+- **Compatible:** the versions are in one small extra table, kept up to date by database triggers. Older Kanzo versions still open the board.
+
 ## Park ideas in a backlog
 
 Turn on Backlog in Settings for a column agents leave alone, until you move its tasks to `todo`.
