@@ -214,6 +214,28 @@ mod tests {
     }
 
     #[test]
+    fn exports_a_handoff_comment_with_the_task_it_moved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        let store = home.store().unwrap();
+        let api = store.create_project("api", "API", None).unwrap();
+        let t = store.create_task(api.id, "Fix login", "").unwrap();
+        let patch = store::TaskPatch { status: Some("review".into()), human: Some(true), ..Default::default() };
+        let note = store::NewComment { author: "claude-code", body: "Completed: a\nRemaining: b" };
+        store.update_task_with_comment(t.id, patch, Some(note)).unwrap();
+
+        let board = collect(&store, None, Path::new("/k/images")).unwrap();
+        let md = markdown(&board);
+        assert!(md.contains("### review\n\n#### api#1 Fix login"), "{md}");
+        assert!(md.contains("Human task."), "{md}");
+        assert!(md.contains("- **claude-code**, ") && md.contains("Completed: a\n  Remaining: b"), "{md}");
+        let json: serde_json::Value = serde_json::to_value(&board).unwrap();
+        let task = &json["projects"][0]["tasks"][0];
+        assert_eq!((task["status"].as_str(), task["human"].as_bool()), (Some("review"), Some(true)));
+        assert_eq!(task["comments"][0]["body"], "Completed: a\nRemaining: b");
+    }
+
+    #[test]
     fn refuses_a_joined_board() {
         let tmp = tempfile::tempdir().unwrap();
         let home = Home::open(tmp.path().to_path_buf()).unwrap();
