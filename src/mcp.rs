@@ -150,6 +150,11 @@ fn caller(context: &RequestContext<RoleServer>) -> Option<Implementation> {
     }
 }
 
+/// What a comment from this client is signed with, when it has named itself.
+fn client_name(context: &RequestContext<RoleServer>) -> Option<String> {
+    caller(context).map(|i| i.name).filter(|n| !n.is_empty())
+}
+
 fn git_repos(dir: &std::path::Path) -> Vec<String> {
     let Ok(text) = crate::home::output(Command::new("git").arg("-C").arg(dir).args(["remote", "-v"])) else {
         return Vec::new();
@@ -253,6 +258,8 @@ struct UpdateTaskArgs {
     url: Option<String>,
     /// Tasks it waits on, like api#12; "" clears.
     waits_on: Option<String>,
+    /// Saved with the change, or not at all; up to 16 KiB. To hand off: Completed, Remaining, Verified, Next step.
+    comment: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -495,12 +502,20 @@ impl Kanzo {
     }
 
     #[tool(description = "Change the fields you pass.")]
-    async fn update_task(&self, Parameters(args): Parameters<UpdateTaskArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn update_task(
+        &self,
+        Parameters(args): Parameters<UpdateTaskArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let author = client_name(&context).unwrap_or_else(|| "agent".into());
         Ok(self
             .run(move |_, store| {
                 let before = args.id.find(store)?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase());
-                let after = store.update_task(
+                // A comment that is present but empty or too long is refused, with the rest of the update.
+                let comment = args.comment.as_deref().map(|body| store::NewComment { author: &author, body });
+                let noted = comment.is_some();
+                let after = store.update_task_with_comment(
                     before.id,
                     TaskPatch {
                         title: args.title,
@@ -512,13 +527,18 @@ impl Kanzo {
                         url: args.url,
                         waits_on: args.waits_on,
                     },
+                    comment,
                 )?;
                 let moved = if before.status != after.status {
                     format!(", {} -> {}", before.status, after.status)
                 } else {
                     String::new()
                 };
-                Ok(format!("Updated {}{moved}: {}{}", after.key(), after.title, waits_note(store, &after)?))
+                let mut out = format!("Updated {}{moved}: {}{}", after.key(), after.title, waits_note(store, &after)?);
+                if noted {
+                    let _ = write!(out, "\nComment added as {author}.");
+                }
+                Ok(out)
             })
             .await)
     }
@@ -529,7 +549,7 @@ impl Kanzo {
         Parameters(args): Parameters<AddCommentArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let client = caller(&context).map(|i| i.name).filter(|n| !n.is_empty());
+        let client = client_name(&context);
         let author = args.author.filter(|a| !a.trim().is_empty()).or(client).unwrap_or_else(|| "agent".into());
         Ok(self
             .run(move |_, store| {
@@ -784,10 +804,35 @@ mod tests {
         home.store().unwrap().list_comments(task.id).unwrap().into_iter().map(|c| c.author).collect()
     }
 
-    fn comment(task: &Task, meta: Value) -> Value {
-        let args = json!({ "id": task.key(), "body": "done" });
+    fn call_message(name: &str, args: Value, meta: Value) -> Value {
         json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": { "name": "add_comment", "arguments": args, "_meta": meta } })
+                "params": { "name": name, "arguments": args, "_meta": meta } })
+    }
+
+    fn comment(task: &Task, meta: Value) -> Value {
+        call_message("add_comment", json!({ "id": task.key(), "body": "done" }), meta)
+    }
+
+    fn text(reply: &Value) -> &str {
+        reply["result"]["content"][0]["text"].as_str().unwrap()
+    }
+
+    const HANDOFF: &str = "Completed: the API\nRemaining: the tests\nVerified: cargo check\nNext step: run cargo test";
+
+    /// A `tools/call` over HTTP as a client that never opened a session sends it; the raw reply.
+    async fn post(port: u16, tool: &str, message: Value) -> String {
+        let body = message.to_string();
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let head = format!(
+            "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+             Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: {STATELESS}\r\n\
+             Mcp-Method: tools/call\r\nMcp-Name: {tool}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        conn.write_all(format!("{head}{body}").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).await.unwrap();
+        reply
     }
 
     fn stateless(client: Option<&str>) -> Value {
@@ -867,20 +912,165 @@ mod tests {
         block_on(async {
             let (_dir, home, task) = board();
             let port = shared(home.clone()).await;
-            let body = comment(&task, stateless(None)).to_string();
-            let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-            let head = format!(
-                "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
-                 Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: {STATELESS}\r\n\
-                 Mcp-Method: tools/call\r\nMcp-Name: add_comment\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            );
-            conn.write_all(format!("{head}{body}").as_bytes()).await.unwrap();
-            let mut reply = String::new();
-            conn.read_to_string(&mut reply).await.unwrap();
+            let reply = post(port, "add_comment", comment(&task, stateless(None))).await;
 
             assert!(reply.contains("Comment added"), "{reply}");
             assert_eq!(authors(&home, &task), ["agent"]);
         });
+    }
+
+    #[test]
+    fn a_handoff_saves_status_flag_and_comment_in_one_call() {
+        block_on(async {
+            let (dir, home, task) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": HANDOFF });
+            let reply = agent.send(call_message("update_task", args, stateless(Some("claude-code")))).await.unwrap();
+            assert_eq!(reply["result"]["isError"], false, "{reply}");
+            assert_eq!(text(&reply), "Updated api#1, todo -> review: Ship it\nComment added as claude-code.");
+
+            // What a restarted board reads back, and an agent that asks.
+            let store = home.store().unwrap();
+            let saved = store.get_task(task.id).unwrap();
+            assert_eq!((saved.status.as_str(), saved.human, saved.comments), ("review", true, 1));
+            let comments = store.list_comments(task.id).unwrap();
+            assert_eq!((comments[0].author.as_str(), comments[0].body.as_str()), ("claude-code", HANDOFF));
+            let get = call_message("get_task", json!({ "id": task.key() }), stateless(None));
+            let shown = agent.send(get).await.unwrap();
+            assert!(text(&shown).contains("human: for the user, not for agents"), "{shown}");
+            assert!(text(&shown).contains("Next step: run cargo test"), "{shown}");
+
+            // Handed back to a person in todo, it is still never taken by next_task.
+            let args = json!({ "id": task.key(), "status": "todo", "comment": HANDOFF });
+            let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
+            assert_eq!(text(&reply), "Updated api#1, review -> todo: Ship it\nComment added as agent.");
+            let next = call_message("next_task", json!({ "project": "api" }), stateless(None));
+            assert_eq!(text(&agent.send(next).await.unwrap()), "Nothing in todo for api.");
+            assert_eq!(authors(&home, &task), ["claude-code", "agent"]);
+        });
+    }
+
+    #[test]
+    fn an_update_without_a_comment_replies_and_saves_as_before() {
+        block_on(async {
+            let (dir, home, task) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let args = json!({ "id": task.key(), "status": "doing" });
+            let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
+            assert_eq!(text(&reply), "Updated api#1, todo -> doing: Ship it");
+
+            // A null comment is no comment.
+            let args = json!({ "id": task.key(), "status": "review", "comment": null });
+            let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
+            assert_eq!(text(&reply), "Updated api#1, doing -> review: Ship it");
+            assert!(authors(&home, &task).is_empty());
+        });
+    }
+
+    #[test]
+    fn a_comment_that_is_empty_or_too_long_refuses_the_whole_update() {
+        block_on(async {
+            let (dir, home, task) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let before = home.store().unwrap().changes().unwrap();
+            // 8193 characters but 16386 bytes.
+            let wide = "é".repeat(8193);
+            for comment in ["", "  \n ", wide.as_str()] {
+                let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": comment });
+                let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
+                assert_eq!(reply["result"]["isError"], true, "{reply}");
+                assert!(text(&reply).starts_with("comment is "), "{reply}");
+
+                let store = home.store().unwrap();
+                let saved = store.get_task(task.id).unwrap();
+                assert_eq!((saved.status.as_str(), saved.human), ("todo", false));
+                assert!(store.list_comments(task.id).unwrap().is_empty());
+                assert_eq!(store.changes().unwrap(), before, "not even the change counter moved");
+            }
+        });
+    }
+
+    #[test]
+    fn a_handoff_is_signed_with_the_name_a_client_initialized_with() {
+        block_on(async {
+            let (dir, home, task) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let client = json!({ "name": "codex-mcp-client", "version": "1" });
+            let params = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": client });
+            agent.send(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": params })).await;
+            agent.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await;
+
+            let meta = json!({ "io.modelcontextprotocol/clientInfo": { "name": "from-meta", "version": "1" } });
+            let args = json!({ "id": task.key(), "comment": HANDOFF });
+            agent.send(call_message("update_task", args, meta)).await;
+            assert_eq!(authors(&home, &task), ["codex-mcp-client"]);
+        });
+    }
+
+    #[test]
+    fn a_handoff_over_http_from_a_client_that_gives_no_name_is_signed_agent() {
+        block_on(async {
+            let (_dir, home, task) = board();
+            let port = shared(home.clone()).await;
+            let args = json!({ "id": task.key(), "status": "review", "comment": HANDOFF });
+            let reply = post(port, "update_task", call_message("update_task", args, stateless(None))).await;
+
+            assert!(reply.contains("Comment added as agent."), "{reply}");
+            assert_eq!(authors(&home, &task), ["agent"]);
+            assert_eq!(home.store().unwrap().get_task(task.id).unwrap().status, "review");
+        });
+    }
+
+    #[test]
+    fn a_joined_board_signs_a_handoff_with_the_clients_name() {
+        block_on(async {
+            let (_host_dir, host, task) = board();
+            let port = shared(host.clone()).await;
+            let guest_dir = tempfile::tempdir().unwrap();
+            std::fs::write(guest_dir.path().join(share::FILE), format!("join 127.0.0.1:{port}\n")).unwrap();
+            let mut agent = Agent::start(Home::open(guest_dir.path().to_path_buf()).unwrap(), guest_dir.path());
+
+            let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": HANDOFF });
+            let reply = agent.send(call_message("update_task", args, stateless(Some("claude-code")))).await.unwrap();
+            assert_eq!(reply["result"]["isError"], false, "{reply}");
+            assert_eq!(authors(&host, &task), ["claude-code"]);
+            let saved = host.store().unwrap().get_task(task.id).unwrap();
+            assert_eq!((saved.status.as_str(), saved.human), ("review", true));
+        });
+    }
+
+    #[test]
+    fn a_handoff_keeps_hidden_properties_hidden() {
+        block_on(async {
+            let (dir, home, blocker) = board();
+            let store = home.store().unwrap();
+            let project = store.find_project("api").unwrap();
+            let waits = TaskPatch { waits_on: Some(blocker.key()), ..Default::default() };
+            let task = store.create_task_in(project.id, "Then this", waits).unwrap();
+            for property in ["waiting", "comments", "human"] {
+                store.set_property(property, false).unwrap();
+            }
+            let mut agent = Agent::start(home.clone(), dir.path());
+
+            let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": HANDOFF });
+            let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
+            assert_eq!(text(&reply), "Updated api#2, todo -> review: Then this\nComment added as agent.");
+            let get = call_message("get_task", json!({ "id": task.key() }), stateless(None));
+            let shown = agent.send(get).await.unwrap();
+            let shown = text(&shown);
+            assert!(!shown.contains("Next step") && !shown.contains("Comments ("), "{shown}");
+            assert!(!shown.contains("waits on") && !shown.contains("human:"), "{shown}");
+            assert_eq!(store.list_comments(task.id).unwrap().len(), 1, "hidden, not dropped");
+        });
+    }
+
+    #[test]
+    fn update_task_takes_an_optional_comment_and_the_tool_list_keeps_ten_tools() {
+        let router = Kanzo::tools();
+        assert_eq!(router.map.len(), 10);
+        let route = router.map.values().find(|r| r.attr.name == "update_task").unwrap();
+        let schema = &route.attr.input_schema;
+        assert_eq!(schema["properties"]["comment"]["type"], "string");
+        assert!(!schema["required"].as_array().unwrap().iter().any(|r| r == "comment"));
     }
 }

@@ -264,6 +264,14 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .card .tags, .result .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .card .human-mark { flex: none; margin-top: 1px; color: var(--muted); display: inline-flex; }
 .card .human-mark .icon svg { width: 15px; height: 15px; }
+/* A human task in review: the words say it, the border and tint only help. Settings can hide it with the Human property. */
+.card .human-mark.review { align-items: center; gap: 5px; margin-top: 2px; color: var(--link); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.card:not(.row) > .human-mark.review { margin-top: 6px; }
+html:not([data-hide~="human"]) .card.human-review {
+  border-color: var(--link);
+  border-color: color-mix(in srgb, var(--link) 45%, transparent);
+  background-image: linear-gradient(color-mix(in srgb, var(--link) 7%, transparent), color-mix(in srgb, var(--link) 7%, transparent));
+}
 .human-field { display: flex; align-items: center; gap: 10px; }
 .props .human-field .hint { color: var(--faint); font-size: 12px; }
 .switch { position: relative; display: inline-flex; width: 34px; height: 20px; flex: none; }
