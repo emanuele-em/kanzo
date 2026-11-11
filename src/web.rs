@@ -937,7 +937,10 @@ mod tests {
     #[test]
     fn changelog_is_for_this_version() {
         let heading = format!("## {}", update::CURRENT);
-        assert!(CHANGELOG.lines().next() == Some(heading.as_str()), "CHANGELOG.md should start with the notes for this release");
+        assert!(
+            CHANGELOG.lines().next() == Some(heading.as_str()),
+            "CHANGELOG.md should start with the notes for this release"
+        );
     }
 
     #[test]
