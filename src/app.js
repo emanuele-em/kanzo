@@ -1032,15 +1032,24 @@ async function spread(group, grabbed, from, place) {
 
 // In the list, a row: no drag to reorder, since a sorted list has no one position to drop into.
 function card(t, showProject, row) {
-  const node = el("div", { class: "card" + (row ? " row" : "") + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (state.selected.has(t.id) ? " selected" : ""),
+  // A human task in review waits for a person: said in words too, not only in the border and tint.
+  // Hiding the Human property hides the mark and, in CSS, the highlight.
+  const review = t.human && t.status === "review";
+  const mark = t.human
+    ? el("span", { class: "human-mark" + (review ? " review" : ""), title: tr("Human task: agents skip it") },
+        icon("human"), review ? tr("Human review") : null)
+    : null;
+  const node = el("div", { class: "card" + (row ? " row" : "") + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (review ? " human-review" : "") + (state.selected.has(t.id) ? " selected" : ""),
                            draggable: row ? null : "true", "data-id": t.id,
                            onclick: (e) => { if (e.metaKey || e.ctrlKey) toggleSelected(t.id); else openTask(t.id); } },
     row ? statusIcon(t.status) : null,
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
-      t.human ? el("span", { class: "human-mark", title: tr("Human task: agents skip it") }, icon("human")) : null,
+      // On a board card the words get their own line, so a narrow column keeps room for the title.
+      row || !review ? mark : null,
       el("span", { class: "num", title: tr("Copy {0}", key(t)), onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
+    row || !review ? null : mark,
     ...summary(t, waitChip(t), urlChip(t)).slice(row ? 1 : 0));
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;
