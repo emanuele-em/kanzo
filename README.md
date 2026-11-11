@@ -112,6 +112,17 @@ Then ask: *"take the next task from kanzo and do it."* The agent:
   <img alt="A task open on the board, with Claude Code's comments, one saying how to resume its session, and a reply" src="docs/img/task-light.jpg">
 </picture>
 
+## Retry without doing it twice
+
+An agent that never saw a reply, because it was interrupted or the connection dropped, can send the same call again. `create_task`, `update_task`, `add_comment` and `next_task` take an optional `request_id`: 1 to 128 bytes, no whitespace or control characters, new for every new call, like a UUID.
+
+- **Same id, same call:** it happens once, and a repeat answers as the first call did, even after the task was edited, moved on or deleted: the answer is looked up first, before the task is looked at. It adds nothing, and takes no other task. A `next_task` that found nothing still found nothing, however many tasks came after. A `next_task` that took a task answers `Already taken earlier:` and shows that task as it is now. It holds after Kanzo restarts.
+- **What counts as the same:** the same client name, computer and folder (for a shared board, the ones of the computer the agent runs on), the same project or task, and the same arguments once cleaned: spacing in a title, for example, doesn't matter. A task is the one named as written, so `api#12`, `12` and `web#12` are three calls, even where the number is one task; use the same name when you retry. For `update_task`, a field left out and one passed empty (`tags: ""`) are different. Anything else under that id is refused, and nothing happens.
+- **An id that isn't valid** is an error, never a call without this protection.
+- **Not a lock:** who sent a call is only what the client says, and anyone who can reach the board can change it anyway.
+- **Kept for good:** each id is remembered, with the text of its call, so that a late retry still works.
+- Without `request_id`, calls and replies are as they were.
+
 ## Park ideas in a backlog
 
 Turn on Backlog in Settings for a column agents leave alone, until you move its tasks to `todo`.
