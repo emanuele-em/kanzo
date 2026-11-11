@@ -1,19 +1,13 @@
-## 0.4.1 - 2026-11-07
-
-### New features
-
-- Agents switch to a new version of Kanzo on their own: after an update, each agent's Kanzo moves to it at its next call and gets the new tools, without reconnecting. On macOS and Linux. ([#40](https://github.com/emanuele-em/kanzo/pull/40))
-- The board restarts on a new version within seconds, however you update: from Settings, with `kanzo update`, the installer or `cargo install`. Open pages reload with it. On macOS and Linux. ([#40](https://github.com/emanuele-em/kanzo/pull/40))
-- Markdown tables in descriptions and comments show as tables, with column alignment. ([#39](https://github.com/emanuele-em/kanzo/pull/39))
+## 0.4.2
 
 ### Bug fixes
 
-- Fixed a board started with `kanzo network on` stopping when an update restarted it. ([#40](https://github.com/emanuele-em/kanzo/pull/40))
+- Fixed `kanzo update` and the board's Update button always failing on Windows (thanks @Bortlesboat). ([#43](https://github.com/emanuele-em/kanzo/pull/43))
+- Fixed an agent's Kanzo tools no longer answering after an update, when the agent had cancelled a call before it (thanks @JYunth). ([#45](https://github.com/emanuele-em/kanzo/pull/45))
+- Fixed agents that never send `initialize`, like clients on MCP 2026-07-28, staying on the old version after an update (thanks @JYunth). ([#50](https://github.com/emanuele-em/kanzo/pull/50))
+- `kanzo export` now stops with a message on a computer that has joined another board, instead of quietly writing its own old board (thanks @Suyog007). ([#49](https://github.com/emanuele-em/kanzo/pull/49))
+- Fixed the board and sidebar getting shorter, with blank space below, when something like a browser extension adds an empty element to the page (thanks @qinsx2002). ([#51](https://github.com/emanuele-em/kanzo/pull/51))
 
-### Docs
+### Dependencies
 
-- Added the README in Chinese. ([7849c68](https://github.com/emanuele-em/kanzo/commit/7849c68))
-
-### Updating from 0.4.0
-
-- What's running now is 0.4.0, which can't switch by itself: reconnect Kanzo once in agent sessions that are already open (`/mcp` in Claude Code), and restart the board unless you updated from Settings or it runs as a service. ([#40](https://github.com/emanuele-em/kanzo/pull/40))
+- Updated rmcp to 3.9.0 and toml to 1.2.0. ([#44](https://github.com/emanuele-em/kanzo/pull/44))
