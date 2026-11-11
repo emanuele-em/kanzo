@@ -75,12 +75,13 @@ pub async fn serve(server: Kanzo) -> Result<()> {
     Ok(())
 }
 
-/// The handshake ends after the second line.
+/// The handshake ends after the second line. A client that never sent `initialize` has none.
 fn split_handover(handover: &[u8]) -> (&[u8], &[u8]) {
     let mut ends = handover.iter().enumerate().filter(|(_, b)| **b == b'\n').map(|(i, _)| i + 1);
+    let first = Head::of(handover.split(|b| *b == b'\n').next().unwrap_or_default());
     match ends.nth(1) {
-        Some(end) => handover.split_at(end),
-        None => (&[], &[]),
+        Some(end) if first.method.as_deref() == Some("initialize") => handover.split_at(end),
+        _ => (&[], handover),
     }
 }
 
@@ -103,6 +104,10 @@ async fn read_requests(
         let head = Head::of(&line);
         if let Some(id) = head.cancels(&line) {
             waiting.lock().unwrap().retain(|w| *w != id);
+        }
+        // Clients on protocol 2026-07-28 never send `initialize`: there's no handshake to wait for.
+        if shook == 0 && head.method.as_deref().is_some_and(|m| m != "initialize") {
+            shook = 2;
         }
         if shook < 2 && matches!(head.method.as_deref(), Some("initialize" | "notifications/initialized")) {
             handshake.extend_from_slice(&line);
@@ -169,7 +174,9 @@ mod tests {
         assert_eq!(handshake.iter().filter(|b| **b == b'\n').count(), 2);
         assert_eq!(unread, b"{\"id\":5,\"me");
         assert_eq!(split_handover(b""), (&b""[..], &b""[..]));
-        assert_eq!(split_handover(b"{\"id\":0}\n"), (&b""[..], &b""[..]));
+        // No `initialize`, so no handshake: the first line is a request still to answer.
+        let stateless = b"{\"id\":1,\"method\":\"tools/call\"}\n{\"id\":2,\"method\":\"tools/call\"}\n";
+        assert_eq!(split_handover(stateless), (&b""[..], &stateless[..]));
     }
 
     #[test]
