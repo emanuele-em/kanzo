@@ -33,7 +33,8 @@ body {
   background: var(--bg); color: var(--text);
   font: 14px/1.5 ui-sans-serif, -apple-system, system-ui, "Segoe UI", "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;
-  display: grid; grid-template-columns: 260px minmax(0, 1fr); overflow: hidden;
+  /* Keep empty browser-injected containers from sharing the app's height in implicit rows. */
+  display: grid; grid-template-columns: 260px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden;
 }
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
