@@ -54,6 +54,20 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER task_waits_insert AFTER INSERT ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER task_waits_delete AFTER DELETE ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     "ALTER TABLE projects ADD COLUMN position REAL;",
+    // What an agent's request_id remembers, so a retry replays the first outcome. No triggers: a
+    // replay changes nothing, so it must not wake the board. No foreign keys: a receipt outlives
+    // the task and the comment it names. Receipts are never deleted: a retry may come long after.
+    "CREATE TABLE requests (
+         caller     TEXT NOT NULL,
+         request_id TEXT NOT NULL,
+         method     TEXT NOT NULL,
+         request    TEXT NOT NULL,
+         task_id    INTEGER,
+         comment_id INTEGER,
+         reply      TEXT,
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+         PRIMARY KEY (caller, request_id)
+     ) WITHOUT ROWID;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -171,9 +185,127 @@ pub struct TaskPatch {
     pub waits_on: Option<String>,
 }
 
+/// The longest `request_id`, in bytes.
+const REQUEST_ID_MAX: usize = 128;
+/// The longest client or computer name, and the longest folder, a request_id is kept with, in bytes.
+const CALLER_NAME_MAX: usize = 128;
+const CALLER_FOLDER_MAX: usize = 1024;
+
+/// A task as `create_task_in` writes it, checked and cleaned.
+struct NewTask {
+    title: String,
+    status: String,
+    description: String,
+    tags: String,
+    human: bool,
+    waits_on: Option<String>,
+}
+
+/// A `TaskPatch` as `update_task` writes it: cleaned, but not checked against the board.
+///
+/// `new` and `request` both name every field of a `TaskPatch` and leave none to `..`, so a field
+/// added to it, like a comment or a guard on its version, doesn't compile until it is cleaned
+/// here and is part of the request of a retry. It can't change what a request does without
+/// changing what the request is.
+struct Edit {
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    project_id: Option<i64>,
+    tags: Option<String>,
+    url: Option<String>,
+    human: Option<bool>,
+    waits_on: Option<String>,
+}
+
+impl Edit {
+    fn new(patch: TaskPatch) -> Result<Self> {
+        let TaskPatch { title, description, status, project_id, tags, url, human, waits_on } = patch;
+        Ok(Self {
+            title: title.as_deref().map(clean_title).transpose()?,
+            url: url.as_deref().map(clean_url).transpose()?,
+            description: description.map(|d| d.trim().to_string()),
+            tags: tags.map(|t| clean_tags(&t).join(",")),
+            waits_on: waits_on.as_deref().map(clean_waits),
+            status,
+            project_id,
+            human,
+        })
+    }
+
+    /// The task as the caller named it, and every field, with `-` for one not passed.
+    fn request(&self, slug: Option<&str>, id: i64) -> String {
+        let Self { title, description, status, project_id, tags, url, human, waits_on } = self;
+        let field = |value: Option<&str>| value.map_or("-".to_string(), |v| format!("+{v}"));
+        canon(&[
+            "update_task",
+            slug.unwrap_or(""),
+            &id.to_string(),
+            &field(title.as_deref()),
+            &field(description.as_deref()),
+            &field(status.as_deref()),
+            &field(project_id.map(|p| p.to_string()).as_deref()),
+            &field(tags.as_deref()),
+            &field(url.as_deref()),
+            &field(human.map(|h| if h { "1" } else { "0" })),
+            &field(waits_on.as_deref()),
+        ])
+    }
+}
+
+/// An agent's `request_id` and who sent it. The same id from a different client name, computer or
+/// folder is a different request: those are told apart exactly, never hashed. They are what the
+/// caller says about itself, so this keeps one agent's retries apart from another's and is not
+/// access control: anyone who can reach the board can change it anyway.
+pub struct Retry {
+    caller: String,
+    id: String,
+}
+
+impl Retry {
+    /// The id must be 1-128 bytes with no whitespace or control characters; one that isn't is an
+    /// error, not a call without retry protection.
+    pub fn new(client: &str, computer: &str, folder: &str, id: &str) -> Result<Self> {
+        if id.is_empty() || id.len() > REQUEST_ID_MAX || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(Error::Invalid(format!(
+                "request_id must be 1-{REQUEST_ID_MAX} bytes, with no spaces or control characters"
+            )));
+        }
+        let parts = [("client name", client, CALLER_NAME_MAX), ("computer name", computer, CALLER_NAME_MAX)];
+        for (what, part, max) in parts.into_iter().chain([("folder", folder, CALLER_FOLDER_MAX)]) {
+            if part.len() > max {
+                return Err(Error::Invalid(format!(
+                    "the {what} is too long to use request_id with ({max} bytes at most)"
+                )));
+            }
+        }
+        Ok(Self { caller: canon(&[client, computer, folder]), id: id.to_string() })
+    }
+}
+
+/// What a request left: the task or comment it made or took, and the reply to give again. The
+/// reply is saved as it was first given, unless it names paths or other things that belong to
+/// whoever reads it, like a taken task's details; then it is `None`, and made again from the task.
+#[derive(Debug, PartialEq)]
+pub struct Receipt {
+    pub task: Option<i64>,
+    pub comment: Option<i64>,
+    pub reply: Option<String>,
+    /// Found in the receipts, not done now.
+    pub replayed: bool,
+}
+
+/// Parts in one string that can't be mixed up: each starts with its length, like `3:api2:12`.
+fn canon(parts: &[&str]) -> String {
+    parts.iter().map(|p| format!("{}:{p}", p.len())).collect()
+}
+
 const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 
 pub const DONE: &str = STATUSES[3];
+
+/// Where `next_task` puts the task it takes.
+pub const DOING: &str = STATUSES[1];
 
 pub const BACKLOG: &str = "backlog";
 
@@ -269,6 +401,48 @@ impl Store {
                 Err(e)
             }
         }
+    }
+
+    /// `run` and its receipt are one write, so they happen together or not at all, and when callers
+    /// race with the same request, one runs it and the others find its receipt. A request that
+    /// differs from the one first made with this id is refused before `run` does anything. An
+    /// error from `run` rolls everything back and keeps no receipt, so the id stays free.
+    fn once(
+        &self,
+        retry: &Retry,
+        method: &str,
+        request: &str,
+        run: impl FnOnce(&Connection) -> Result<Receipt>,
+    ) -> Result<Receipt> {
+        self.write(|c| {
+            let found = c
+                .query_row(
+                    "SELECT method, request, task_id, comment_id, reply FROM requests
+                     WHERE caller = ?1 AND request_id = ?2",
+                    params![retry.caller, retry.id],
+                    |r| {
+                        let receipt = Receipt { task: r.get(2)?, comment: r.get(3)?, reply: r.get(4)?, replayed: true };
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, receipt))
+                    },
+                )
+                .optional()?;
+            if let Some((was, same, receipt)) = found {
+                if was != method || same != request {
+                    return Err(Error::Invalid(format!(
+                        "request_id {:?} was already used for a different request; use a new one",
+                        retry.id
+                    )));
+                }
+                return Ok(receipt);
+            }
+            let receipt = run(c)?;
+            c.execute(
+                "INSERT INTO requests (caller, request_id, method, request, task_id, comment_id, reply)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![retry.caller, retry.id, method, request, receipt.task, receipt.comment, receipt.reply],
+            )?;
+            Ok(receipt)
+        })
     }
 
     /// Writes nothing when up to date, so starting `kanzo mcp` for every agent session
@@ -686,25 +860,71 @@ impl Store {
     // One write, or an agent could take a task before it's human, or before it waits.
     // Uses description, status, tags, human, waits_on.
     pub fn create_task_in(&self, project_id: i64, title: &str, patch: TaskPatch) -> Result<Task> {
-        let title = clean_title(title)?;
-        let status = patch.status.as_deref().unwrap_or(STATUSES[0]);
-        self.check_status(status)?;
-        let description = patch.description.as_deref().unwrap_or("").trim();
-        let tags = clean_tags(patch.tags.as_deref().unwrap_or("")).join(",");
-        let id = self.write(|c| {
-            let position = Self::end_of_column(c, status, 0)?;
-            c.execute(
-                "INSERT INTO tasks (project_id, title, description, status, position, tags, human) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false)],
-            )?;
-            let id = c.last_insert_rowid();
-            if let Some(keys) = &patch.waits_on {
-                self.set_waits(c, id, keys)?;
-            }
-            Ok(id)
-        })?;
+        let new = Self::new_task(title, patch)?;
+        self.check_status(&new.status)?;
+        let id = self.write(|c| self.insert_task(c, project_id, &new))?;
         self.get_task(id)
+    }
+
+    /// As `create_task_in`, for a request with an id: the task is made once, however often it is sent.
+    /// `render` makes the reply, in the same write, and it is kept as it is. A request is the same
+    /// as an earlier one when it has the same project, the same cleaned title, description, status,
+    /// tags and human, and the same `waits_on` keys, cleaned, in the same order. What depends on
+    /// the board, like whether the status exists, is checked only when the request is new, so a
+    /// retry never fails on what has changed since.
+    pub fn create_task_retry(
+        &self,
+        project_id: i64,
+        title: &str,
+        patch: TaskPatch,
+        retry: &Retry,
+        render: impl FnOnce(&Task) -> Result<String>,
+    ) -> Result<Receipt> {
+        let new = Self::new_task(title, patch)?;
+        let request = canon(&[
+            "create_task",
+            &project_id.to_string(),
+            &new.title,
+            &new.description,
+            &new.status,
+            &new.tags,
+            if new.human { "1" } else { "0" },
+            new.waits_on.as_deref().unwrap_or(""),
+        ]);
+        self.once(retry, "create_task", &request, |c| {
+            self.check_status(&new.status)?;
+            let id = self.insert_task(c, project_id, &new)?;
+            let reply = render(&self.get_task(id)?)?;
+            Ok(Receipt { task: Some(id), comment: None, reply: Some(reply), replayed: false })
+        })
+    }
+
+    /// Cleaned, but not checked against the board: the status may not exist.
+    fn new_task(title: &str, patch: TaskPatch) -> Result<NewTask> {
+        let title = clean_title(title)?;
+        Ok(NewTask {
+            title,
+            status: patch.status.unwrap_or_else(|| STATUSES[0].to_string()),
+            description: patch.description.as_deref().unwrap_or("").trim().to_string(),
+            tags: clean_tags(patch.tags.as_deref().unwrap_or("")).join(","),
+            human: patch.human.unwrap_or(false),
+            waits_on: patch.waits_on.as_deref().map(clean_waits),
+        })
+    }
+
+    /// Inside a write, which the caller has begun.
+    fn insert_task(&self, c: &Connection, project_id: i64, new: &NewTask) -> Result<i64> {
+        let position = Self::end_of_column(c, &new.status, 0)?;
+        c.execute(
+            "INSERT INTO tasks (project_id, title, description, status, position, tags, human) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![project_id, new.title, new.description, new.status, position, new.tags, new.human],
+        )?;
+        let id = c.last_insert_rowid();
+        if let Some(keys) = &new.waits_on {
+            self.set_waits(c, id, keys)?;
+        }
+        Ok(id)
     }
 
     /// Replaces what a task waits on. Part of the task's write, so a refused list changes nothing.
@@ -751,49 +971,78 @@ impl Store {
     }
 
     pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
-        let title = patch.title.as_deref().map(clean_title).transpose()?;
-        let url = patch.url.as_deref().map(clean_url).transpose()?;
-        if let Some(s) = &patch.status {
+        let edit = Edit::new(patch)?;
+        if let Some(s) = &edit.status {
             self.check_status(s)?;
         }
         self.write(|c| {
             let current = self.get_task(id)?;
-            // Only what the patch changes is written, and only then is the task newer.
-            let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
-            c.execute(
-                &format!(
-                    "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
-                       human = coalesce(?3, human), tags = coalesce(?4, tags),
-                       description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
-                     WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
-                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
-                       <> (title, project_id, human, tags, description, url)"
-                ),
-                params![
-                    title,
-                    patch.project_id,
-                    patch.human,
-                    tags,
-                    patch.description.as_deref().map(str::trim),
-                    id,
-                    url
-                ],
-            )?;
-            if let Some(s) = &patch.status
-                && *s != current.status
-            {
-                let position = Self::end_of_column(c, s, id)?;
-                c.execute(
-                    &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
-                    params![s, position, id],
-                )?;
-            }
-            if let Some(keys) = &patch.waits_on {
-                self.set_waits(c, id, keys)?;
-            }
-            Ok(())
+            self.apply_edit(c, &current, &edit)
         })?;
         self.get_task(id)
+    }
+
+    /// As `update_task`, for a request with an id: the task is changed once, however often it is
+    /// sent, the task being the one `key` names, like `api#12` or `12`. `render` is given the task
+    /// before and after, and makes the reply, in the same write; it is kept as it is, so it is not
+    /// made from what another writer did next.
+    ///
+    /// A request is the same as an earlier one when it has the same task key as written (`api#12`,
+    /// `12` and `web#12` are three, even where the number is the same task), and each field the
+    /// same, cleaned, with a field not passed told apart from one passed empty. The receipt is
+    /// looked up first and replayed before anything about the task's present state is looked at:
+    /// the checks that depend on it, which are the task existing, the status existing and whatever
+    /// else is added, run only for a new request. The request has one place, `Edit::request`, to
+    /// take in every field a patch gets.
+    pub fn update_task_retry(
+        &self,
+        key: &str,
+        patch: TaskPatch,
+        retry: &Retry,
+        render: impl FnOnce(&Task, &Task) -> Result<String>,
+    ) -> Result<Receipt> {
+        let edit = Edit::new(patch)?;
+        let (slug, id) = parse_task_key(key)?;
+        let request = edit.request(slug.as_deref(), id);
+        self.once(retry, "update_task", &request, |c| {
+            if let Some(s) = &edit.status {
+                self.check_status(s)?;
+            }
+            let before = self.find_task(key)?;
+            self.apply_edit(c, &before, &edit)?;
+            let reply = render(&before, &self.get_task(id)?)?;
+            Ok(Receipt { task: Some(id), comment: None, reply: Some(reply), replayed: false })
+        })
+    }
+
+    /// Inside a write, which the caller has begun, with `current` read in it.
+    fn apply_edit(&self, c: &Connection, current: &Task, edit: &Edit) -> Result<()> {
+        let id = current.id;
+        // Only what the patch changes is written, and only then is the task newer.
+        c.execute(
+            &format!(
+                "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
+                   human = coalesce(?3, human), tags = coalesce(?4, tags),
+                   description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
+                 WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
+                   coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
+                   <> (title, project_id, human, tags, description, url)"
+            ),
+            params![edit.title, edit.project_id, edit.human, edit.tags, edit.description, id, edit.url],
+        )?;
+        if let Some(s) = &edit.status
+            && *s != current.status
+        {
+            let position = Self::end_of_column(c, s, id)?;
+            c.execute(
+                &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
+                params![s, position, id],
+            )?;
+        }
+        if let Some(keys) = &edit.waits_on {
+            self.set_waits(c, id, keys)?;
+        }
+        Ok(())
     }
 
     /// In one write: all or nothing, and about 60 times faster than one write per task. Tags are
@@ -929,20 +1178,42 @@ impl Store {
 
     pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
         let (todo, values) = self.agents_todo(project_id, query)?;
-        let to = STATUSES[1];
-        let id = self.write(|c| {
-            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY t.position LIMIT 1");
-            let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
-            if let Some(id) = id {
-                let position = Self::end_of_column(c, to, id)?;
-                c.execute(
-                    &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
-                    params![to, position, id],
-                )?;
-            }
-            Ok(id)
-        })?;
+        let id = self.write(|c| Self::claim_next(c, &todo, values))?;
         id.map(|id| self.get_task(id)).transpose()
+    }
+
+    /// As `next_task_matching`, for a request with an id: it takes a task once, however often it is
+    /// sent, and when it found none, that stays its answer however many tasks come after. The
+    /// receipt holds the task's id, and `render_empty`'s reply when there was none. A request is the
+    /// same as an earlier one when it has the same project (or all) and the same filter, trimmed.
+    pub fn next_task_retry(
+        &self,
+        project_id: Option<i64>,
+        query: &str,
+        retry: &Retry,
+        render_empty: impl FnOnce() -> Result<String>,
+    ) -> Result<Receipt> {
+        let (todo, values) = self.agents_todo(project_id, query)?;
+        let scope = project_id.map_or("all".to_string(), |p| p.to_string());
+        let request = canon(&["next_task", &scope, query.trim()]);
+        self.once(retry, "next_task", &request, |c| match Self::claim_next(c, &todo, values)? {
+            Some(id) => Ok(Receipt { task: Some(id), comment: None, reply: None, replayed: false }),
+            None => Ok(Receipt { task: None, comment: None, reply: Some(render_empty()?), replayed: false }),
+        })
+    }
+
+    /// Inside a write, which the caller has begun.
+    fn claim_next(c: &Connection, todo: &str, values: Vec<Value>) -> Result<Option<i64>> {
+        let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY t.position LIMIT 1");
+        let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
+        if let Some(id) = id {
+            let position = Self::end_of_column(c, DOING, id)?;
+            c.execute(
+                &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
+                params![DOING, position, id],
+            )?;
+        }
+        Ok(id)
     }
 
     pub fn delete_task(&self, id: i64) -> Result<Task> {
@@ -973,6 +1244,49 @@ impl Store {
     }
 
     pub fn add_comment(&self, task_id: i64, author: &str, body: &str, images: &[String]) -> Result<Comment> {
+        let (author, body) = Self::new_comment(author, body, images)?;
+        self.get_task(task_id)?;
+        let id = self.write(|c| Self::insert_comment(c, task_id, &author, &body, images))?;
+        self.get_comment(id)
+    }
+
+    /// As `add_comment`, for a request with an id: the comment is added once, however often it is
+    /// sent, to the task `key` names, like `api#12` or `12`. The receipt holds the comment's id and
+    /// `render`'s reply, kept as it was, so it still answers after the task or comment is deleted,
+    /// and then nothing is added again. A request is the same as an earlier one when it has the
+    /// same task key as written, the project in it lowercased (`api#12`, `12` and `web#12` are
+    /// three, even where the number is the same task, for a number says nothing of which project
+    /// the caller meant), and the same cleaned author and body, and images.
+    pub fn add_comment_retry(
+        &self,
+        key: &str,
+        author: &str,
+        body: &str,
+        images: &[String],
+        retry: &Retry,
+        render: impl FnOnce(&Task) -> Result<String>,
+    ) -> Result<Receipt> {
+        let (author, body) = Self::new_comment(author, body, images)?;
+        let (slug, task_id) = parse_task_key(key)?;
+        let request = canon(&[
+            "add_comment",
+            slug.as_deref().unwrap_or(""),
+            &task_id.to_string(),
+            &author,
+            &body,
+            &images.join(","),
+        ]);
+        self.once(retry, "add_comment", &request, |c| {
+            // Only when there is no receipt yet: by a retry, the task may be gone.
+            let task = self.find_task(key)?;
+            let comment = Self::insert_comment(c, task.id, &author, &body, images)?;
+            let reply = render(&task)?;
+            Ok(Receipt { task: Some(task.id), comment: Some(comment), reply: Some(reply), replayed: false })
+        })
+    }
+
+    /// The author and body as they are written, or what is wrong with them.
+    fn new_comment(author: &str, body: &str, images: &[String]) -> Result<(String, String)> {
         let body = body.trim();
         if body.is_empty() && images.is_empty() {
             return Err(Error::Invalid("comment body is empty".into()));
@@ -982,20 +1296,18 @@ impl Store {
             "" => "me",
             a => a,
         };
-        self.get_task(task_id)?;
-        let id = self.write(|c| {
-            c.execute(
-                "INSERT INTO comments (task_id, author, body) VALUES (?1, ?2, ?3)",
-                params![task_id, author, body],
-            )?;
-            let id = c.last_insert_rowid();
-            let mut insert = c.prepare("INSERT INTO images (task_id, comment_id, file) VALUES (?1, ?2, ?3)")?;
-            for file in images {
-                insert.execute(params![task_id, id, file])?;
-            }
-            Ok(id)
-        })?;
-        self.get_comment(id)
+        Ok((author.to_string(), body.to_string()))
+    }
+
+    /// Inside a write, which the caller has begun.
+    fn insert_comment(c: &Connection, task_id: i64, author: &str, body: &str, images: &[String]) -> Result<i64> {
+        c.execute("INSERT INTO comments (task_id, author, body) VALUES (?1, ?2, ?3)", params![task_id, author, body])?;
+        let id = c.last_insert_rowid();
+        let mut insert = c.prepare("INSERT INTO images (task_id, comment_id, file) VALUES (?1, ?2, ?3)")?;
+        for file in images {
+            insert.execute(params![task_id, id, file])?;
+        }
+        Ok(id)
     }
 
     fn get_comment(&self, id: i64) -> Result<Comment> {
@@ -1288,6 +1600,11 @@ fn clean_tags(input: &str) -> Vec<String> {
         }
     }
     tags
+}
+
+/// The keys of a `waits_on`, trimmed, without the empty ones, joined by commas.
+fn clean_waits(keys: &str) -> String {
+    keys.split(',').map(str::trim).filter(|k| !k.is_empty()).collect::<Vec<_>>().join(",")
 }
 
 /// Any site will do, but only http and https: the board makes it a link people click.
@@ -2172,5 +2489,553 @@ mod tests {
         assert!(s.move_tasks(&[b, 99999], "doing", None).is_err());
         assert!(order("todo").contains(&b));
         assert!(s.move_tasks(&[b], "nope", None).is_err());
+    }
+
+    fn retry(id: &str) -> Retry {
+        Retry::new("claude-code", "", "/work/api", id).unwrap()
+    }
+
+    fn made(t: &Task) -> Result<String> {
+        Ok(format!("made {} {}", t.key(), t.title))
+    }
+
+    fn receipts(s: &Store) -> i64 {
+        s.conn.query_row("SELECT count(*) FROM requests", [], |r| r.get(0)).unwrap()
+    }
+
+    fn with(change: impl FnOnce(&mut TaskPatch)) -> TaskPatch {
+        let mut patch = TaskPatch::default();
+        change(&mut patch);
+        patch
+    }
+
+    fn refused(error: Error) -> bool {
+        matches!(&error, Error::Invalid(m) if m.contains("different request"))
+    }
+
+    #[test]
+    fn a_retried_create_makes_one_task_and_replays_its_first_reply() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let first = s.create_task_retry(p.id, "Ship it", TaskPatch::default(), &retry("k1"), made).unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.reply.as_deref(), Some("made api#1 Ship it"));
+
+        // Edited since: the retry still says what was said then, and changes nothing.
+        let patch = TaskPatch { title: Some("Renamed".into()), ..Default::default() };
+        s.update_task(first.task.unwrap(), patch).unwrap();
+        let changes = s.changes().unwrap();
+        // The same request spelled with other spaces is the same request.
+        let again = s.create_task_retry(p.id, "  Ship   it ", TaskPatch::default(), &retry("k1"), made).unwrap();
+        assert!(again.replayed);
+        assert_eq!((again.task, again.reply), (first.task, first.reply));
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1);
+        assert_eq!(s.changes().unwrap(), changes, "a replay doesn't wake the board");
+        assert_eq!(receipts(&s), 1);
+    }
+
+    #[test]
+    fn a_retried_create_after_the_task_is_deleted_creates_nothing() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let first = s.create_task_retry(p.id, "Ship it", TaskPatch::default(), &retry("k1"), made).unwrap();
+        s.delete_task(first.task.unwrap()).unwrap();
+        let changes = s.changes().unwrap();
+        let again = s.create_task_retry(p.id, "Ship it", TaskPatch::default(), &retry("k1"), made).unwrap();
+        assert!(again.replayed);
+        assert_eq!((again.task, again.reply), (first.task, first.reply));
+        assert!(s.list_tasks(None, None).unwrap().is_empty());
+        assert_eq!(s.changes().unwrap(), changes);
+    }
+
+    #[test]
+    fn a_changed_request_under_the_same_id_is_refused_before_anything_happens() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let web = s.create_project("web", "", None).unwrap();
+        let first = s.create_task_retry(api.id, "One", TaskPatch::default(), &retry("k"), made).unwrap();
+        let task = first.task.unwrap();
+        let changes = s.changes().unwrap();
+        let changed: [(&str, i64, TaskPatch); 7] = [
+            ("Two", api.id, TaskPatch::default()),
+            ("One", web.id, TaskPatch::default()),
+            ("One", api.id, with(|p| p.description = Some("more".into()))),
+            ("One", api.id, with(|p| p.status = Some("doing".into()))),
+            ("One", api.id, with(|p| p.tags = Some("bug".into()))),
+            ("One", api.id, with(|p| p.human = Some(true))),
+            ("One", api.id, with(|p| p.waits_on = Some(task.to_string()))),
+        ];
+        for (title, project, patch) in changed {
+            let error = s.create_task_retry(project, title, patch, &retry("k"), made).unwrap_err();
+            assert!(refused(error), "{title}");
+        }
+        // Another method with the same id, for what happens to be the same task or scope.
+        let comment = s.add_comment_retry(&task.to_string(), "me", "hi", &[], &retry("k"), made).unwrap_err();
+        assert!(refused(comment));
+        assert!(refused(s.next_task_retry(None, "", &retry("k"), || Ok("none".into())).unwrap_err()));
+
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1);
+        assert!(s.list_comments(task).unwrap().is_empty());
+        assert_eq!(s.get_task(task).unwrap().status, "todo", "next_task took nothing");
+        assert_eq!(s.changes().unwrap(), changes);
+        assert_eq!(receipts(&s), 1);
+    }
+
+    #[test]
+    fn the_same_id_is_a_different_request_for_a_different_caller() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let callers = [
+            ("claude-code", "", "/a"),
+            ("codex", "", "/a"),
+            ("claude-code", "mac-mini", "/a"),
+            ("claude-code", "", "/b"),
+            // Parts that would run together without their lengths.
+            ("ab", "c", "/a"),
+            ("a", "bc", "/a"),
+        ];
+        let mut ids = Vec::new();
+        for (client, computer, folder) in callers {
+            let retry = Retry::new(client, computer, folder, "same").unwrap();
+            let sent = s.create_task_retry(p.id, "One", TaskPatch::default(), &retry, made).unwrap();
+            assert!(!sent.replayed, "{client} {computer} {folder}");
+            ids.push(sent.task.unwrap());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), callers.len());
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), callers.len());
+
+        let first = Retry::new("claude-code", "", "/a", "same").unwrap();
+        let again = s.create_task_retry(p.id, "One", TaskPatch::default(), &first, made).unwrap();
+        assert!(again.replayed);
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), callers.len());
+    }
+
+    #[test]
+    fn a_request_id_that_is_not_valid_is_an_error() {
+        let long = "x".repeat(REQUEST_ID_MAX + 1);
+        for id in ["", " ", "a b", " a", "a\tb", "a\nb", "a\u{7f}", "a\u{85}", "a\u{a0}b", long.as_str()] {
+            assert!(Retry::new("c", "", "", id).is_err(), "{id:?}");
+        }
+        assert!(Retry::new("c", "", "", &"x".repeat(REQUEST_ID_MAX)).is_ok());
+        assert!(Retry::new("c", "", "", "0b3f-ünï").is_ok());
+        let name = "n".repeat(CALLER_NAME_MAX + 1);
+        let folder = "/".repeat(CALLER_FOLDER_MAX + 1);
+        assert!(Retry::new(&name, "", "", "k").is_err());
+        assert!(Retry::new("c", &name, "", "k").is_err());
+        assert!(Retry::new("c", "", &folder, "k").is_err());
+        assert!(Retry::new(&name[1..], "", &folder[1..], "k").is_ok());
+    }
+
+    #[test]
+    fn a_failed_request_keeps_no_receipt_and_leaves_the_id_free() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let todo = s.create_task(p.id, "waiting for someone", "").unwrap();
+        let tasks = || s.list_tasks(None, None).unwrap().len();
+        let create = |title: &str, patch: TaskPatch| s.create_task_retry(p.id, title, patch, &retry("k"), made);
+
+        // Refused before the write, or inside it after the task was made.
+        assert!(create(" ", TaskPatch::default()).is_err());
+        assert!(create("T", TaskPatch { waits_on: Some("999".into()), ..Default::default() }).is_err());
+        let no_reply = |_: &Task| -> Result<String> { Err(Error::Invalid("no".into())) };
+        assert!(s.create_task_retry(p.id, "T", TaskPatch::default(), &retry("k"), no_reply).is_err());
+        assert!(s.add_comment_retry("999", "me", "hi", &[], &retry("k"), made).is_err());
+        assert!(s.add_comment_retry(&todo.id.to_string(), "me", " ", &[], &retry("k"), made).is_err());
+        assert_eq!((tasks(), receipts(&s)), (1, 0));
+
+        // The receipt itself can't be saved: nothing the request did stays.
+        s.conn
+            .execute_batch("CREATE TRIGGER no_receipts BEFORE INSERT ON requests BEGIN SELECT RAISE(ABORT, 'no'); END;")
+            .unwrap();
+        let changes = s.changes().unwrap();
+        assert!(create("T", TaskPatch::default()).is_err());
+        let said = |_: &Task| -> Result<String> { Ok("added".to_string()) };
+        assert!(s.add_comment_retry(&todo.id.to_string(), "me", "hi", &[], &retry("k"), said).is_err());
+        assert!(s.next_task_retry(None, "", &retry("k"), || Ok("none".into())).is_err());
+        assert_eq!(tasks(), 1);
+        assert!(s.list_comments(todo.id).unwrap().is_empty());
+        assert_eq!(s.get_task(todo.id).unwrap().status, "todo");
+        assert_eq!(s.changes().unwrap(), changes);
+
+        s.conn.execute_batch("DROP TRIGGER no_receipts").unwrap();
+        let sent = create("T", TaskPatch::default()).unwrap();
+        assert!(!sent.replayed, "the id was never reserved");
+        assert_eq!((tasks(), receipts(&s)), (2, 1));
+    }
+
+    #[test]
+    fn a_retried_comment_is_added_once_and_still_answers_after_its_task_is_deleted() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let task = s.create_task(p.id, "Ship it", "").unwrap();
+        let other = s.create_task(p.id, "Other", "").unwrap();
+        let said = |t: &Task| -> Result<String> { Ok(format!("added to {}", t.key())) };
+        let key = task.key();
+
+        let first = s.add_comment_retry(&key, "bot", " done ", &[], &retry("c1"), said).unwrap();
+        let comment = first.comment.unwrap();
+        assert_eq!((first.replayed, first.reply.as_deref()), (false, Some("added to api#1")));
+        assert_eq!(s.list_comments(task.id).unwrap()[0].id, comment);
+        let changes = s.changes().unwrap();
+
+        // The same key, the project in capitals or not, with other spacing in the body.
+        let again = s.add_comment_retry("API#1", "bot", "done", &[], &retry("c1"), said).unwrap();
+        assert!(again.replayed);
+        assert_eq!((again.task, again.comment, again.reply), (first.task, first.comment, first.reply.clone()));
+        assert_eq!(s.list_comments(task.id).unwrap().len(), 1);
+        assert_eq!(s.changes().unwrap(), changes);
+
+        // Another task, another way to name it, another project with the same number, another
+        // author or body: all other requests. The number alone isn't the api project's, so it is
+        // refused too, and the one that names the wrong project is never accepted as a match.
+        s.create_project("web", "", None).unwrap();
+        let changed = [
+            (other.key(), "bot", "done"),
+            (task.id.to_string(), "bot", "done"),
+            (format!("web#{}", task.id), "bot", "done"),
+            (key.clone(), "me", "done"),
+            (key.clone(), "bot", "x"),
+        ];
+        for (named, author, body) in &changed {
+            let error = s.add_comment_retry(named, author, body, &[], &retry("c1"), said).unwrap_err();
+            assert!(refused(error), "{named} {author} {body}");
+        }
+        assert_eq!(s.list_comments(task.id).unwrap().len(), 1);
+        assert!(s.list_comments(other.id).unwrap().is_empty());
+
+        s.delete_comment(comment).unwrap();
+        s.delete_task(task.id).unwrap();
+        let changes = s.changes().unwrap();
+        let after = s.add_comment_retry(&key, "bot", "done", &[], &retry("c1"), said).unwrap();
+        assert!(after.replayed);
+        assert_eq!((after.comment, after.reply), (first.comment, first.reply));
+        assert!(s.list_comments(task.id).unwrap().is_empty());
+        assert_eq!(s.changes().unwrap(), changes, "nothing came back");
+        // A new request to a task that's gone is still an error, and keeps no receipt.
+        assert!(matches!(s.add_comment_retry(&key, "bot", "done", &[], &retry("c2"), said), Err(Error::NotFound(_))));
+        assert_eq!(receipts(&s), 1);
+    }
+
+    #[test]
+    fn a_retried_next_task_takes_one_task_and_an_empty_answer_stays_empty() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let nothing = || -> Result<String> { Ok("nothing".into()) };
+        let before = s.changes().unwrap();
+        let empty = s.next_task_retry(None, "", &retry("n1"), nothing).unwrap();
+        assert_eq!((empty.task, empty.reply.as_deref(), empty.replayed), (None, Some("nothing"), false));
+        assert_eq!(s.changes().unwrap(), before, "taking nothing changes nothing on the board");
+
+        // A task arrives; the same request still found nothing.
+        let late = s.create_task(p.id, "late", "").unwrap();
+        let changes = s.changes().unwrap();
+        let again = s.next_task_retry(None, "  ", &retry("n1"), || Ok("changed".into())).unwrap();
+        assert_eq!((again.task, again.reply.as_deref(), again.replayed), (None, Some("nothing"), true));
+        assert_eq!(s.get_task(late.id).unwrap().status, "todo");
+        assert_eq!(s.changes().unwrap(), changes);
+
+        // A new one takes it, and keeps taking only it.
+        let took = s.next_task_retry(None, "", &retry("n2"), nothing).unwrap();
+        assert_eq!((took.task, took.reply, took.replayed), (Some(late.id), None, false));
+        let next = s.create_task(p.id, "next", "").unwrap();
+        let changes = s.changes().unwrap();
+        let again = s.next_task_retry(None, "", &retry("n2"), nothing).unwrap();
+        assert_eq!((again.task, again.replayed), (Some(late.id), true));
+        assert_eq!(s.get_task(next.id).unwrap().status, "todo");
+        assert_eq!(s.changes().unwrap(), changes);
+
+        // Another project or filter is another request.
+        assert!(refused(s.next_task_retry(Some(p.id), "", &retry("n2"), nothing).unwrap_err()));
+        assert!(refused(s.next_task_retry(None, "tag:bug", &retry("n2"), nothing).unwrap_err()));
+        assert_eq!(s.get_task(next.id).unwrap().status, "todo");
+
+        // The task it took is gone, and still it takes no other.
+        s.delete_task(late.id).unwrap();
+        let again = s.next_task_retry(None, "", &retry("n2"), nothing).unwrap();
+        assert_eq!((again.task, again.replayed), (Some(late.id), true));
+        assert_eq!(s.get_task(next.id).unwrap().status, "todo");
+    }
+
+    #[test]
+    fn duplicate_requests_on_separate_connections_run_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let project = {
+            let s = Store::open(&path, None).unwrap();
+            s.migrate().unwrap();
+            let p = s.create_project("api", "", None).unwrap();
+            for title in ["a", "b", "c"] {
+                s.create_task(p.id, title, "").unwrap();
+            }
+            p.id
+        };
+        let sent: Vec<(Receipt, Receipt, Receipt)> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let s = Store::open(&path, None).unwrap();
+                        let created =
+                            s.create_task_retry(project, "New", TaskPatch::default(), &retry("same-c"), made).unwrap();
+                        let commented =
+                            s.add_comment_retry("1", "bot", "hi", &[], &retry("same-m"), |_| Ok("added".into()));
+                        let took = s.next_task_retry(None, "", &retry("same-n"), || Ok("none".into()));
+                        (created, commented.unwrap(), took.unwrap())
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        assert_eq!(sent.iter().filter(|r| !r.0.replayed).count(), 1);
+        assert_eq!(sent.iter().filter(|r| !r.1.replayed).count(), 1);
+        assert_eq!(sent.iter().filter(|r| !r.2.replayed).count(), 1);
+        assert!(sent.iter().all(|r| r.0.task == sent[0].0.task && r.0.reply == sent[0].0.reply));
+        assert!(sent.iter().all(|r| r.1.comment == sent[0].1.comment));
+        assert!(sent.iter().all(|r| r.2.task == sent[0].2.task));
+
+        let s = Store::open(&path, None).unwrap();
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 4);
+        assert_eq!(s.list_comments(1).unwrap().len(), 1);
+        assert_eq!(s.list_tasks(None, Some("doing")).unwrap().len(), 1);
+        assert_eq!(receipts(&s), 3);
+    }
+
+    #[test]
+    fn receipts_survive_reopening_and_are_never_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let first = {
+            let s = Store::open(&path, None).unwrap();
+            s.migrate().unwrap();
+            let p = s.create_project("api", "", None).unwrap();
+            let first = s.create_task_retry(p.id, "One", TaskPatch::default(), &retry("k"), made).unwrap();
+            // Long ago, and many keys since.
+            s.conn.execute("UPDATE requests SET created_at = '2001-01-01T00:00:00Z'", []).unwrap();
+            for i in 0..20 {
+                s.create_task_retry(p.id, "More", TaskPatch::default(), &retry(&format!("more-{i}")), made).unwrap();
+            }
+            first
+        };
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let p = s.find_project("api").unwrap();
+        let again = s.create_task_retry(p.id, "One", TaskPatch::default(), &retry("k"), made).unwrap();
+        assert!(again.replayed);
+        assert_eq!((again.task, again.reply), (first.task, first.reply));
+        assert_eq!((receipts(&s), s.list_tasks(None, None).unwrap().len()), (21, 21));
+    }
+
+    fn moved(before: &Task, after: &Task) -> Result<String> {
+        Ok(format!("{} -> {}: {}", before.status, after.status, after.title))
+    }
+
+    #[test]
+    fn a_retried_update_changes_the_task_once_and_replays_before_looking_at_the_task() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        s.create_project("web", "", None).unwrap();
+        let task = s.create_task(p.id, "Ship it", "").unwrap();
+        let blocker = s.create_task(p.id, "Blocker", "").unwrap();
+        let patch =
+            || TaskPatch { status: Some("doing".into()), title: Some(" Shipped ".into()), ..Default::default() };
+
+        let first = s.update_task_retry("api#1", patch(), &retry("u1"), moved).unwrap();
+        assert!(!first.replayed);
+        let said = (first.task, first.comment, first.reply.as_deref());
+        assert_eq!(said, (Some(task.id), None, Some("todo -> doing: Shipped")));
+        assert_eq!(s.get_task(task.id).unwrap().status, "doing");
+
+        // Someone else changes it further, which is what a version guard would see: the retry is
+        // still answered from its receipt, before anything about the task is looked at.
+        let next = TaskPatch { status: Some("review".into()), title: Some("Other".into()), ..Default::default() };
+        s.update_task(task.id, next).unwrap();
+        let waits = TaskPatch { human: Some(true), waits_on: Some(blocker.id.to_string()), ..Default::default() };
+        s.update_task(task.id, waits).unwrap();
+        let changes = s.changes().unwrap();
+        let again = s.update_task_retry("api#1", patch(), &retry("u1"), moved).unwrap();
+        assert!(again.replayed);
+        assert_eq!((again.task, again.comment, again.reply), (first.task, first.comment, first.reply.clone()));
+        let now = s.get_task(task.id).unwrap();
+        assert_eq!((now.status.as_str(), now.title.as_str(), now.human), ("review", "Other", true));
+        assert_eq!(s.changes().unwrap(), changes, "a replay doesn't wake the board");
+        assert_eq!(receipts(&s), 1);
+
+        // Another way to name the task, even for the same task, another project, or any other
+        // field, or a field passed empty that wasn't passed, is another request.
+        let with_title = |title: &str| TaskPatch { title: Some(title.into()), ..patch() };
+        let requests = [
+            ("1", patch()),
+            ("web#1", patch()),
+            ("api#2", patch()),
+            ("api#1", with_title("Other")),
+            ("api#1", TaskPatch { status: Some("review".into()), ..patch() }),
+            ("api#1", TaskPatch { description: Some("".into()), ..patch() }),
+            ("api#1", TaskPatch { tags: Some("".into()), ..patch() }),
+            ("api#1", TaskPatch { url: Some("".into()), ..patch() }),
+            ("api#1", TaskPatch { human: Some(false), ..patch() }),
+            ("api#1", TaskPatch { waits_on: Some("".into()), ..patch() }),
+            ("api#1", TaskPatch { status: None, ..patch() }),
+        ];
+        for (key, patch) in requests {
+            let error = s.update_task_retry(key, patch, &retry("u1"), moved).unwrap_err();
+            assert!(refused(error), "{key}");
+        }
+        // The same task as written, whatever the capitals of its project, and of what's cleaned.
+        let spaced =
+            TaskPatch { title: Some("  Shipped  ".into()), status: Some("doing".into()), ..Default::default() };
+        assert!(s.update_task_retry(" API#1 ", spaced, &retry("u1"), moved).unwrap().replayed);
+        let kept = s.get_task(task.id).unwrap();
+        assert_eq!((kept.status.as_str(), kept.title.as_str(), kept.project.as_str()), ("review", "Other", "api"));
+        assert_eq!(s.changes().unwrap(), changes);
+
+        // Deleted since: still the same answer, and nothing comes back.
+        s.delete_task(task.id).unwrap();
+        let changes = s.changes().unwrap();
+        let after = s.update_task_retry("api#1", patch(), &retry("u1"), moved).unwrap();
+        assert!(after.replayed);
+        assert_eq!((after.task, after.reply), (first.task, first.reply));
+        assert_eq!(s.changes().unwrap(), changes);
+        // A new request for the task is an error, and keeps no receipt.
+        assert!(matches!(s.update_task_retry("api#1", patch(), &retry("u2"), moved), Err(Error::NotFound(_))));
+        assert_eq!(receipts(&s), 1);
+    }
+
+    #[test]
+    fn a_failed_update_request_changes_nothing_and_keeps_no_receipt() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let task = s.create_task(p.id, "Ship it", "").unwrap();
+        let unchanged = || {
+            let t = s.get_task(task.id).unwrap();
+            (t.title, t.status, t.human, t.waiting_on.len(), s.list_comments(task.id).unwrap().len(), receipts(&s))
+        };
+        let before = unchanged();
+        let changes = s.changes().unwrap();
+        let patch = |change: fn(&mut TaskPatch)| {
+            let mut patch = TaskPatch { title: Some("Changed".into()), human: Some(true), ..Default::default() };
+            change(&mut patch);
+            patch
+        };
+
+        // Refused before the write, or inside it after other fields were written.
+        let refused_patches = [
+            patch(|p| p.title = Some(" ".into())),
+            patch(|p| p.url = Some("ftp://x".into())),
+            patch(|p| p.status = Some("nope".into())),
+            patch(|p| p.waits_on = Some("999".into())),
+            // Itself, which would make a loop.
+            patch(|p| p.waits_on = Some("1".into())),
+        ];
+        assert_eq!(task.id, 1);
+        for refused_patch in refused_patches {
+            assert!(s.update_task_retry("api#1", refused_patch, &retry("k"), moved).is_err());
+            assert_eq!(unchanged(), before);
+        }
+        let no_reply = |_: &Task, _: &Task| -> Result<String> { Err(Error::Invalid("no".into())) };
+        assert!(s.update_task_retry("api#1", patch(|_| {}), &retry("k"), no_reply).is_err());
+        assert_eq!(unchanged(), before);
+
+        // The receipt can't be saved: the fields written before it are rolled back.
+        s.conn
+            .execute_batch("CREATE TRIGGER no_receipts BEFORE INSERT ON requests BEGIN SELECT RAISE(ABORT, 'no'); END;")
+            .unwrap();
+        assert!(s.update_task_retry("api#1", patch(|_| {}), &retry("k"), moved).is_err());
+        assert_eq!(unchanged(), before);
+        assert_eq!(s.changes().unwrap(), changes);
+        s.conn.execute_batch("DROP TRIGGER no_receipts").unwrap();
+
+        let sent = s.update_task_retry("api#1", patch(|_| {}), &retry("k"), moved).unwrap();
+        assert!(!sent.replayed, "the key was never reserved");
+        let after = s.get_task(task.id).unwrap();
+        assert_eq!((after.title.as_str(), after.human, receipts(&s)), ("Changed", true, 1));
+    }
+
+    #[test]
+    fn a_retry_is_answered_even_when_what_it_asked_for_can_no_longer_be_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let open = || {
+            let s = Store::open(&path, None).unwrap();
+            s.migrate().unwrap();
+            s
+        };
+        let to = |status: &str| TaskPatch { status: Some(status.into()), ..Default::default() };
+        let (create, update) = {
+            let s = open();
+            let p = s.create_project("api", "", None).unwrap();
+            s.set_backlog(true).unwrap();
+            // The board is read when it opens, so the status exists for this one.
+            let s = open();
+            let create = s.create_task_retry(p.id, "Idea", to("backlog"), &retry("c"), made).unwrap();
+            let task = s.create_task(p.id, "Other", "").unwrap();
+            let update = s.update_task_retry("api#2", to("backlog"), &retry("u"), moved).unwrap();
+            assert_eq!((create.task, update.task), (Some(1), Some(task.id)));
+            s.update_task(1, to("todo")).unwrap();
+            s.update_task(task.id, to("todo")).unwrap();
+            s.set_backlog(false).unwrap();
+            (create, update)
+        };
+        let s = open();
+        assert!(s.check_status("backlog").is_err(), "no backlog now");
+        let again = s.create_task_retry(1, "Idea", to("backlog"), &retry("c"), made).unwrap();
+        assert!(again.replayed);
+        assert_eq!((again.task, again.reply), (create.task, create.reply));
+        let again = s.update_task_retry("api#2", to("backlog"), &retry("u"), moved).unwrap();
+        assert!(again.replayed);
+        assert_eq!((again.task, again.reply), (update.task, update.reply));
+        assert_eq!(s.get_task(2).unwrap().status, "todo");
+        // A new request is checked against the board as it is, and keeps no receipt.
+        assert!(s.create_task_retry(1, "Idea", to("backlog"), &retry("c2"), made).is_err());
+        assert!(s.update_task_retry("api#2", to("backlog"), &retry("u2"), moved).is_err());
+        assert_eq!(receipts(&s), 2);
+    }
+
+    #[test]
+    fn a_board_from_before_receipts_gains_them_and_keeps_working_for_older_kanzo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let before = MIGRATIONS.len() - 1;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").unwrap();
+            for sql in &MIGRATIONS[..before] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?1), ('compatible', ?2)",
+                [before.to_string(), COMPATIBLE_FROM.to_string()],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO projects (slug, name) VALUES ('api', 'api');
+                 INSERT INTO tasks (project_id, title, status, position) VALUES (1, 'kept', 'todo', 1);",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let meta = |key: &str| -> String {
+            s.conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(meta("schema_version"), MIGRATIONS.len().to_string());
+        // The oldest version that can still use this board doesn't move, so an older Kanzo opens it as it is.
+        assert_eq!(meta("compatible"), "4");
+        assert_eq!(titles(&s.list_tasks(None, None).unwrap()), ["kept"]);
+        assert_eq!(receipts(&s), 0);
+
+        // What an older Kanzo writes, with the statements it has, still works, and the board sees it.
+        let changes = s.changes().unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO tasks (project_id, title, status, position, tags) VALUES (1, 'older', 'todo', 2, '')",
+                [],
+            )
+            .unwrap();
+        s.conn.execute("UPDATE tasks SET title = 'older!' WHERE title = 'older'", []).unwrap();
+        assert_eq!(titles(&s.list_tasks(None, None).unwrap()), ["kept", "older!"]);
+        assert!(s.changes().unwrap() > changes);
+        // And it knows nothing of requests, so its tasks have no receipts.
+        assert_eq!(receipts(&s), 0);
     }
 }
