@@ -1,10 +1,11 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::home::Home;
+use crate::share::Net;
 use crate::store::{self, Comment, Project, Store, Task, short_time};
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -65,6 +66,9 @@ impl TaskOut {
 }
 
 pub fn export(home: &Home, format: Format, project: Option<&str>, output: Option<&Path>) -> Result<()> {
+    if let Net::Joined(host) = Net::load(home) {
+        bail!("This computer uses the board at {host}: run kanzo export on that computer, or kanzo leave first.");
+    }
     let store = home.store()?;
     let board = collect(&store, project, &home.images())?;
     let text = match format {
@@ -207,5 +211,22 @@ mod tests {
         let only = collect(&store, Some("web"), Path::new("/k/images")).unwrap();
         assert_eq!(only.projects.len(), 1);
         assert!(collect(&store, Some("nope"), Path::new("/k/images")).is_err());
+    }
+
+    #[test]
+    fn refuses_a_joined_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        home.store().unwrap().create_project("local", "Local", None).unwrap();
+        let out = tmp.path().join("board.json");
+
+        std::fs::write(home.dir.join("network"), "join 192.168.0.12:4242\n").unwrap();
+        let err = export(&home, Format::Json, None, Some(&out)).unwrap_err().to_string();
+        assert!(err.contains("192.168.0.12:4242") && err.contains("kanzo leave"), "{err}");
+        assert!(!out.exists());
+
+        std::fs::write(home.dir.join("network"), "share\n").unwrap();
+        export(&home, Format::Json, None, Some(&out)).unwrap();
+        assert!(std::fs::read_to_string(&out).unwrap().contains("\"slug\": \"local\""));
     }
 }
