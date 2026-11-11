@@ -398,6 +398,7 @@ async fn with_store<T: Serialize + Send + 'static>(
     let code = match error {
         Error::NotFound(_) => StatusCode::NOT_FOUND,
         Error::Invalid(_) => StatusCode::BAD_REQUEST,
+        Error::Conflict(_) => StatusCode::CONFLICT,
         Error::Busy(_) => StatusCode::SERVICE_UNAVAILABLE,
         Error::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };

@@ -219,6 +219,15 @@ struct TaskArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct GetTaskArgs {
+    /// Like api#12.
+    #[schemars(with = "String")]
+    id: TaskKey,
+    /// Also show its version, for update_task's if_version.
+    include_version: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct CreateTaskArgs {
     title: String,
     /// Markdown.
@@ -253,6 +262,8 @@ struct UpdateTaskArgs {
     url: Option<String>,
     /// Tasks it waits on, like api#12; "" clears.
     waits_on: Option<String>,
+    /// A version from get_task; refuses the change if the task changed since.
+    if_version: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -465,13 +476,21 @@ impl Kanzo {
     #[tool(description = "Show a task with its comments and image paths.")]
     async fn get_task(
         &self,
-        Parameters(args): Parameters<TaskArgs>,
+        Parameters(args): Parameters<GetTaskArgs>,
         ext: Extensions,
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, move |ctx, store| {
-                let task = args.id.find(store)?;
-                task_detail(ctx, store, &task)
+                if args.include_version != Some(true) {
+                    let task = args.id.find(store)?;
+                    return task_detail(ctx, store, &task, None);
+                }
+                // The task, its comments and its version from one moment.
+                store.read(|| {
+                    let task = args.id.find(store)?;
+                    let version = store.task_version(task.id)?;
+                    task_detail(ctx, store, &task, Some(&version))
+                })
             })
             .await)
     }
@@ -498,27 +517,35 @@ impl Kanzo {
     async fn update_task(&self, Parameters(args): Parameters<UpdateTaskArgs>) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run(move |_, store| {
-                let before = args.id.find(store)?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase());
-                let after = store.update_task(
-                    before.id,
-                    TaskPatch {
-                        title: args.title,
-                        description: args.description,
-                        status,
-                        tags: args.tags,
-                        project_id: None,
-                        human: args.human,
-                        url: args.url,
-                        waits_on: args.waits_on,
-                    },
-                )?;
-                let moved = if before.status != after.status {
-                    format!(", {} -> {}", before.status, after.status)
-                } else {
-                    String::new()
+                let patch = TaskPatch {
+                    title: args.title,
+                    description: args.description,
+                    status,
+                    tags: args.tags,
+                    project_id: None,
+                    human: args.human,
+                    url: args.url,
+                    waits_on: args.waits_on,
                 };
-                Ok(format!("Updated {}{moved}: {}{}", after.key(), after.title, waits_note(store, &after)?))
+                // The key, the guard, the edit and the reply are one write, so the reply, with its new
+                // version, tells what that edit saw, whatever others write next.
+                store.update_task_as(
+                    || args.id.find(store),
+                    patch,
+                    args.if_version.as_deref(),
+                    |before, after, version| {
+                        let moved = if before.status != after.status {
+                            format!(", {} -> {}", before.status, after.status)
+                        } else {
+                            String::new()
+                        };
+                        // Only a guarded edit gets its new version back, to chain the next one.
+                        let version = version.map(|v| format!("\nversion: {v}")).unwrap_or_default();
+                        let waits = waits_note(store, &after)?;
+                        Ok(format!("Updated {}{moved}: {}{waits}{version}", after.key(), after.title))
+                    },
+                )
             })
             .await)
     }
@@ -552,7 +579,7 @@ impl Kanzo {
                 let id = project.as_ref().map(|p| p.id);
                 let filter = args.filter.as_deref().unwrap_or("");
                 match store.next_task_matching(id, filter)? {
-                    Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task)?)),
+                    Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task, None)?)),
                     None => {
                         let waiting = store.waiting_in_todo(id, filter)?;
                         let scope = project.map_or("any project".into(), |p| p.slug);
@@ -662,7 +689,8 @@ fn waits_note(store: &Store, t: &Task) -> store::Result<String> {
     Ok(note)
 }
 
-fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
+/// With a `version`, a line for update_task's `if_version`; without one, the reply is as it always was.
+fn task_detail(ctx: &Ctx, store: &Store, t: &Task, version: Option<&str>) -> store::Result<String> {
     let hidden = store.hidden_properties()?;
     let comments = if shown(&hidden, "comments") { store.list_comments(t.id)? } else { Vec::new() };
     let images = if shown(&hidden, "images") { store.list_images(t.id)? } else { Vec::new() };
@@ -687,6 +715,9 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     }
     if updated != created && shown(&hidden, "updated") {
         let _ = write!(out, ", updated {updated}");
+    }
+    if let Some(version) = version {
+        let _ = write!(out, "\nversion: {version}");
     }
     if !t.url.is_empty() && shown(&hidden, "url") {
         let _ = write!(out, "\nurl: {}", t.url);
@@ -828,6 +859,74 @@ mod tests {
 
             home.store().unwrap().set_property("waiting", false).unwrap();
             assert!(!call("get_task", json!({ "id": "api#2" })).await.contains("waits on"));
+        });
+    }
+
+    #[test]
+    fn only_get_task_and_update_task_offer_the_version_guard() {
+        let router = Kanzo::tools();
+        let props = |tool: &str| -> Vec<String> {
+            let route = router.map.values().find(|r| r.attr.name == tool).unwrap();
+            route.attr.input_schema["properties"].as_object().unwrap().keys().cloned().collect()
+        };
+        assert!(props("get_task").contains(&"include_version".to_string()));
+        assert!(props("update_task").contains(&"if_version".to_string()));
+        for tool in ["delete_task", "add_comment", "create_task", "next_task", "list_tasks"] {
+            assert!(!props(tool).iter().any(|p| p.contains("version")), "{tool}");
+        }
+        assert_eq!(props("delete_task"), ["id"]);
+    }
+
+    #[test]
+    fn a_stale_guarded_update_is_refused_and_an_unguarded_one_is_as_before() {
+        block_on(async {
+            let (dir, home, _) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let mut call = async |name: &str, args: Value| -> (bool, String) {
+                let params = json!({ "name": name, "arguments": args, "_meta": stateless(None) });
+                let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+                let reply = agent.send(message).await.unwrap();
+                let text = reply["result"]["content"][0]["text"].as_str().unwrap().to_string();
+                (reply["result"]["isError"].as_bool().unwrap(), text)
+            };
+
+            // Asking for no version, or not asking, gives the reply there always was.
+            let (_, plain) = call("get_task", json!({ "id": "api#1" })).await;
+            let (_, off) = call("get_task", json!({ "id": "api#1", "include_version": false })).await;
+            assert_eq!(off, plain);
+            assert!(!plain.contains("version"), "{plain}");
+            let (_, shown) = call("get_task", json!({ "id": "api#1", "include_version": true })).await;
+            let version = shown.lines().find_map(|l| l.strip_prefix("version: ")).unwrap().to_string();
+            let rest: Vec<&str> = shown.lines().filter(|l| !l.starts_with("version: ")).collect();
+            assert_eq!(rest.join("\n"), plain, "the version is one added line");
+
+            let args = |title: &str, version: &str| json!({ "id": "api#1", "title": title, "if_version": version });
+            let (error, text) = call("update_task", args("New", &version)).await;
+            assert!(!error, "{text}");
+            let next = text.strip_prefix("Updated api#1: New\nversion: ").expect(&text).to_string();
+            assert_ne!(next, version);
+            assert_eq!(home.store().unwrap().task_version(1).unwrap(), next);
+
+            // The first read is stale now: refused, in a few words, and nothing moves.
+            let changes = home.store().unwrap().changes().unwrap();
+            let (error, text) = call("update_task", args("Stale", &version)).await;
+            assert!(error && text.contains("api#1 changed since you read it"), "{text}");
+            assert!(text.len() < 200, "{text}");
+            let (error, text) = call("update_task", args("Bogus", "bogus")).await;
+            assert!(error && text.contains("not a version"), "{text}");
+            let wrong = json!({ "id": "web#1", "title": "Wrong", "if_version": next });
+            let (error, text) = call("update_task", wrong).await;
+            assert!(error && text.contains("no task web#1"), "{text}");
+            let store = home.store().unwrap();
+            assert_eq!((store.get_task(1).unwrap().title.as_str(), store.changes().unwrap()), ("New", changes));
+
+            // Without if_version the edit goes through whatever the version, and says nothing more.
+            let (error, text) = call("update_task", json!({ "id": "api#1", "title": "Plain" })).await;
+            assert_eq!((error, text.as_str()), (false, "Updated api#1: Plain"));
+            // The guarded retry with the version it did get back is stale too: the plain edit counted.
+            let (error, _) = call("update_task", args("Late", &next)).await;
+            assert!(error);
+            assert_eq!(home.store().unwrap().get_task(1).unwrap().title, "Plain");
         });
     }
 
