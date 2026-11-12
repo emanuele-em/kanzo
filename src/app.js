@@ -71,6 +71,41 @@ function localStorageSet(k, v) {
   try { localStorage.setItem(k, v); } catch {}
 }
 
+const systemTheme = matchMedia("(prefers-color-scheme: dark)");
+let themePreference = readThemePreference();
+
+function readThemePreference() {
+  const saved = localStorageGet("kanzo.theme");
+  return saved === "light" || saved === "dark" ? saved : "system";
+}
+
+function applyTheme() {
+  const dark = themePreference === "dark" || (themePreference === "system" && systemTheme.matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  $('meta[name="theme-color"]').content = dark ? "#000000" : "#f9f9f9";
+  $("#settings-theme").value = themePreference;
+}
+
+function onSystemThemeChange() {
+  if (themePreference === "system") applyTheme();
+}
+
+// Safari 13.1 only supports the older MediaQueryList API.
+if (systemTheme.addEventListener) systemTheme.addEventListener("change", onSystemThemeChange);
+else systemTheme.addListener(onSystemThemeChange);
+window.addEventListener("storage", (e) => {
+  if (e.key === "kanzo.theme" || e.key === null) {
+    themePreference = readThemePreference();
+    applyTheme();
+  }
+});
+$("#settings-theme").addEventListener("change", (e) => {
+  themePreference = e.target.value;
+  localStorageSet("kanzo.theme", themePreference);
+  applyTheme();
+});
+applyTheme();
+
 // The board's language: a saved choice wins, else the browser's. English is the
 // source strings, so it runs with no dictionary at all.
 const LANG = (() => {
