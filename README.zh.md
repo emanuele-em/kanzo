@@ -53,6 +53,31 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/emanuele-em/kanzo/
 cargo install kanzo
 ```
 
+### 容器（Podman 与 Docker）
+
+```sh
+podman run -d --name kanzo --restart unless-stopped -p 4242:4242 -v kanzo-data:/data:Z ghcr.io/emanuele-em/kanzo:latest
+```
+
+或使用 Docker：
+
+```sh
+docker run -d --name kanzo --restart unless-stopped -p 4242:4242 -v kanzo-data:/data ghcr.io/emanuele-em/kanzo:latest
+```
+
+或使用 Docker Compose：通过附带的 [compose.yaml](compose.yaml) 运行 `docker compose up -d`。
+
+### Quadlet（Linux 上通过 Podman 使用 systemd）
+
+将 `quadlet/kanzo.container` 和 `quadlet/kanzo-data.volume` 复制到 `~/.config/containers/systemd/`，然后：
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now kanzo
+```
+
+Kanzo 会作为 systemd 服务开机自启，并通过 `podman-auto-update` 自动更新。详情见 [quadlet/README.md](quadlet/README.md)。
+
 ## 启动
 
 > [!TIP]
@@ -240,7 +265,7 @@ flowchart LR
 
 | 命令 | 作用 |
 | --- | --- |
-| `kanzo` | 在 http://localhost:4242 启动并打开看板；`--port` 指定其他端口，`--no-open` 不打开 |
+| `kanzo` | 在 http://localhost:4242 启动并打开看板；`--port` 指定其他端口，`--listen` 指定监听地址，`--no-open` 不打开 |
 | `kanzo service install` | 让看板保持运行并在登录时启动；`uninstall` 移除 |
 | `kanzo mcp` | 给智能体用的 MCP 服务器：由它们启动，不用你启动 |
 | `kanzo share on` | 把看板共享给网络中的其他电脑；`off` 停止共享，看板继续运行 |
@@ -258,7 +283,7 @@ flowchart LR
 > [!TIP]
 > **直接告诉你的智能体：** *“在 4300 端口运行 Kanzo。”*
 
-所有内容都在 `~/kanzo` 里：看板在 `kanzo.db`，设置在 `config.toml`。你不需要打开它们；可以用 `--home` 或 `KANZO_HOME` 指定其他文件夹。
+所有内容都在 `~/kanzo` 里：看板在 `kanzo.db`，设置在 `config.toml`。你不需要打开它们；可以用 `--home` 或 `KANZO_HOME` 指定其他文件夹。端口和监听地址也可以通过 `KANZO_PORT` 和 `KANZO_LISTEN` 环境变量设置。
 
 ```toml
 port = 4242
