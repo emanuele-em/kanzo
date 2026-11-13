@@ -54,6 +54,50 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER task_waits_insert AFTER INSERT ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER task_waits_delete AFTER DELETE ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     "ALTER TABLE projects ADD COLUMN position REAL;",
+    // What changed, for services that react to the board (`/api/events`). Written by the
+    // same transaction as the change, so no change is lost and none is reported twice.
+    // Task and project are plain ids: an event outlives a deleted task.
+    "CREATE TABLE events (
+         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+         at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+         kind        TEXT NOT NULL,
+         task_id     INTEGER NOT NULL,
+         project_id  INTEGER NOT NULL,
+         status_from TEXT,
+         status_to   TEXT,
+         author      TEXT
+     );
+     CREATE TRIGGER events_task_created AFTER INSERT ON tasks BEGIN
+         INSERT INTO events (kind, task_id, project_id, status_to) VALUES ('task.created', new.id, new.project_id, new.status);
+     END;
+     CREATE TRIGGER events_task_moved AFTER UPDATE OF status ON tasks WHEN old.status IS NOT new.status BEGIN
+         INSERT INTO events (kind, task_id, project_id, status_from, status_to)
+         VALUES ('task.moved', new.id, new.project_id, old.status, new.status);
+     END;
+     CREATE TRIGGER events_task_updated AFTER UPDATE ON tasks
+     WHEN old.status IS new.status AND (old.title IS NOT new.title OR old.description IS NOT new.description
+         OR old.tags IS NOT new.tags OR old.url IS NOT new.url OR old.human IS NOT new.human
+         OR old.project_id IS NOT new.project_id) BEGIN
+         INSERT INTO events (kind, task_id, project_id, status_to) VALUES ('task.updated', new.id, new.project_id, new.status);
+     END;
+     CREATE TRIGGER events_task_deleted AFTER DELETE ON tasks BEGIN
+         INSERT INTO events (kind, task_id, project_id, status_from) VALUES ('task.deleted', old.id, old.project_id, old.status);
+     END;
+     CREATE TRIGGER events_comment_added AFTER INSERT ON comments BEGIN
+         INSERT INTO events (kind, task_id, project_id, status_to, author)
+         SELECT 'comment.added', t.id, t.project_id, t.status, new.author FROM tasks t WHERE t.id = new.task_id;
+     END;
+     CREATE TRIGGER events_waits_changed AFTER INSERT ON task_waits BEGIN
+         INSERT INTO events (kind, task_id, project_id, status_to)
+         SELECT 'task.updated', t.id, t.project_id, t.status FROM tasks t WHERE t.id = new.task_id;
+     END;
+     CREATE TRIGGER events_waits_removed AFTER DELETE ON task_waits BEGIN
+         INSERT INTO events (kind, task_id, project_id, status_to)
+         SELECT 'task.updated', t.id, t.project_id, t.status FROM tasks t WHERE t.id = old.task_id;
+     END;
+     CREATE TRIGGER events_keep_recent AFTER INSERT ON events BEGIN
+         DELETE FROM events WHERE id <= new.id - 10000;
+     END;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -130,6 +174,27 @@ impl Task {
     pub fn key(&self) -> String {
         format!("{}#{}", self.project, self.id)
     }
+}
+
+/// One change on the board, as `/api/events` reports it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Event {
+    pub id: i64,
+    pub at: String,
+    /// `task.created`, `task.moved`, `task.updated`, `task.deleted` or `comment.added`.
+    pub kind: String,
+    /// Like `api#12`; the project part is empty when the project is gone.
+    pub task: String,
+    pub project: String,
+    /// The column before a move or a delete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The column after the change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Who wrote the comment, for `comment.added`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 /// A task another one waits on or blocks.
@@ -315,6 +380,36 @@ impl Store {
             .conn
             .prepare_cached("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'changes'")?
             .query_row([], |r| r.get(0))?)
+    }
+
+    /// The events after `since`, oldest first, at most `limit`. Only the last 10,000
+    /// events are kept, so a reader that fell further behind starts at the oldest kept.
+    pub fn events_since(&self, since: i64, project_id: Option<i64>, limit: usize) -> Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT e.id, e.at, e.kind, e.task_id, coalesce(p.slug, ''), e.status_from, e.status_to, e.author
+             FROM events e LEFT JOIN projects p ON p.id = e.project_id
+             WHERE e.id > ?1 AND (?2 IS NULL OR e.project_id = ?2)
+             ORDER BY e.id LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![since, project_id, limit as i64], |r| {
+            let project: String = r.get(4)?;
+            Ok(Event {
+                id: r.get(0)?,
+                at: r.get(1)?,
+                kind: r.get(2)?,
+                task: format!("{project}#{}", r.get::<_, i64>(3)?),
+                project,
+                from: r.get(5)?,
+                to: r.get(6)?,
+                author: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The id of the newest event, 0 when there is none: where a new reader starts.
+    pub fn last_event(&self) -> Result<i64> {
+        Ok(self.conn.prepare_cached("SELECT coalesce(max(id), 0) FROM events")?.query_row([], |r| r.get(0))?)
     }
 
     pub fn now(&self) -> Result<String> {
@@ -1374,6 +1469,75 @@ mod tests {
 
     fn titles(tasks: &[Task]) -> Vec<&str> {
         tasks.iter().map(|t| t.title.as_str()).collect()
+    }
+
+    fn kinds(s: &Store, since: i64) -> Vec<(String, String, Option<String>, Option<String>)> {
+        s.events_since(since, None, 100).unwrap().into_iter().map(|e| (e.kind, e.task, e.from, e.to)).collect()
+    }
+
+    #[test]
+    fn events_report_what_changed_once() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "first", "").unwrap();
+        let key = format!("api#{}", t.id);
+        let todo = || Some("todo".to_string());
+        assert_eq!(kinds(&s, 0), [("task.created".into(), key.clone(), None, todo())]);
+
+        let start = s.last_event().unwrap();
+        s.move_task(t.id, "doing", None).unwrap();
+        s.update_task(t.id, TaskPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+        s.add_comment(t.id, "agent", "[Start] here", &[]).unwrap();
+        let events = s.events_since(start, None, 100).unwrap();
+        let doing = Some("doing".to_string());
+        assert_eq!(
+            events.iter().map(|e| (e.kind.as_str(), e.from.clone(), e.to.clone())).collect::<Vec<_>>(),
+            [
+                ("task.moved", todo(), doing.clone()),
+                ("task.updated", None, doing.clone()),
+                ("comment.added", None, doing)
+            ]
+        );
+        assert_eq!(events[2].author.as_deref(), Some("agent"));
+        assert!(events.windows(2).all(|w| w[0].id < w[1].id));
+
+        let start = s.last_event().unwrap();
+        s.move_task(t.id, "doing", None).unwrap();
+        assert!(kinds(&s, start).is_empty(), "reordering in the same column is no event");
+
+        s.delete_task(t.id).unwrap();
+        assert_eq!(kinds(&s, start), [("task.deleted".into(), key, Some("doing".into()), None)]);
+    }
+
+    #[test]
+    fn events_filter_by_project_and_limit() {
+        let (_dir, s) = store();
+        let a = s.create_project("api", "", None).unwrap();
+        let b = s.create_project("web", "", None).unwrap();
+        for i in 0..3 {
+            s.create_task(a.id, &format!("a{i}"), "").unwrap();
+            s.create_task(b.id, &format!("b{i}"), "").unwrap();
+        }
+        let web = s.events_since(0, Some(b.id), 100).unwrap();
+        assert_eq!(web.len(), 3);
+        assert!(web.iter().all(|e| e.project == "web"));
+        let first_two = s.events_since(0, None, 2).unwrap();
+        assert_eq!(first_two.len(), 2);
+        assert_eq!(s.events_since(first_two[1].id, None, 100).unwrap().len(), 4);
+        assert_eq!(s.last_event().unwrap(), s.events_since(0, None, 100).unwrap().last().unwrap().id);
+    }
+
+    #[test]
+    fn waiting_on_another_task_is_an_update() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocked = s.create_task(p.id, "blocked", "").unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let start = s.last_event().unwrap();
+        s.update_task(blocked.id, waits(&format!("#{}", blocker.id))).unwrap();
+        let events = s.events_since(start, None, 100).unwrap();
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|e| e.kind == "task.updated" && e.task == format!("api#{}", blocked.id)));
     }
 
     #[test]

@@ -180,6 +180,7 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
     let shared = shared
         .route("/images/{file}", get(image_file))
         .route("/api/changes", get(changes))
+        .route("/api/events", get(events))
         .route("/api/board", get(board))
         .route("/api/search", get(search))
         .route("/api/projects", post(create_project))
@@ -436,6 +437,66 @@ struct Changes {
 async fn changes(State(home): Shared, Extension(guard): Extension<Arc<Guard>>) -> Response {
     let guests = guard.lan().then(|| guard.guests().len());
     with_store(home, move |h, s| Ok(Changes { changes: change_token(h, s)?, guests })).await
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    /// The last event id the reader has seen. Without it, the reply only says where to start.
+    since: Option<i64>,
+    project: Option<String>,
+    /// Seconds to hold the request open until an event comes (long polling), at most 25.
+    #[serde(default)]
+    wait: u64,
+}
+
+#[derive(Serialize)]
+struct Events {
+    events: Vec<store::Event>,
+    /// The id to pass as `since` next time.
+    last: i64,
+}
+
+const EVENTS_PER_REPLY: usize = 500;
+const EVENTS_WAIT_MAX: u64 = 25;
+
+/// Lets a service react to the board as it changes, like starting an agent for a new task,
+/// without polling the whole board: `GET /api/events?since=<last>&wait=25` in a loop.
+async fn events(State(home): Shared, Query(q): Query<EventsQuery>) -> Response {
+    let read = move |s: &Store, q: &EventsQuery| -> store::Result<Events> {
+        let project = match &q.project {
+            Some(p) => Some(s.find_project(p)?.id),
+            None => None,
+        };
+        let Some(since) = q.since else {
+            return Ok(Events { events: Vec::new(), last: s.last_event()? });
+        };
+        let events = s.events_since(since, project, EVENTS_PER_REPLY)?;
+        let last = events.last().map_or(since, |e| e.id);
+        Ok(Events { events, last })
+    };
+    let q = Arc::new(q);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.min(EVENTS_WAIT_MAX));
+    if let Some(since) = q.since {
+        // One indexed read every half second, and only while a reader waits.
+        while tokio::time::Instant::now() < deadline {
+            let (h, project) = (home.clone(), q.project.clone());
+            let ready = blocking(move || -> store::Result<bool> {
+                let s = h.store()?;
+                let pid = match &project {
+                    Some(p) => Some(s.find_project(p)?.id),
+                    None => None,
+                };
+                Ok(!s.events_since(since, pid, 1)?.is_empty())
+            })
+            .await;
+            // Ready, or an error that the read below reports.
+            if !matches!(ready, Ok(Ok(false))) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    with_store(home, move |_, s| read(s, &q)).await
 }
 
 /// The done column only grows, and every change reloads the board.
@@ -973,6 +1034,86 @@ mod tests {
         let mut reply = String::new();
         conn.read_to_string(&mut reply).await.unwrap();
         reply.split(' ').nth(1).unwrap().to_string()
+    }
+
+    /// The status and body of `GET path` on a board for this computer.
+    async fn get_from(home: &Home, path: &str) -> (String, serde_json::Value) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), Net::Private));
+        let app = router(home.clone(), guard, CancellationToken::new());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        conn.write_all(format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).await.unwrap();
+        let (head, body) = reply.split_once("\r\n\r\n").unwrap();
+        (head.split(' ').nth(1).unwrap().to_string(), serde_json::from_str(body).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[test]
+    fn events_tell_a_reader_what_changed_since_it_last_asked() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = Home::open(tmp.path().to_path_buf()).unwrap();
+            let s = home.store().unwrap();
+            s.migrate().unwrap();
+            let p = s.create_project("api", "", None).unwrap();
+            s.create_task(p.id, "old", "").unwrap();
+
+            let (code, start) = get_from(&home, "/api/events").await;
+            assert_eq!(code, "200");
+            assert_eq!(start["events"], json!([]), "a new reader starts now");
+            let last = start["last"].as_i64().unwrap();
+            assert!(last > 0);
+
+            let t = s.create_task(p.id, "new", "").unwrap();
+            s.move_task(t.id, "doing", None).unwrap();
+            let (code, got) = get_from(&home, &format!("/api/events?since={last}")).await;
+            assert_eq!(code, "200");
+            let kinds: Vec<_> = got["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+            assert_eq!(kinds, ["task.created", "task.moved"]);
+            assert_eq!(got["events"][1]["task"], format!("api#{}", t.id));
+            assert_eq!(got["events"][1]["from"], "todo");
+            assert_eq!(got["events"][1]["to"], "doing");
+            let next = got["last"].as_i64().unwrap();
+
+            let (_, none) = get_from(&home, &format!("/api/events?since={next}&wait=1")).await;
+            assert_eq!(none["events"], json!([]));
+            assert_eq!(none["last"].as_i64(), Some(next), "nothing new keeps the place");
+
+            let (code, _) = get_from(&home, "/api/events?since=0&project=nope").await;
+            assert_eq!(code, "404");
+        });
+    }
+
+    #[test]
+    fn a_waiting_reader_gets_the_event_as_it_happens() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = Home::open(tmp.path().to_path_buf()).unwrap();
+            let s = home.store().unwrap();
+            s.migrate().unwrap();
+            let p = s.create_project("api", "", None).unwrap();
+            let last = s.last_event().unwrap();
+            drop(s);
+
+            let writer = home.clone();
+            let pid = p.id;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                tokio::task::spawn_blocking(move || writer.store().unwrap().create_task(pid, "live", "").unwrap())
+                    .await
+                    .unwrap();
+            });
+            let began = Instant::now();
+            let (code, got) = get_from(&home, &format!("/api/events?since={last}&wait=10")).await;
+            assert_eq!(code, "200");
+            assert_eq!(got["events"][0]["kind"], "task.created");
+            assert!(began.elapsed() < Duration::from_secs(5), "answers when the event comes, not after the wait");
+        });
     }
 
     #[test]

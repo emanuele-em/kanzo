@@ -136,6 +136,15 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
   <img alt="A task's panel with log typed in Waits on, offering two tasks to pick, beside a dimmed card that says Waits on #7" src="docs/img/waits-light.jpg">
 </picture>
 
+## React to changes
+
+A service can follow the board as it changes, like starting an agent when a task lands in `todo`, without reading the whole board over and over.
+
+- **Start:** `GET /api/events` answers `{"events": [], "last": 41}`. Keep `last`.
+- **Follow:** `GET /api/events?since=41&wait=25` answers as soon as something changes, or after 25 seconds with no events. Pass the new `last` next time. Add `project=api` for one project.
+- **What you get:** each event has an `id`, `at`, `kind` (`task.created`, `task.moved`, `task.updated`, `task.deleted`, `comment.added`), `task` like `api#12`, `project`, and where it applies `from` and `to` (columns) and `author` (of a comment). Reordering cards in a column is no event.
+- **Nothing is lost:** an event is written in the same transaction as the change. The last 10,000 are kept.
+
 ## Filter and search
 
 > [!TIP]
