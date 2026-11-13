@@ -102,7 +102,7 @@ const MIGRATIONS: &[&str] = &[
          SELECT 'comment.added', t.id, t.project_id, p.slug, t.status, new.author
          FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = new.task_id;
      END;
-     -- Edits to Waits on write their one event in set_waits. This covers the other way they
+     -- Edits to Waits on write their one event in update_task. This covers the other way they
      -- change: a task it waits on was deleted, while the waiting task stays.
      CREATE TRIGGER events_blocker_deleted AFTER DELETE ON task_waits
      WHEN NOT EXISTS (SELECT 1 FROM tasks WHERE id = old.waits_on_id) BEGIN
@@ -216,7 +216,7 @@ pub struct Event {
     pub at: String,
     /// `task.created`, `task.moved`, `task.updated`, `task.deleted` or `comment.added`.
     pub kind: String,
-    /// Like `api#12`; the project part is empty when the project is gone.
+    /// Like `api#12`, with the project's slug when the event was written.
     pub task: String,
     pub project: String,
     /// The column before a move or a delete.
@@ -415,8 +415,8 @@ impl Store {
             .query_row([], |r| r.get(0))?)
     }
 
-    /// The events after `since`, oldest first, at most `limit`. Only the last 10,000
-    /// events are kept, so a reader that fell further behind starts at the oldest kept.
+    /// The events after the id `since`, oldest first, at most `limit`. Readers come through
+    /// `events_after`, which also checks that their cursor names an event of this board.
     pub fn events_since(&self, since: i64, project_id: Option<i64>, limit: usize) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, at, kind, task_id, project, status_from, status_to, author FROM events
