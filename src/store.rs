@@ -66,7 +66,9 @@ const MIGRATIONS: &[&str] = &[
          project     TEXT NOT NULL DEFAULT '',
          status_from TEXT,
          status_to   TEXT,
-         author      TEXT
+         author      TEXT,
+         -- Tells this board's event apart from one with the same id in another copy of the board.
+         nonce       INTEGER NOT NULL DEFAULT (random())
      );
      CREATE INDEX events_by_project ON events(project_id, id);
      CREATE TRIGGER events_task_created AFTER INSERT ON tasks BEGIN
@@ -187,6 +189,24 @@ impl Task {
     pub fn key(&self) -> String {
         format!("{}#{}", self.project, self.id)
     }
+}
+
+/// A page of events after a reader's cursor.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPage {
+    pub events: Vec<Event>,
+    /// The cursor to pass as `since` next time.
+    pub last: String,
+    /// The cursor names no event of this board: it was dropped (only the last 10,000 are
+    /// kept), or the board was replaced, as by `kanzo sync`. Read the board again, then go
+    /// on from `last`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reset: bool,
+}
+
+/// `0` before the first event, else `<id>.<nonce in hex>`.
+fn cursor(id: i64, nonce: i64) -> String {
+    if id == 0 { "0".into() } else { format!("{id}.{:x}", nonce as u64) }
 }
 
 /// One change on the board, as `/api/events` reports it.
@@ -430,7 +450,49 @@ impl Store {
         Ok(self.conn.prepare_cached("SELECT coalesce(max(id), 0) FROM events")?.query_row([], |r| r.get(0))?)
     }
 
+    /// The events after `since`, a cursor from an earlier page; without one, an empty page
+    /// that says where to start. Read in one transaction, so the page and its cursor agree.
+    pub fn events_after(&self, since: Option<&str>, project_id: Option<i64>, limit: usize) -> Result<EventPage> {
+        let _read = self.conn.unchecked_transaction()?;
+        let newest: (i64, i64) = self.conn.query_row(
+            "SELECT coalesce(max(id), 0), coalesce((SELECT nonce FROM events ORDER BY id DESC LIMIT 1), 0) FROM events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let newest = cursor(newest.0, newest.1);
+        let Some(since) = since else {
+            return Ok(EventPage { events: Vec::new(), last: newest, reset: false });
+        };
+        let after = if since == "0" {
+            0
+        } else {
+            let parsed = since
+                .split_once('.')
+                .and_then(|(id, nonce)| Some((id.parse::<i64>().ok()?, u64::from_str_radix(nonce, 16).ok()? as i64)));
+            let Some((id, nonce)) = parsed else {
+                return Err(Error::Invalid(format!("since {since:?} is not a cursor from /api/events")));
+            };
+            let found: Option<i64> =
+                self.conn.query_row("SELECT nonce FROM events WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+            if found != Some(nonce) {
+                return Ok(EventPage { events: Vec::new(), last: newest, reset: true });
+            }
+            id
+        };
+        let events = self.events_since(after, project_id, limit)?;
+        let last = match events.last() {
+            Some(e) => {
+                let nonce: i64 = self.conn.query_row("SELECT nonce FROM events WHERE id = ?1", [e.id], |r| r.get(0))?;
+                cursor(e.id, nonce)
+            }
+            // Nothing for this reader up to the newest event.
+            None => newest,
+        };
+        Ok(EventPage { events, last, reset: false })
+    }
+
     /// The ids of the oldest and the newest kept event, both 0 when there is none.
+    #[cfg(test)]
     pub fn event_range(&self) -> Result<(i64, i64)> {
         Ok(self
             .conn
@@ -884,14 +946,18 @@ impl Store {
             let before: i64 = c.query_row("SELECT coalesce(max(id), 0) FROM events", [], |r| r.get(0))?;
             // Only what the patch changes is written, and only then is the task newer.
             let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
+            let status = patch.status.as_deref().filter(|s| *s != current.status);
+            let position = status.map(|s| Self::end_of_column(c, s, id)).transpose()?;
+            // One statement, so one edit is one event: task.moved when the status changes too.
             c.execute(
                 &format!(
                     "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
                        human = coalesce(?3, human), tags = coalesce(?4, tags),
-                       description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
+                       description = coalesce(?5, description), url = coalesce(?7, url),
+                       status = coalesce(?8, status), position = coalesce(?9, position), updated_at = {NOW}
                      WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
-                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
-                       <> (title, project_id, human, tags, description, url)"
+                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url), coalesce(?8, status))
+                       <> (title, project_id, human, tags, description, url, status)"
                 ),
                 params![
                     title,
@@ -900,18 +966,11 @@ impl Store {
                     tags,
                     patch.description.as_deref().map(str::trim),
                     id,
-                    url
+                    url,
+                    status,
+                    position
                 ],
             )?;
-            if let Some(s) = &patch.status
-                && *s != current.status
-            {
-                let position = Self::end_of_column(c, s, id)?;
-                c.execute(
-                    &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
-                    params![s, position, id],
-                )?;
-            }
             if let Some(keys) = &patch.waits_on
                 && self.set_waits(c, id, keys)?
             {
@@ -946,19 +1005,19 @@ impl Store {
                         tags.push(tag.clone());
                     }
                 }
-                if tags != task.tags {
-                    c.execute(
-                        &format!("UPDATE tasks SET tags = ?1, updated_at = {NOW} WHERE id = ?2"),
-                        params![tags.join(","), id],
-                    )?;
+                let moved = status.filter(|s| *s != task.status);
+                if tags == task.tags && moved.is_none() {
+                    continue;
                 }
-                if let Some(s) = status.filter(|s| *s != task.status) {
-                    let position = Self::end_of_column(c, s, id)?;
-                    c.execute(
-                        &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
-                        params![s, position, id],
-                    )?;
-                }
+                let position = moved.map(|s| Self::end_of_column(c, s, id)).transpose()?;
+                // One statement per task, so one event per task.
+                c.execute(
+                    &format!(
+                        "UPDATE tasks SET tags = ?1, status = coalesce(?2, status), position = coalesce(?3, position),
+                           updated_at = {NOW} WHERE id = ?4"
+                    ),
+                    params![tags.join(","), moved, position, id],
+                )?;
             }
             Ok(())
         })
@@ -1599,6 +1658,25 @@ mod tests {
         assert_eq!(after.len(), 2);
         assert!(after.iter().any(|e| e.0 == "task.deleted" && e.1 == format!("api#{}", b.id)));
         assert!(after.contains(&updated()[0]), "losing what it waits on is an update");
+    }
+
+    #[test]
+    fn a_bulk_edit_with_a_move_is_one_event_per_task() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let a = s.create_task(p.id, "a", "").unwrap();
+        let b = s.create_task(p.id, "b", "").unwrap();
+        let start = s.last_event().unwrap();
+        s.update_tasks(&[a.id, b.id], Some("doing"), "bug", "").unwrap();
+        let events = kinds(&s, start);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.0 == "task.moved"));
+        let start = s.last_event().unwrap();
+        s.update_tasks(&[a.id, b.id], None, "", "bug").unwrap();
+        assert!(kinds(&s, start).iter().all(|e| e.0 == "task.updated"));
+        let start = s.last_event().unwrap();
+        s.update_tasks(&[a.id], Some("doing"), "", "").unwrap();
+        assert!(kinds(&s, start).is_empty(), "no change, no event");
     }
 
     #[test]
