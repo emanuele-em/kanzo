@@ -63,37 +63,50 @@ const MIGRATIONS: &[&str] = &[
          kind        TEXT NOT NULL,
          task_id     INTEGER NOT NULL,
          project_id  INTEGER NOT NULL,
+         project     TEXT NOT NULL DEFAULT '',
          status_from TEXT,
          status_to   TEXT,
          author      TEXT
      );
+     CREATE INDEX events_by_project ON events(project_id, id);
      CREATE TRIGGER events_task_created AFTER INSERT ON tasks BEGIN
-         INSERT INTO events (kind, task_id, project_id, status_to) VALUES ('task.created', new.id, new.project_id, new.status);
+         INSERT INTO events (kind, task_id, project_id, project, status_to)
+         VALUES ('task.created', new.id, new.project_id, (SELECT slug FROM projects WHERE id = new.project_id), new.status);
      END;
      CREATE TRIGGER events_task_moved AFTER UPDATE OF status ON tasks WHEN old.status IS NOT new.status BEGIN
-         INSERT INTO events (kind, task_id, project_id, status_from, status_to)
-         VALUES ('task.moved', new.id, new.project_id, old.status, new.status);
+         INSERT INTO events (kind, task_id, project_id, project, status_from, status_to)
+         VALUES ('task.moved', new.id, new.project_id, (SELECT slug FROM projects WHERE id = new.project_id),
+                 old.status, new.status);
      END;
      CREATE TRIGGER events_task_updated AFTER UPDATE ON tasks
      WHEN old.status IS new.status AND (old.title IS NOT new.title OR old.description IS NOT new.description
          OR old.tags IS NOT new.tags OR old.url IS NOT new.url OR old.human IS NOT new.human
          OR old.project_id IS NOT new.project_id) BEGIN
-         INSERT INTO events (kind, task_id, project_id, status_to) VALUES ('task.updated', new.id, new.project_id, new.status);
+         INSERT INTO events (kind, task_id, project_id, project, status_to)
+         VALUES ('task.updated', new.id, new.project_id, (SELECT slug FROM projects WHERE id = new.project_id), new.status);
      END;
-     CREATE TRIGGER events_task_deleted AFTER DELETE ON tasks BEGIN
-         INSERT INTO events (kind, task_id, project_id, status_from) VALUES ('task.deleted', old.id, old.project_id, old.status);
+     -- A deleted project reports its tasks before they go, while its slug is still known.
+     CREATE TRIGGER events_project_deleted BEFORE DELETE ON projects BEGIN
+         INSERT INTO events (kind, task_id, project_id, project, status_from)
+         SELECT 'task.deleted', t.id, t.project_id, old.slug, t.status FROM tasks t WHERE t.project_id = old.id ORDER BY t.id;
+     END;
+     CREATE TRIGGER events_task_deleted AFTER DELETE ON tasks
+     WHEN EXISTS (SELECT 1 FROM projects WHERE id = old.project_id) BEGIN
+         INSERT INTO events (kind, task_id, project_id, project, status_from)
+         VALUES ('task.deleted', old.id, old.project_id, (SELECT slug FROM projects WHERE id = old.project_id), old.status);
      END;
      CREATE TRIGGER events_comment_added AFTER INSERT ON comments BEGIN
-         INSERT INTO events (kind, task_id, project_id, status_to, author)
-         SELECT 'comment.added', t.id, t.project_id, t.status, new.author FROM tasks t WHERE t.id = new.task_id;
+         INSERT INTO events (kind, task_id, project_id, project, status_to, author)
+         SELECT 'comment.added', t.id, t.project_id, p.slug, t.status, new.author
+         FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = new.task_id;
      END;
-     CREATE TRIGGER events_waits_changed AFTER INSERT ON task_waits BEGIN
-         INSERT INTO events (kind, task_id, project_id, status_to)
-         SELECT 'task.updated', t.id, t.project_id, t.status FROM tasks t WHERE t.id = new.task_id;
-     END;
-     CREATE TRIGGER events_waits_removed AFTER DELETE ON task_waits BEGIN
-         INSERT INTO events (kind, task_id, project_id, status_to)
-         SELECT 'task.updated', t.id, t.project_id, t.status FROM tasks t WHERE t.id = old.task_id;
+     -- Edits to Waits on write their one event in set_waits. This covers the other way they
+     -- change: a task it waits on was deleted, while the waiting task stays.
+     CREATE TRIGGER events_blocker_deleted AFTER DELETE ON task_waits
+     WHEN NOT EXISTS (SELECT 1 FROM tasks WHERE id = old.waits_on_id) BEGIN
+         INSERT INTO events (kind, task_id, project_id, project, status_to)
+         SELECT 'task.updated', t.id, t.project_id, p.slug, t.status
+         FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = old.task_id;
      END;
      CREATE TRIGGER events_keep_recent AFTER INSERT ON events BEGIN
          DELETE FROM events WHERE id <= new.id - 10000;
@@ -386,10 +399,9 @@ impl Store {
     /// events are kept, so a reader that fell further behind starts at the oldest kept.
     pub fn events_since(&self, since: i64, project_id: Option<i64>, limit: usize) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT e.id, e.at, e.kind, e.task_id, coalesce(p.slug, ''), e.status_from, e.status_to, e.author
-             FROM events e LEFT JOIN projects p ON p.id = e.project_id
-             WHERE e.id > ?1 AND (?2 IS NULL OR e.project_id = ?2)
-             ORDER BY e.id LIMIT ?3",
+            "SELECT id, at, kind, task_id, project, status_from, status_to, author FROM events
+             WHERE id > ?1 AND (?2 IS NULL OR project_id = ?2)
+             ORDER BY id LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![since, project_id, limit as i64], |r| {
             let project: String = r.get(4)?;
@@ -407,9 +419,23 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The id of the newest event, 0 when there is none: where a new reader starts.
+    #[cfg(test)]
+    pub fn conn_for_tests(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// The id of the newest event, 0 when there is none.
+    #[cfg(test)]
     pub fn last_event(&self) -> Result<i64> {
         Ok(self.conn.prepare_cached("SELECT coalesce(max(id), 0) FROM events")?.query_row([], |r| r.get(0))?)
+    }
+
+    /// The ids of the oldest and the newest kept event, both 0 when there is none.
+    pub fn event_range(&self) -> Result<(i64, i64)> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT coalesce(min(id), 0), coalesce(max(id), 0) FROM events")?
+            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?)
     }
 
     pub fn now(&self) -> Result<String> {
@@ -795,6 +821,7 @@ impl Store {
             )?;
             let id = c.last_insert_rowid();
             if let Some(keys) = &patch.waits_on {
+                // Part of task.created.
                 self.set_waits(c, id, keys)?;
             }
             Ok(id)
@@ -803,7 +830,8 @@ impl Store {
     }
 
     /// Replaces what a task waits on. Part of the task's write, so a refused list changes nothing.
-    fn set_waits(&self, c: &Connection, id: i64, keys: &str) -> Result<()> {
+    /// Whether it changed anything.
+    fn set_waits(&self, c: &Connection, id: i64, keys: &str) -> Result<bool> {
         let mut ids = Vec::new();
         for key in keys.split(',').map(str::trim).filter(|k| !k.is_empty()) {
             ids.push(self.find_task(key)?.id);
@@ -811,7 +839,7 @@ impl Store {
         ids.sort_unstable();
         ids.dedup();
         if ids.iter().copied().eq(self.task_links(id, false)?.iter().map(|t| t.id)) {
-            return Ok(());
+            return Ok(false);
         }
         c.execute("DELETE FROM task_waits WHERE task_id = ?1", [id])?;
         for other in ids {
@@ -828,7 +856,7 @@ impl Store {
             c.execute("INSERT INTO task_waits (task_id, waits_on_id) VALUES (?1, ?2)", [id, other])?;
         }
         c.execute(&format!("UPDATE tasks SET updated_at = {NOW} WHERE id = ?1"), [id])?;
-        Ok(())
+        Ok(true)
     }
 
     /// What a task waits on, done or not, or with `blocks`, the tasks waiting on it.
@@ -853,6 +881,7 @@ impl Store {
         }
         self.write(|c| {
             let current = self.get_task(id)?;
+            let before: i64 = c.query_row("SELECT coalesce(max(id), 0) FROM events", [], |r| r.get(0))?;
             // Only what the patch changes is written, and only then is the task newer.
             let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
             c.execute(
@@ -883,8 +912,17 @@ impl Store {
                     params![s, position, id],
                 )?;
             }
-            if let Some(keys) = &patch.waits_on {
-                self.set_waits(c, id, keys)?;
+            if let Some(keys) = &patch.waits_on
+                && self.set_waits(c, id, keys)?
+            {
+                // One event per edit: only when the rest of the patch wrote none.
+                c.execute(
+                    "INSERT INTO events (kind, task_id, project_id, project, status_to)
+                     SELECT 'task.updated', t.id, t.project_id, p.slug, t.status FROM tasks t
+                     JOIN projects p ON p.id = t.project_id
+                     WHERE t.id = ?1 AND NOT EXISTS (SELECT 1 FROM events WHERE id > ?2 AND task_id = ?1)",
+                    [id, before],
+                )?;
             }
             Ok(())
         })?;
@@ -1528,16 +1566,74 @@ mod tests {
     }
 
     #[test]
-    fn waiting_on_another_task_is_an_update() {
+    fn editing_waits_on_is_one_update() {
         let (_dir, s) = store();
         let p = s.create_project("api", "", None).unwrap();
         let blocked = s.create_task(p.id, "blocked", "").unwrap();
-        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let b = s.create_task(p.id, "b", "").unwrap();
+        let c = s.create_task(p.id, "c", "").unwrap();
+        let key = format!("api#{}", blocked.id);
+        let updated = || vec![("task.updated".to_string(), key.clone(), None, Some("todo".to_string()))];
+
         let start = s.last_event().unwrap();
-        s.update_task(blocked.id, waits(&format!("#{}", blocker.id))).unwrap();
-        let events = s.events_since(start, None, 100).unwrap();
-        assert!(!events.is_empty());
-        assert!(events.iter().all(|e| e.kind == "task.updated" && e.task == format!("api#{}", blocked.id)));
+        s.update_task(blocked.id, waits(&format!("#{}", b.id))).unwrap();
+        assert_eq!(kinds(&s, start), updated());
+
+        let start = s.last_event().unwrap();
+        s.update_task(blocked.id, waits(&format!("#{}, #{}", b.id, c.id))).unwrap();
+        assert_eq!(kinds(&s, start), updated(), "replacing the list is still one event");
+
+        let start = s.last_event().unwrap();
+        s.update_task(blocked.id, waits(&format!("#{}, #{}", c.id, b.id))).unwrap();
+        assert!(kinds(&s, start).is_empty(), "the same list is no change");
+
+        let start = s.last_event().unwrap();
+        let patch = TaskPatch { title: Some("renamed".into()), waits_on: Some(String::new()), ..Default::default() };
+        s.update_task(blocked.id, patch).unwrap();
+        assert_eq!(kinds(&s, start), updated(), "title and waits on together are one event");
+
+        s.update_task(blocked.id, waits(&format!("#{}", b.id))).unwrap();
+        let start = s.last_event().unwrap();
+        s.delete_task(b.id).unwrap();
+        let after = kinds(&s, start);
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().any(|e| e.0 == "task.deleted" && e.1 == format!("api#{}", b.id)));
+        assert!(after.contains(&updated()[0]), "losing what it waits on is an update");
+    }
+
+    #[test]
+    fn deleting_a_project_reports_its_tasks_with_its_slug() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t1 = s.create_task(p.id, "one", "").unwrap();
+        let t2 = s.create_task(p.id, "two", "").unwrap();
+        s.update_task(t2.id, waits(&format!("#{}", t1.id))).unwrap();
+        let start = s.last_event().unwrap();
+        s.delete_project("api").unwrap();
+        let todo = Some("todo".to_string());
+        assert_eq!(
+            kinds(&s, start),
+            [
+                ("task.deleted".into(), format!("api#{}", t1.id), todo.clone(), None),
+                ("task.deleted".into(), format!("api#{}", t2.id), todo, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_last_ten_thousand_events_are_kept() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        s.conn
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10050)
+                 INSERT INTO events (kind, task_id, project_id, project) SELECT 'task.created', i, {}, 'api' FROM n;",
+                p.id
+            ))
+            .unwrap();
+        let (oldest, newest) = s.event_range().unwrap();
+        assert_eq!(newest - oldest + 1, 10_000);
+        assert_eq!(newest, 10_050);
     }
 
     #[test]

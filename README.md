@@ -142,8 +142,9 @@ A service can follow the board as it changes, like starting an agent when a task
 
 - **Start:** `GET /api/events` answers `{"events": [], "last": 41}`. Keep `last`.
 - **Follow:** `GET /api/events?since=41&wait=25` answers as soon as something changes, or after 25 seconds with no events. Pass the new `last` next time. Add `project=api` for one project.
-- **What you get:** each event has an `id`, `at`, `kind` (`task.created`, `task.moved`, `task.updated`, `task.deleted`, `comment.added`), `task` like `api#12`, `project`, and where it applies `from` and `to` (columns) and `author` (of a comment). Reordering cards in a column is no event.
+- **What you get:** each event has an `id`, `at`, `kind` (`task.created`, `task.moved`, `task.updated`, `task.deleted`, `comment.added`), `task` like `api#12`, `project`, and where it applies `from` and `to` (columns) and `author` (of a comment). One edit is one event; reordering cards in a column is none.
 - **Nothing is lost:** an event is written in the same transaction as the change. The last 10,000 are kept.
+- **Start over** when a reply says `"reset": true`: events after your `since` were dropped, or the board was replaced, as by `kanzo sync`. Read the board again, then go on from `last`.
 
 ## Filter and search
 

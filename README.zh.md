@@ -136,6 +136,16 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
   <img alt="任务面板的 Waits on 中输入了 log，列出两个可选任务；旁边是一张变暗的卡片，显示 Waits on #7" src="docs/img/waits-light.jpg">
 </picture>
 
+## 响应变化
+
+服务可以跟随看板的变化做出反应，例如任务进入 `todo` 时启动一个智能体，而不必一遍遍读取整个看板。
+
+- **开始：** `GET /api/events` 返回 `{"events": [], "last": 41}`。记住 `last`。
+- **跟随：** `GET /api/events?since=41&wait=25` 一有变化就返回，25 秒内没有事件也会返回。下次传入新的 `last`。加上 `project=api` 只看一个项目。
+- **内容：** 每个事件有 `id`、`at`、`kind`（`task.created`、`task.moved`、`task.updated`、`task.deleted`、`comment.added`）、`task`（如 `api#12`）、`project`，适用时还有 `from` 和 `to`（列）以及评论的 `author`。一次编辑就是一个事件；在同一列内调整顺序不算事件。
+- **不会丢失：** 事件与变更写在同一个事务里。保留最近 10,000 个。
+- 回复中出现 `"reset": true` 时**重新开始**：`since` 之后的事件已被丢弃，或看板已被替换（例如 `kanzo sync`）。重新读取看板，然后从 `last` 继续。
+
 ## 筛选和搜索
 
 > [!TIP]
