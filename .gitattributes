@@ -1,0 +1,3 @@
+# The board's CSP allows its inline script by hash, so the page must have the same
+# line endings in every build, Windows included.
+src/index.html text eol=lf
