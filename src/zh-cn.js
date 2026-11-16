@@ -173,6 +173,11 @@ const ZH_CN = {
   // Settings.
   "Board": "看板",
   "About": "关于",
+  "Theme": "主题",
+  "The appearance of the board's interface": "看板界面的外观",
+  "System": "跟随系统",
+  "Light": "浅色",
+  "Dark": "深色",
   "Language": "界面语言",
   "The language of the board's interface": "看板界面的显示语言",
   "Backlog column": "暂存列",

@@ -273,6 +273,7 @@ Settings on the board:
 
 - **Task properties:** turn one off, like tags or comments, to hide it there and leave it out of what agents get. Nothing is deleted.
 - **Language:** English or Chinese, under Board.
+- **Theme:** system, light or dark, under Board.
 - **What's new:** this version's notes, under About.
 
 ## Small and fast

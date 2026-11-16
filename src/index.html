@@ -7,8 +7,17 @@
 <link rel="icon" href="/logo.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon.png">
-<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f9f9f9">
-<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#000000">
+<meta name="theme-color" content="#f9f9f9">
+<script>
+// Restore the theme before the first paint, while app.js is still loading.
+(() => {
+  let theme;
+  try { theme = localStorage.getItem("kanzo.theme"); } catch {}
+  const dark = theme === "dark" || (theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  document.querySelector('meta[name="theme-color"]').content = dark ? "#000000" : "#f9f9f9";
+})();
+</script>
 <style>
 :root {
   --bg: #ffffff; --sidebar: #f9f9f9; --col: #f7f7f7; --card: #ffffff; --card-hover: #f4f4f4; --panel: #ffffff;
@@ -16,16 +25,15 @@
   --text: #0d0d0d; --muted: #5d5d5d; --faint: #8f8f8f; --border: #e5e5e5; --card-border: #ebebeb;
   --accent: #0d0d0d; --accent-text: #ffffff; --danger: #dc2626; --danger-bg: rgba(220, 38, 38, .08);
   --waits: #b45309; --link: #2563eb; --code: #f2f2f2; --shadow: 0 10px 30px rgba(0,0,0,.12);
-  color-scheme: light dark;
+  color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #000000; --sidebar: #000000; --col: #0b0b0b; --card: #171717; --card-hover: #1e1e1e; --panel: #0b0b0b;
-    --field: #171717; --hover: #1a1a1a; --active: #242424; --menu: #1c1c1c;
-    --text: #ececec; --muted: #a1a1a1; --faint: #6e6e6e; --border: #1f1f1f; --card-border: transparent;
-    --accent: #ffffff; --accent-text: #000000; --danger: #f87171; --danger-bg: rgba(248, 113, 113, .1);
-    --waits: #f5a524; --link: #7ab7ff; --code: #1c1c1c; --shadow: 0 10px 30px rgba(0,0,0,.6);
-  }
+:root[data-theme="dark"] {
+  --bg: #000000; --sidebar: #000000; --col: #0b0b0b; --card: #171717; --card-hover: #1e1e1e; --panel: #0b0b0b;
+  --field: #171717; --hover: #1a1a1a; --active: #242424; --menu: #1c1c1c;
+  --text: #ececec; --muted: #a1a1a1; --faint: #6e6e6e; --border: #1f1f1f; --card-border: transparent;
+  --accent: #ffffff; --accent-text: #000000; --danger: #f87171; --danger-bg: rgba(248, 113, 113, .1);
+  --waits: #f5a524; --link: #7ab7ff; --code: #1c1c1c; --shadow: 0 10px 30px rgba(0,0,0,.6);
+  color-scheme: dark;
 }
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--active) transparent; }
 html, body { height: 100%; margin: 0; }
@@ -639,6 +647,14 @@ html:not(.ready) aside { visibility: hidden; }
       </nav>
       <section class="settings-pane" data-section="board">
         <h3>Board</h3>
+        <label class="setting">
+          <span class="text">Theme<span>The appearance of the board's interface</span></span>
+          <select class="field" id="settings-theme" style="width:auto" aria-label="Theme">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
         <label class="setting">
           <span class="text">Backlog column<span>A column before todo, for tasks agents leave alone</span></span>
           <span class="switch"><input type="checkbox" id="settings-backlog" aria-label="Backlog column"><span></span></span>
