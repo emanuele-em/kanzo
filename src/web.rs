@@ -31,7 +31,8 @@ const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 const MANIFEST: &str = r##"{"id":"/","name":"Kanzo","start_url":"/","display":"standalone","background_color":"#ffffff","icons":[{"src":"/icon.png","sizes":"192x192 512x512","type":"image/png"}]}"##;
 
 /// Scripts only from this server, so even a bug in the Markdown renderer cannot run injected script.
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+/// The one inline script, which sets the theme before the first paint, runs by its hash.
+const CSP: &str = "default-src 'none'; script-src 'self' 'sha256-qbmIwOLWfXjTJcvp/pTTPC8bx25itrEad7276b6Vh5A='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
                    connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 pub async fn serve(home: Home, open: bool) -> Result<()> {
@@ -951,6 +952,15 @@ mod tests {
                 "should end with a link to its pull request or commit, after any `thanks @name`: {line}"
             );
         }
+    }
+
+    #[test]
+    fn csp_allows_the_inline_theme_script() {
+        use base64::Engine;
+        use sha2::Digest;
+        let script = INDEX.split("<script>").nth(1).and_then(|s| s.split("</script>").next()).unwrap();
+        let hash = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(script));
+        assert!(CSP.contains(&format!("'sha256-{hash}'")), "put 'sha256-{hash}' in CSP's script-src");
     }
 
     /// The status of asking a board to open `path`, from `from`.

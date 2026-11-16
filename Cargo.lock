@@ -708,6 +708,7 @@ version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "clap",
  "dirs",
  "if-addrs",
@@ -717,6 +718,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-util",
