@@ -265,6 +265,7 @@ port = 4242
 listen = "127.0.0.1"   # 共享会把看板开放给你的网络；"0.0.0.0" 会让它一直开放
 mcp_http = true        # MCP 地址为 /mcp
 editor = "/usr/local/bin/cursor"   # 用来打开 file:/// 链接；在 macOS 上不设置时使用你的文本编辑器
+hosts = ["board.example.ts.net"]   # 本机反向代理对外使用的名称；通过它们访问时不能打开文件或更改共享
 ```
 
 这些设置只保存在各自的电脑上：`kanzo sync` 不会同步它们。

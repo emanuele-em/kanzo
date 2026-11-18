@@ -265,6 +265,7 @@ port = 4242
 listen = "127.0.0.1"   # sharing opens the board to your network; "0.0.0.0" keeps it open
 mcp_http = true        # MCP at /mcp
 editor = "/usr/local/bin/cursor"   # opens file:/// links; on macOS, your text editor without it
+hosts = ["board.example.ts.net"]   # names a reverse proxy here serves the board under; they can't open files or change sharing
 ```
 
 These settings stay on each machine: `kanzo sync` leaves them out.
