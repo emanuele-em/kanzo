@@ -1874,9 +1874,12 @@ function renderNetwork() {
   const net = state.net;
   const button = $("#network");
   // Opened from another computer's browser, the board can't tell which computer it is on.
-  const away = !net && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  // The base URL, not location: it is the board's address even where the page runs
+  // without one of its own, as in an app that shows the board in a sandboxed frame.
+  const here = new URL(document.baseURI).hostname;
+  const away = !net && !["localhost", "127.0.0.1", "[::1]"].includes(here);
   const hosted = net?.state === "joined" || away;
-  const host = net?.host?.replace(/:4242$/, "") || location.hostname;
+  const host = net?.host?.replace(/:4242$/, "") || here;
   const n = state.guests;
   const shared = hosted || n != null;
   const computers = n == null ? "" : tr(": {0} connected", plural(n, "computer"));
