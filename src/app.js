@@ -812,8 +812,8 @@ $("#columns").addEventListener("mousedown", (e) => {
   sweep(e);
 });
 
-async function changeSelected(change) {
-  const ids = state.board.tasks.filter((t) => state.selected.has(t.id)).map((t) => t.id);
+async function changeSelected(change, selected = state.selected) {
+  const ids = state.board.tasks.filter((t) => selected.has(t.id)).map((t) => t.id);
   try { await api("POST", "/tasks/bulk", { ids, ...change }); } catch (err) { toast(err.message); }
   loadBoard();
 }
@@ -828,7 +828,8 @@ $("#bulk-status").addEventListener("change", (e) => {
   e.target.value = "";
 });
 $("#bulk-delete").addEventListener("click", async () => {
-  if (await ask(`Delete ${plural(state.selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true });
+  const selected = new Set(state.selected);
+  if (await ask(`Delete ${plural(selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true }, selected);
 });
 $("#bulk-clear").addEventListener("click", clearSelection);
 
@@ -1667,11 +1668,12 @@ $("#p-comment").addEventListener("keydown", (e) => {
 
 $("#p-delete").addEventListener("click", async () => {
   if (!panelTask) return;
-  const extra = panelTask.comments ? tr(" and its {0}", plural(panelTask.comments, "comment")) : "";
-  if (!(await ask(tr("Delete {0}{1}? This cannot be undone.", key(panelTask), extra)))) return;
+  const task = panelTask;
+  const extra = task.comments ? tr(" and its {0}", plural(task.comments, "comment")) : "";
+  if (!(await ask(tr("Delete {0}{1}? This cannot be undone.", key(task), extra)))) return;
   try {
-    if (fresh === panelTask.id) fresh = null;
-    await api("DELETE", `/tasks/${panelTask.id}`);
+    if (fresh === task.id) fresh = null;
+    await api("DELETE", `/tasks/${task.id}`);
     closeTask();
     loadBoard();
   } catch (err) { toast(err.message); }
@@ -1737,6 +1739,8 @@ $("#search").addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  // The board waits behind a question, as it would behind confirm().
+  if (!$("#ask-dialog").hidden) return;
   const typing = e.target.closest("input, textarea, select");
   const plain = !typing && !e.metaKey && !e.ctrlKey;
   if (e.key === "Escape" && state.menu) { closeMenu(); return; }
