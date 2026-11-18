@@ -213,5 +213,6 @@ const ZH_CN = {
   "GitHub repo": "GitHub 仓库",
   "Letters, digits and -, up to 32": "字母、数字和 -，最长 32 个",
   "Cancel": "取消",
+  "OK": "确定",
   "Create": "创建",
 };
