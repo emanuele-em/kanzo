@@ -451,6 +451,8 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .dialog-window h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .dialog-window p { margin: 0; color: var(--muted); line-height: 1.45; }
 .dialog-window .row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+#ask { width: min(420px, 100%); }
+#ask-text { color: var(--text); white-space: pre-line; }
 .settings-window {
   width: min(760px, 100%); height: min(460px, 76vh); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden;
   background: var(--panel); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow);
@@ -730,6 +732,15 @@ html:not(.ready) aside { visibility: hidden; }
     <div class="row">
       <button class="btn" type="button" id="new-project-cancel">Cancel</button>
       <button class="btn primary" type="submit">Create</button>
+    </div>
+  </form>
+</div>
+<div class="search-dialog" id="ask-dialog" hidden>
+  <form class="dialog-window" id="ask" role="alertdialog" aria-modal="true" aria-describedby="ask-text">
+    <p id="ask-text"></p>
+    <div class="row">
+      <button class="btn" type="button" id="ask-cancel">Cancel</button>
+      <button class="btn primary" type="submit" id="ask-ok">OK</button>
     </div>
   </form>
 </div>

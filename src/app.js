@@ -693,7 +693,7 @@ function renderHeader() {
 
 async function deleteProject(p) {
   const tasks = p.total ? tr(" and its {0}, with their comments", plural(p.total, "task")) : "";
-  if (!confirm(tr("Delete project {0}{1}? This cannot be undone.", p.slug, tasks))) return;
+  if (!(await ask(tr("Delete project {0}{1}? This cannot be undone.", p.slug, tasks)))) return;
   try {
     await api("DELETE", `/projects/${encodeURIComponent(p.slug)}`);
     if (panelTask?.project === p.slug) { fresh = null; closeTask(); }
@@ -876,8 +876,8 @@ $("#columns").addEventListener("mousedown", (e) => {
   sweep(e);
 });
 
-async function changeSelected(change) {
-  const ids = state.board.tasks.filter((t) => state.selected.has(t.id)).map((t) => t.id);
+async function changeSelected(change, selected = state.selected) {
+  const ids = state.board.tasks.filter((t) => selected.has(t.id)).map((t) => t.id);
   try { await api("POST", "/tasks/bulk", { ids, ...change }); } catch (err) { toast(err.message); }
   loadBoard();
 }
@@ -891,8 +891,9 @@ $("#bulk-status").addEventListener("change", (e) => {
   changeSelected({ status: e.target.value });
   e.target.value = "";
 });
-$("#bulk-delete").addEventListener("click", () => {
-  if (confirm(`Delete ${plural(state.selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true });
+$("#bulk-delete").addEventListener("click", async () => {
+  const selected = new Set(state.selected);
+  if (await ask(`Delete ${plural(selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true }, selected);
 });
 $("#bulk-clear").addEventListener("click", clearSelection);
 
@@ -1272,6 +1273,29 @@ function hideNewProject() {
   $("#project-dialog").hidden = true;
 }
 
+// The browser's own confirm dialog, in the page: a browser can turn the native one
+// off, as a sandboxed frame does, and it then answers Cancel without asking.
+let answerAsk = null;
+
+function ask(message) {
+  answerAsk?.(false);
+  const back = document.activeElement;
+  $("#ask-text").textContent = message;
+  $("#ask-dialog").hidden = false;
+  $("#ask-ok").focus();
+  return new Promise((resolve) => {
+    answerAsk = (yes) => {
+      answerAsk = null;
+      $("#ask-dialog").hidden = true;
+      back?.focus?.();
+      resolve(yes);
+    };
+  });
+}
+
+$("#ask").addEventListener("submit", (e) => { e.preventDefault(); answerAsk?.(true); });
+$("#ask-cancel").addEventListener("click", () => answerAsk?.(false));
+
 $("#new-task").addEventListener("click", newTask);
 $("#human-only").addEventListener("click", () => setHumanOnly(!isHumanOnly()));
 let filterTimer;
@@ -1391,7 +1415,7 @@ async function refreshTask() {
 }
 
 async function deleteComment(c) {
-  if (!confirm(tr("Delete this comment? This cannot be undone."))) return;
+  if (!(await ask(tr("Delete this comment? This cannot be undone.")))) return;
   try {
     await api("DELETE", `/comments/${c.id}`);
     await refreshTask();
@@ -1708,11 +1732,12 @@ $("#p-comment").addEventListener("keydown", (e) => {
 
 $("#p-delete").addEventListener("click", async () => {
   if (!panelTask) return;
-  const extra = panelTask.comments ? tr(" and its {0}", plural(panelTask.comments, "comment")) : "";
-  if (!confirm(tr("Delete {0}{1}? This cannot be undone.", key(panelTask), extra))) return;
+  const task = panelTask;
+  const extra = task.comments ? tr(" and its {0}", plural(task.comments, "comment")) : "";
+  if (!(await ask(tr("Delete {0}{1}? This cannot be undone.", key(task), extra)))) return;
   try {
-    if (fresh === panelTask.id) fresh = null;
-    await api("DELETE", `/tasks/${panelTask.id}`);
+    if (fresh === task.id) fresh = null;
+    await api("DELETE", `/tasks/${task.id}`);
     closeTask();
     loadBoard();
   } catch (err) { toast(err.message); }
@@ -1778,6 +1803,8 @@ $("#search").addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  // The board waits behind a question, as it would behind confirm().
+  if (!$("#ask-dialog").hidden) return;
   const typing = e.target.closest("input, textarea, select");
   const plain = !typing && !e.metaKey && !e.ctrlKey;
   if (e.key === "Escape" && state.menu) { closeMenu(); return; }
@@ -1866,15 +1893,15 @@ async function syncNow(keep) {
   if (diverged) chooseSide(diverged);
 }
 
-function chooseSide({ first }) {
+async function chooseSide({ first }) {
   const repo = repoName(syncRemote);
   if (first) {
-    if (confirm(tr("{0} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.", repo))) syncNow("remote");
-    else if (confirm(tr("Replace the board in {0} with this machine's board instead?", repo))) syncNow("local");
+    if (await ask(tr("{0} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.", repo))) syncNow("remote");
+    else if (await ask(tr("Replace the board in {0} with this machine's board instead?", repo))) syncNow("local");
     return;
   }
-  if (confirm(tr("This machine and another one both changed the board since the last sync, and boards can't be merged.\n\nKeep THIS machine's board, and overwrite the other one?"))) syncNow("local");
-  else if (confirm(tr("Take the other machine's board instead? This machine's board is kept in kanzo.db.bak."))) syncNow("remote");
+  if (await ask(tr("This machine and another one both changed the board since the last sync, and boards can't be merged.\n\nKeep THIS machine's board, and overwrite the other one?"))) syncNow("local");
+  else if (await ask(tr("Take the other machine's board instead? This machine's board is kept in kanzo.db.bak."))) syncNow("remote");
 }
 
 let syncRemote = null;
@@ -1928,9 +1955,12 @@ function renderNetwork() {
   const net = state.net;
   const button = $("#network");
   // Opened from another computer's browser, the board can't tell which computer it is on.
-  const away = !net && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  // The base URL, not location: it is the board's address even where the page runs
+  // without one of its own, as in an app that shows the board in a sandboxed frame.
+  const here = new URL(document.baseURI).hostname;
+  const away = !net && !["localhost", "127.0.0.1", "[::1]"].includes(here);
   const hosted = net?.state === "joined" || away;
-  const host = net?.host?.replace(/:4242$/, "") || location.hostname;
+  const host = net?.host?.replace(/:4242$/, "") || here;
   const n = state.guests;
   const shared = hosted || n != null;
   const computers = n == null ? "" : tr(": {0} connected", plural(n, "computer"));
@@ -2098,7 +2128,7 @@ $("#settings-nav").addEventListener("click", (e) => {
 });
 $("#settings-close").addEventListener("click", closeSettings);
 for (const [dialog, close] of [[$("#project-dialog"), hideNewProject], [$("#search-dialog"), closeSearch],
-                               [$("#settings-dialog"), closeSettings]]) {
+                               [$("#settings-dialog"), closeSettings], [$("#ask-dialog"), () => answerAsk?.(false)]]) {
   dialog.addEventListener("mousedown", (e) => { if (e.target === dialog) close(); });
   dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
 }
@@ -2157,10 +2187,10 @@ function showUpdate({ current, available }, board = "local") {
   if (!available) return;
   button.querySelector("span:last-child").textContent = tr(UPDATE_TEXT[board].label, available);
   button.title = board === "shared" ? tr("The shared board has {0}", current) : tr("You have {0}", current);
-  const ask = board === "shared"
+  const question = board === "shared"
     ? tr("Update the shared board from {0} to {1}? It restarts, which takes a few seconds.", current, available)
     : tr("Update Kanzo from {0} to {1}? The board restarts, which takes a few seconds.", current, available);
-  button.onclick = () => { if (confirm(ask)) installUpdate(available, board); };
+  button.onclick = async () => { if (await ask(question)) installUpdate(available, board); };
 }
 
 async function checkForUpdates() {
@@ -2169,7 +2199,7 @@ async function checkForUpdates() {
     const status = await api("GET", "/update?now=1", null, "local");
     showUpdate(status);
     if (status.available) {
-      if (confirm(tr("Kanzo {0} is out (you have {1}). Download and install it now? The board restarts.", status.available, status.current))) {
+      if (await ask(tr("Kanzo {0} is out (you have {1}). Download and install it now? The board restarts.", status.available, status.current))) {
         installUpdate(status.available);
       }
     } else if (status.latest) {
