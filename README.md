@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  English | <a href="README.zh.md">简体中文</a>
+  English | <a href="README.zh.md">简体中文</a> | <a href="README.tr.md">Türkçe</a>
 </p>
 
 Kanzo is a kanban board in your browser and an MCP server in one 4.7 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and it works.
@@ -25,7 +25,7 @@ You never edit a file. Everything is done in one of three places:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, a task is made to wait on another, two selected tasks are dragged together, a list groups the tasks by status, the sidebar folds, Laptop A shares the board and Laptop B joins it" src="docs/img/board-light.gif">
+  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, a task is made to wait on another, two selected tasks are dragged together, a list groups the tasks by status, the sidebar folds, Laptop A shares the board and Laptop B joins it, with the shared projects in its sidebar under its own" src="docs/img/board-light.gif">
 </picture>
 
 ## Install
@@ -82,6 +82,7 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 - **List view:** the list icon shows the same tasks as rows to sort and group.
 - **Human tasks:** mark a task Human and agents leave it to you. The person icon shows only those.
 - **Images:** paste or drop one into a task or a comment.
+- **Move to another project:** pick it in a task's panel. Its number stays, so `api#12` becomes `web#12`. Agents move it with `project`.
 - **Links:** give a task a URL, like its pull request, and open it from its card. Agents set it with `url`.
 - **Files:** `[name](file:///path)` in a description or comment opens in your editor.
 - **Task panel:** drag its left edge to resize it, or expand it to the whole window. Double-click the edge to reset it.
@@ -188,10 +189,10 @@ Several computers, one board, at the same time: everyone sees the same tasks, an
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/join-dark.jpg">
-  <img alt="The share popover on another computer: connected to the shared board, with a Leave button" src="docs/img/join-light.jpg">
+  <img alt="Another computer connected to the shared board: its sidebar lists this computer's projects, then the shared board's, and the share popover has a Leave button" src="docs/img/join-light.jpg">
 </picture>
 
-Nothing restarts and nothing needs configuring. Their board shows the shared one, and their agents use it through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
+Nothing restarts and nothing needs configuring. Their sidebar shows the shared board's projects under their own, so their private projects stay one click away, and their agents use the shared board through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
 
 From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`.
 

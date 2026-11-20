@@ -9,7 +9,7 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{any, delete, get, patch, post};
 use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -58,7 +58,7 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
     println!("Kanzo board at {url}, data in {}", home.dir.display());
     match guard.net() {
         Net::Private => {}
-        Net::Joined(host) => println!("It shows the board at {host}."),
+        Net::Joined(host) => println!("It also shows the board at {host}."),
         _ => {
             println!("{}", guard.status().message());
             println!("Anyone who can reach port {port} can read and change this board.");
@@ -174,16 +174,19 @@ async fn stop_signal() {
 }
 
 fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router {
-    let mut shared = Router::new();
+    // A joined board sends its agents to the shared one, while its page shows both boards.
+    let mut agents = Router::new();
     if home.config.mcp_http {
-        shared = shared.nest_service("/mcp", crate::mcp::http_service(home.clone(), shutdown));
+        agents = agents
+            .nest_service("/mcp", crate::mcp::http_service(home.clone(), shutdown))
+            .route_layer(middleware::from_fn_with_state(guard.clone(), forward));
     }
-    let shared = shared
+    let board = Router::new()
         .route("/images/{file}", get(image_file))
         .route("/api/changes", get(changes))
         .route("/api/board", get(board))
         .route("/api/search", get(search))
-        .route("/api/projects", post(create_project))
+        .route("/api/projects", get(projects).post(create_project))
         .route("/api/projects/{slug}", patch(update_project).delete(delete_project))
         .route("/api/projects/{slug}/repos", post(link_repo).delete(unlink_repo))
         .route("/api/projects/{slug}/move", post(move_project))
@@ -198,8 +201,7 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/images/{id}", delete(delete_image))
         .route("/api/tasks/{id}/images", post(attach_image))
         .route("/api/sync", get(sync_status).post(sync_now).put(sync_repo))
-        .route("/api/settings", patch(update_settings))
-        .route_layer(middleware::from_fn_with_state(guard.clone(), forward));
+        .route("/api/settings", patch(update_settings));
     Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
@@ -220,9 +222,11 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
             "/api/network",
             get(network).post(change_network).route_layer(middleware::from_fn_with_state(guard.clone(), this_computer)),
         )
-        // Not forwarded by a joined board either: the files are on this computer.
+        // The files are on this computer, whichever board the task is on.
         .route("/api/open", post(open_file).route_layer(middleware::from_fn_with_state(guard.clone(), this_computer)))
-        .merge(shared)
+        .route("/remote/{*path}", any(remote))
+        .merge(board)
+        .merge(agents)
         .layer(Extension(guard.clone()))
         .layer(middleware::from_fn_with_state(guard, protect))
         .layer(middleware::map_response(stamp_version))
@@ -366,6 +370,20 @@ async fn forward(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> R
     }
 }
 
+/// The shared board, for the page of a board that joined it: `/remote/api/board` is its `/api/board`.
+async fn remote(Extension(guard): Extension<Arc<Guard>>, mut req: Request) -> Response {
+    let Net::Joined(host) = guard.net() else {
+        return fail(StatusCode::NOT_FOUND, "this board has not joined another").into_response();
+    };
+    let path = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    let path = path.strip_prefix("/remote").unwrap_or(path);
+    match path.parse() {
+        Ok(uri) => *req.uri_mut() = uri,
+        Err(e) => return fail(StatusCode::BAD_REQUEST, e).into_response(),
+    }
+    share::forward(&host, req).await
+}
+
 /// A reverse proxy here connects from 127.0.0.1 for whoever reaches it, so a request for one
 /// of `hosts` counts as from another computer too.
 async fn this_computer(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
@@ -461,11 +479,28 @@ fn change_token(home: &Home, s: &Store) -> store::Result<String> {
 struct Changes {
     changes: String,
     guests: Option<usize>,
+    /// The shared board this one joined, so its page shows it, or stops, from the next check.
+    joined: Option<String>,
 }
 
 async fn changes(State(home): Shared, Extension(guard): Extension<Arc<Guard>>) -> Response {
     let guests = guard.lan().then(|| guard.guests().len());
-    with_store(home, move |h, s| Ok(Changes { changes: change_token(h, s)?, guests })).await
+    let joined = match guard.net() {
+        Net::Joined(host) => Some(host),
+        _ => None,
+    };
+    with_store(home, move |h, s| Ok(Changes { changes: change_token(h, s)?, guests, joined })).await
+}
+
+#[derive(Serialize)]
+struct Projects {
+    changes: String,
+    projects: Vec<store::Project>,
+}
+
+/// The sidebar of a board that joined another lists both boards' projects, without their tasks.
+async fn projects(State(home): Shared) -> Response {
+    with_store(home, move |h, s| Ok(Projects { changes: change_token(h, s)?, projects: s.list_projects()? })).await
 }
 
 /// The done column only grows, and every change reloads the board.
@@ -1038,6 +1073,133 @@ mod tests {
             assert_eq!(open_from(&home, None, &format!("{file}.missing")).await, "400");
             #[cfg(unix)]
             assert_eq!(open_from(&home, None, file).await, "200");
+        });
+    }
+
+    /// A board for `home` on a free port, on the network the way `net` says.
+    async fn serve_board(home: &Home, net: Net) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), net, Vec::new()));
+        let app = router(home.clone(), guard, CancellationToken::new());
+        tokio::spawn(
+            async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await },
+        );
+        port
+    }
+
+    /// The status and body of `GET path` on the board at `port`.
+    async fn get(port: u16, path: &str) -> (u16, String) {
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let head = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        conn.write_all(head.as_bytes()).await.unwrap();
+        let mut reply = Vec::new();
+        conn.read_to_end(&mut reply).await.unwrap();
+        let reply = String::from_utf8_lossy(&reply).into_owned();
+        let status = reply.split(' ').nth(1).unwrap().parse().unwrap();
+        let body = reply.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_string();
+        (status, body)
+    }
+
+    fn slugs(body: &str) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        value["projects"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// A host sharing a board with project `api`, and a guest joined to it with its own project `mine`.
+    async fn joined_boards() -> (tempfile::TempDir, tempfile::TempDir, u16, u16) {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host = Home::open(host_dir.path().to_path_buf()).unwrap();
+        host.store().unwrap().create_project("api", "API", None).unwrap();
+        let host_port = serve_board(&host, Net::Sharing).await;
+
+        let guest_dir = tempfile::tempdir().unwrap();
+        let guest = Home::open(guest_dir.path().to_path_buf()).unwrap();
+        guest.store().unwrap().create_project("mine", "Mine", None).unwrap();
+        let guest_port = serve_board(&guest, Net::Joined(format!("127.0.0.1:{host_port}"))).await;
+        (host_dir, guest_dir, host_port, guest_port)
+    }
+
+    #[test]
+    fn a_joined_board_keeps_showing_its_own_projects() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (_host_dir, _guest_dir, _, guest) = joined_boards().await;
+            let (status, body) = get(guest, "/api/board").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["mine"]);
+        });
+    }
+
+    #[test]
+    fn a_joined_board_reaches_the_shared_one_under_remote() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (_host_dir, _guest_dir, _, guest) = joined_boards().await;
+            let (status, body) = get(guest, "/remote/api/board").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["api"]);
+            let (status, body) = get(guest, "/remote/api/projects").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["api"]);
+        });
+    }
+
+    #[test]
+    fn only_a_joined_board_has_a_remote_one() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = Home::open(tmp.path().to_path_buf()).unwrap();
+            let port = serve_board(&home, Net::Private).await;
+            let (status, body) = get(port, "/remote/api/board").await;
+            assert_eq!(status, 404, "{body}");
+            assert!(body.contains("not joined"), "{body}");
+        });
+    }
+
+    #[test]
+    fn projects_lists_a_board_without_its_tasks() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = Home::open(tmp.path().to_path_buf()).unwrap();
+            home.store().unwrap().create_project("web", "Web", None).unwrap();
+            let port = serve_board(&home, Net::Private).await;
+            let (status, body) = get(port, "/api/projects").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["web"]);
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(value["changes"].is_string(), "{body}");
+            assert!(value.get("tasks").is_none(), "{body}");
+        });
+    }
+
+    #[test]
+    fn a_joined_board_sees_the_update_the_shared_one_can_take() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            update::pretend_latest("999.0.0");
+            let (_host_dir, _guest_dir, _, guest) = joined_boards().await;
+            let (status, body) = get(guest, "/remote/api/update").await;
+            assert_eq!(status, 200, "{body}");
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["current"], update::CURRENT, "{body}");
+            assert_eq!(value["available"], "999.0.0", "{body}");
+        });
+    }
+
+    #[test]
+    fn changes_say_which_board_this_one_joined() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (_host_dir, _guest_dir, host, guest) = joined_boards().await;
+            let (_, body) = get(guest, "/api/changes").await;
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["joined"], format!("127.0.0.1:{host}"), "{body}");
+            let (_, body) = get(host, "/api/changes").await;
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(value["joined"].is_null(), "{body}");
         });
     }
 

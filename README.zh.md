@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> | 简体中文
+  <a href="README.md">English</a> | 简体中文 | <a href="README.tr.md">Türkçe</a>
 </p>
 
 Kanzo 把浏览器里的看板和 MCP 服务器装进一个 4.7 MB 的程序，让你和你的编程智能体处理同一批任务：可以在一台电脑上，也可以让多台电脑共享一个看板。无需账号，无需服务器，无需配置：运行 `kanzo` 就能用。
@@ -25,7 +25,7 @@ Kanzo 把浏览器里的看板和 MCP 服务器装进一个 4.7 MB 的程序，�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="Kanzo 看板：智能体移动卡片，你在一旁看着；⌘K 在所有项目中查找任务；让一个任务等待另一个任务；拖动两个选中的任务；列表按状态分组显示任务；折叠侧边栏；笔记本 A 共享看板，笔记本 B 加入" src="docs/img/board-light.gif">
+  <img alt="Kanzo 看板：智能体移动卡片，你在一旁看着；⌘K 在所有项目中查找任务；让一个任务等待另一个任务；拖动两个选中的任务；列表按状态分组显示任务；折叠侧边栏；笔记本 A 共享看板，笔记本 B 加入，共享的项目显示在它自己的项目下方" src="docs/img/board-light.gif">
 </picture>
 
 ## 安装
@@ -82,6 +82,7 @@ kanzo
 - **列表视图：** 列表图标会把同样的任务显示成可排序、可分组的行。
 - **人工任务：** 把任务标记为“人工”后，智能体会把它留给你。人物图标只显示这些任务。
 - **图片：** 粘贴或拖放到任务或评论中。
+- **移到其他项目：** 在任务面板中选择项目。编号不变，`api#12` 会变成 `web#12`。智能体通过 `project` 移动。
 - **链接：** 给任务设置 URL，比如它的拉取请求，就能从卡片上打开。智能体通过 `url` 设置。
 - **文件：** 描述或评论中的 `[name](file:///path)` 会在你的编辑器中打开。
 - **任务面板：** 拖动左边缘可调整大小，也可以展开到整个窗口。双击边缘可恢复。
@@ -188,10 +189,10 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/join-dark.jpg">
-  <img alt="另一台电脑上的共享弹窗：已连接到共享看板，并有一个“离开”按钮" src="docs/img/join-light.jpg">
+  <img alt="另一台电脑已连接到共享看板：侧边栏先列出本电脑的项目，再列出共享看板的项目，共享弹窗中有一个“离开”按钮" src="docs/img/join-light.jpg">
 </picture>
 
-不用重启，也不用配置。它们的看板会显示共享的看板，它们的智能体通过同样的 `kanzo mcp` 使用它，仍然根据所在仓库找到项目。你可以随时关闭共享，或点击 **离开**。
+不用重启，也不用配置。它们的侧边栏会在自己的项目下方显示共享看板的项目，私有项目仍然一键可达；它们的智能体通过同样的 `kanzo mcp` 使用它，仍然根据所在仓库找到项目。你可以随时关闭共享，或点击 **离开**。
 
 在终端中，或者对智能体来说，命令是 `kanzo share on` 和 `kanzo join <address>`，然后是 `kanzo share off` 和 `kanzo leave`。
 
