@@ -28,7 +28,7 @@ Hiçbir dosyayı elle düzenlemezsin. Her şey şu üç yerden birinde yapılır
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="Kanzo panosu: sen izlerken ajanlar kartları taşıyor, ⌘K herhangi bir projedeki görevi buluyor, bir görev başka birini bekleyecek şekilde ayarlanıyor, seçilen iki görev birlikte sürükleniyor, liste görevleri duruma göre grupluyor, kenar çubuğu daralıyor, Dizüstü A panoyu paylaşıyor ve Dizüstü B katılıyor" src="docs/img/board-light.gif">
+  <img alt="Kanzo panosu: sen izlerken ajanlar kartları taşıyor, ⌘K herhangi bir projedeki görevi buluyor, bir görev başka birini bekleyecek şekilde ayarlanıyor, seçilen iki görev birlikte sürükleniyor, liste görevleri duruma göre grupluyor, kenar çubuğu daralıyor, Dizüstü A panoyu paylaşıyor ve Dizüstü B katılıyor; paylaşılan projeler kenar çubuğunda kendi projelerinin altında görünüyor" src="docs/img/board-light.gif">
 </picture>
 
 ## Kurulum
@@ -191,7 +191,7 @@ Birden çok bilgisayar, tek pano, aynı anda: herkes aynı görevleri görür ve
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/join-dark.jpg">
-  <img alt="Başka bir bilgisayardaki paylaşma penceresi: paylaşılan panoya bağlı, Leave düğmesiyle" src="docs/img/join-light.jpg">
+  <img alt="Paylaşılan panoya bağlı başka bir bilgisayar: kenar çubuğu önce bu bilgisayarın projelerini, sonra paylaşılan panonunkileri listeliyor; paylaşma penceresinde Leave düğmesi var" src="docs/img/join-light.jpg">
 </picture>
 
 Hiçbir şey yeniden başlamaz ve hiçbir şeyi ayarlamak gerekmez. Kenar çubukları, paylaşılan panonun projelerini kendi projelerinin altında gösterir, böylece özel projeleri bir tık uzakta kalır; ajanları da paylaşılan panoyu aynı `kanzo mcp` üzerinden kullanır ve projeyi hâlâ çalıştıkları repodan bulur. Paylaşımı istediğin an kapat ya da **Leave**'e tıkla.

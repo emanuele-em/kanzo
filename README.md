@@ -25,7 +25,7 @@ You never edit a file. Everything is done in one of three places:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, a task is made to wait on another, two selected tasks are dragged together, a list groups the tasks by status, the sidebar folds, Laptop A shares the board and Laptop B joins it" src="docs/img/board-light.gif">
+  <img alt="The Kanzo board: agents move cards while you watch, ⌘K finds a task in any project, a task is made to wait on another, two selected tasks are dragged together, a list groups the tasks by status, the sidebar folds, Laptop A shares the board and Laptop B joins it, with the shared projects in its sidebar under its own" src="docs/img/board-light.gif">
 </picture>
 
 ## Install
@@ -188,7 +188,7 @@ Several computers, one board, at the same time: everyone sees the same tasks, an
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/join-dark.jpg">
-  <img alt="The share popover on another computer: connected to the shared board, with a Leave button" src="docs/img/join-light.jpg">
+  <img alt="Another computer connected to the shared board: its sidebar lists this computer's projects, then the shared board's, and the share popover has a Leave button" src="docs/img/join-light.jpg">
 </picture>
 
 Nothing restarts and nothing needs configuring. Their sidebar shows the shared board's projects under their own, so their private projects stay one click away, and their agents use the shared board through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
