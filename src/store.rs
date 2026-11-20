@@ -54,6 +54,53 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER task_waits_insert AFTER INSERT ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;
      CREATE TRIGGER task_waits_delete AFTER DELETE ON task_waits BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     "ALTER TABLE projects ADD COLUMN position REAL;",
+    // An edit version for every task, for update_task's optional `if_version` guard. A task's version is the
+    // `rev` of its row here: 128 random bits from SQLite, new at every meaningful write. Not a counter, and
+    // not a hash of the content: two copies of a board file that are each edited have each task's version
+    // diverge on its own, so a version read from one copy is never taken by the other's different task, and
+    // a task recreated under an old id never gets an old version. Triggers, not Store methods, bump it, so
+    // writes by the board, bulk edits and older Kanzo versions count too. It moves only when what an edit
+    // can overwrite changes: the fields below and the task's own wait list. Not the position, `updated_at`,
+    // comments, other tasks, or what a task waits on getting done or renamed. The WHEN clause skips a write
+    // that sets a value it already has. A new version is a DELETE then an INSERT, not INSERT OR REPLACE:
+    // inside a trigger, an OR clause on the statement that fired it would override that one. No foreign key:
+    // the cleanup trigger removes a deleted task's row, and a stray one is harmless because nothing reads it
+    // without its task.
+    "CREATE TABLE task_revs (
+         task_id INTEGER PRIMARY KEY,
+         rev     TEXT NOT NULL
+     );
+     INSERT INTO task_revs (task_id, rev) SELECT id, lower(hex(randomblob(16))) FROM tasks;
+     CREATE TRIGGER tasks_rev_insert AFTER INSERT ON tasks BEGIN
+         DELETE FROM task_revs WHERE task_id = NEW.id;
+         INSERT INTO task_revs (task_id, rev) VALUES (NEW.id, lower(hex(randomblob(16))));
+     END;
+     CREATE TRIGGER tasks_rev_update AFTER UPDATE OF title, description, status, project_id, tags, url, human ON tasks
+     WHEN NEW.title IS NOT OLD.title OR NEW.description IS NOT OLD.description OR NEW.status IS NOT OLD.status
+         OR NEW.project_id IS NOT OLD.project_id OR NEW.tags IS NOT OLD.tags OR NEW.url IS NOT OLD.url
+         OR NEW.human IS NOT OLD.human
+     BEGIN
+         DELETE FROM task_revs WHERE task_id = NEW.id;
+         INSERT INTO task_revs (task_id, rev) VALUES (NEW.id, lower(hex(randomblob(16))));
+     END;
+     CREATE TRIGGER tasks_rev_before_delete BEFORE DELETE ON tasks BEGIN
+         DELETE FROM task_revs WHERE task_id IN (SELECT task_id FROM task_waits WHERE waits_on_id = OLD.id);
+         INSERT INTO task_revs (task_id, rev)
+             SELECT task_id, lower(hex(randomblob(16))) FROM task_waits WHERE waits_on_id = OLD.id;
+     END;
+     CREATE TRIGGER tasks_rev_delete AFTER DELETE ON tasks BEGIN
+         DELETE FROM task_revs WHERE task_id = OLD.id;
+     END;
+     CREATE TRIGGER task_waits_rev_insert AFTER INSERT ON task_waits BEGIN
+         DELETE FROM task_revs WHERE task_id = NEW.task_id;
+         INSERT INTO task_revs (task_id, rev) VALUES (NEW.task_id, lower(hex(randomblob(16))));
+     END;
+     CREATE TRIGGER task_waits_rev_delete AFTER DELETE ON task_waits
+     WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+     BEGIN
+         DELETE FROM task_revs WHERE task_id = OLD.task_id;
+         INSERT INTO task_revs (task_id, rev) VALUES (OLD.task_id, lower(hex(randomblob(16))));
+     END;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -65,13 +112,15 @@ pub enum Error {
     NotFound(String),
     Invalid(String),
     Busy(String),
+    /// A guarded edit built on a task version that is no longer the current one.
+    Conflict(String),
     Db(rusqlite::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::NotFound(m) | Error::Invalid(m) | Error::Busy(m) => f.write_str(m),
+            Error::NotFound(m) | Error::Invalid(m) | Error::Busy(m) | Error::Conflict(m) => f.write_str(m),
             Error::Db(e) => write!(f, "database error: {e}"),
         }
     }
@@ -751,49 +800,142 @@ impl Store {
     }
 
     pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
+        Ok(self.update_task_if(id, patch, None)?.0)
+    }
+
+    /// `update_task`, and with `expect`, only if the task is still at that version (see `task_version`):
+    /// otherwise `Error::Conflict` and nothing changes. The check and the edit are one write, and the check
+    /// comes first, so two writers holding the same version can't both get in. Also returns the task's new
+    /// version when `expect` was given, read in the same write.
+    pub fn update_task_if(&self, id: i64, patch: TaskPatch, expect: Option<&str>) -> Result<(Task, Option<String>)> {
+        self.update_task_as(|| self.get_task(id), patch, expect, |_, after, version| Ok((after, version)))
+    }
+
+    /// `update_task_if` for a caller that also tells what happened. `find` names the task, and `render` gets
+    /// the task as it was, as it is now, and its new version when `expect` was given. Both run inside the
+    /// write, so the key is resolved, the guard checked, the edit made and the reply built from one moment:
+    /// a later writer can't change what the reply says. `find` and `render` must only read. If either
+    /// fails, nothing is written.
+    pub fn update_task_as<T>(
+        &self,
+        find: impl FnOnce() -> Result<Task>,
+        patch: TaskPatch,
+        expect: Option<&str>,
+        render: impl FnOnce(&Task, Task, Option<String>) -> Result<T>,
+    ) -> Result<T> {
         let title = patch.title.as_deref().map(clean_title).transpose()?;
         let url = patch.url.as_deref().map(clean_url).transpose()?;
         if let Some(s) = &patch.status {
             self.check_status(s)?;
         }
         self.write(|c| {
-            let current = self.get_task(id)?;
-            // Only what the patch changes is written, and only then is the task newer.
-            let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
+            let before = find()?;
+            self.apply_edit(c, &before, &patch, (title.as_deref(), url.as_deref()), expect)?;
+            let version = expect.map(|_| self.task_version(before.id)).transpose()?;
+            let after = self.get_task(before.id)?;
+            render(&before, after, version)
+        })
+    }
+
+    /// The edit of `update_task_as` inside a write the caller already holds, for edits that also write
+    /// something else, like a comment, which then follow the guard in the same transaction. `current` is
+    /// the task just read in that write. Nothing is written before the guard passes. `(title, url)` are
+    /// the patch's, already cleaned and checked.
+    fn apply_edit(
+        &self,
+        c: &Connection,
+        current: &Task,
+        patch: &TaskPatch,
+        (title, url): (Option<&str>, Option<&str>),
+        expect: Option<&str>,
+    ) -> Result<()> {
+        let id = current.id;
+        if let Some(given) = expect {
+            self.check_version(current, given)?;
+        }
+        // Only what the patch changes is written, and only then is the task newer.
+        let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
+        c.execute(
+            &format!(
+                "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
+                   human = coalesce(?3, human), tags = coalesce(?4, tags),
+                   description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
+                 WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
+                   coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
+                   <> (title, project_id, human, tags, description, url)"
+            ),
+            params![title, patch.project_id, patch.human, tags, patch.description.as_deref().map(str::trim), id, url],
+        )?;
+        if let Some(s) = &patch.status
+            && *s != current.status
+        {
+            let position = Self::end_of_column(c, s, id)?;
             c.execute(
-                &format!(
-                    "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
-                       human = coalesce(?3, human), tags = coalesce(?4, tags),
-                       description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
-                     WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
-                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
-                       <> (title, project_id, human, tags, description, url)"
-                ),
-                params![
-                    title,
-                    patch.project_id,
-                    patch.human,
-                    tags,
-                    patch.description.as_deref().map(str::trim),
-                    id,
-                    url
-                ],
+                &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
+                params![s, position, id],
             )?;
-            if let Some(s) = &patch.status
-                && *s != current.status
-            {
-                let position = Self::end_of_column(c, s, id)?;
-                c.execute(
-                    &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
-                    params![s, position, id],
-                )?;
-            }
-            if let Some(keys) = &patch.waits_on {
-                self.set_waits(c, id, keys)?;
-            }
-            Ok(())
-        })?;
-        self.get_task(id)
+        }
+        if let Some(keys) = &patch.waits_on {
+            self.set_waits(c, id, keys)?;
+        }
+        Ok(())
+    }
+
+    /// Runs `f` as one consistent read: the task, its links and its version all from the same moment.
+    /// Inside a write that is already open, `f` just joins it; it never starts a transaction in one.
+    /// `f` must only read.
+    pub fn read<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        if !self.conn.is_autocommit() {
+            return f();
+        }
+        self.conn.execute_batch("BEGIN")?;
+        let out = f();
+        let end = self.conn.execute_batch("COMMIT");
+        let out = out?;
+        end?;
+        Ok(out)
+    }
+
+    /// The task's edit version, for `update_task_if`: `task.rev`, like `12.9c1f0a7e3b5d42688d0e1a4c7f2b9e35`.
+    /// `rev` is 128 random bits that change only when what an edit can overwrite does: title, description,
+    /// status, project, tags, url, human, and the task's own wait list; see migration 10. It names a version,
+    /// not a content: an edit and its undo are two new versions. Copies of a board file that are edited
+    /// apart get different ones, and a copy that wasn't edited has the same version and the same task.
+    pub fn task_version(&self, id: i64) -> Result<String> {
+        let rev: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT coalesce((SELECT rev FROM task_revs WHERE task_id = t.id), '') FROM tasks t WHERE t.id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let rev = rev.ok_or_else(|| Error::NotFound(format!("no task #{id}")))?;
+        let rev = if rev.is_empty() { "0".repeat(32) } else { rev };
+        Ok(format!("{id}.{rev}"))
+    }
+
+    /// Passes only the task's current version. A made-up one, or another task's, is `Invalid`, and an old
+    /// one is a `Conflict`.
+    fn check_version(&self, current: &Task, given: &str) -> Result<()> {
+        let given = given.trim();
+        if given == self.task_version(current.id)? {
+            return Ok(());
+        }
+        let Some((task, _)) = parse_version(given) else {
+            return Err(Error::Invalid("if_version is not a version from get_task with include_version".into()));
+        };
+        if task != current.id {
+            return Err(Error::Invalid(format!(
+                "if_version is from another task, not {}; get this task's with get_task and include_version",
+                current.key()
+            )));
+        }
+        Err(Error::Conflict(format!(
+            "{} changed since you read it, so nothing was changed. Reread it with get_task and include_version, \
+             reconcile, and retry.",
+            current.key()
+        )))
     }
 
     /// In one write: all or nothing, and about 60 times faster than one write per task. Tags are
@@ -1327,6 +1469,14 @@ fn clean_title(title: &str) -> Result<String> {
         return Err(Error::Invalid("task title is empty".into()));
     }
     Ok(title)
+}
+
+/// Splits a version, `task.rev`, where the rev is 32 lowercase hex digits.
+fn parse_version(version: &str) -> Option<(i64, &str)> {
+    let (task, rev) = version.split_once('.')?;
+    let hex = rev.len() == 32 && rev.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    hex.then_some(())?;
+    Some((task.parse().ok()?, rev))
 }
 
 fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
@@ -2172,5 +2322,574 @@ mod tests {
         assert!(s.move_tasks(&[b, 99999], "doing", None).is_err());
         assert!(order("todo").contains(&b));
         assert!(s.move_tasks(&[b], "nope", None).is_err());
+    }
+
+    fn retitle(title: &str) -> TaskPatch {
+        TaskPatch { title: Some(title.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn a_guarded_edit_needs_the_version_it_read() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "one", "").unwrap();
+        let v1 = s.task_version(t.id).unwrap();
+        assert!(parse_version(&v1).is_some(), "{v1}");
+        assert_eq!(s.task_version(t.id).unwrap(), v1, "reading changes nothing");
+        assert!(matches!(s.task_version(999), Err(Error::NotFound(_))));
+
+        let (two, v2) = s.update_task_if(t.id, retitle("two"), Some(&v1)).unwrap();
+        let v2 = v2.unwrap();
+        assert_eq!(two.title, "two");
+        assert_eq!(s.task_version(t.id).unwrap(), v2);
+        assert_ne!(v2, v1);
+
+        // Made in the same second, from the same read: the second writer loses and changes nothing.
+        let changes = s.changes().unwrap();
+        let err = s.update_task_if(t.id, retitle("three"), Some(&v1)).unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err}");
+        assert!(err.to_string().contains(&t.key()), "{err}");
+        assert_eq!(s.get_task(t.id).unwrap().title, "two");
+        assert_eq!(s.changes().unwrap(), changes, "a conflict is no write, so no change to announce");
+        assert_eq!(s.task_version(t.id).unwrap(), v2);
+
+        // The version an edit gives back guards the next one; an edit with no guard still works, and counts.
+        let (_, v3) = s.update_task_if(t.id, retitle("three"), Some(&v2)).unwrap();
+        let v3 = v3.unwrap();
+        assert_eq!(s.update_task(t.id, retitle("four")).unwrap().title, "four");
+        assert!(matches!(s.update_task_if(t.id, retitle("five"), Some(&v3)), Err(Error::Conflict(_))));
+        assert_eq!(s.get_task(t.id).unwrap().title, "four");
+    }
+
+    #[test]
+    fn the_version_moves_only_when_what_an_edit_overwrites_changes() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let web = s.create_project("web", "", None).unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let t = s.create_task(p.id, "task", "text").unwrap();
+        let other = s.create_task(p.id, "other", "").unwrap();
+        let version = || s.task_version(t.id).unwrap();
+
+        let patches = [
+            ("title", retitle("renamed")),
+            ("description", TaskPatch { description: Some("new text".into()), ..Default::default() }),
+            ("status", TaskPatch { status: Some("review".into()), ..Default::default() }),
+            ("project", TaskPatch { project_id: Some(web.id), ..Default::default() }),
+            ("tags", TaskPatch { tags: Some("bug".into()), ..Default::default() }),
+            ("url", TaskPatch { url: Some("https://example.com/1".into()), ..Default::default() }),
+            ("human", TaskPatch { human: Some(true), ..Default::default() }),
+            ("waits", waits(&blocker.id.to_string())),
+            ("waits cleared", waits("")),
+        ];
+        for (what, patch) in patches {
+            let before = version();
+            s.update_task(t.id, patch).unwrap();
+            assert_ne!(version(), before, "{what}");
+        }
+
+        let unmoved = |what: &str, act: &dyn Fn()| {
+            let before = version();
+            act();
+            assert_eq!(version(), before, "{what}");
+        };
+        s.create_task_in(web.id, "mate", TaskPatch { status: Some("review".into()), ..Default::default() }).unwrap();
+        let position = s.get_task(t.id).unwrap().position;
+        unmoved("a move within its column", &|| {
+            s.move_task(t.id, "review", None).unwrap();
+        });
+        assert_ne!(s.get_task(t.id).unwrap().position, position, "it did move");
+        unmoved("a comment", &|| {
+            s.add_comment(t.id, "me", "hi", &[]).unwrap();
+        });
+        unmoved("another task", &|| {
+            s.update_task(other.id, retitle("other renamed")).unwrap();
+        });
+        unmoved("another task starting to wait on it", &|| {
+            s.update_task(other.id, waits(&t.id.to_string())).unwrap();
+        });
+
+        // What it waits on is its blocker's own business: finishing or renaming it is not an edit of the task.
+        s.update_task(t.id, waits(&blocker.id.to_string())).unwrap();
+        unmoved("a blocker finishing", &|| {
+            s.move_task(blocker.id, "done", None).unwrap();
+        });
+        unmoved("a blocker renamed", &|| {
+            s.update_task(blocker.id, retitle("blocker renamed")).unwrap();
+        });
+
+        let moved = |what: &str, act: &dyn Fn()| {
+            let before = version();
+            act();
+            assert_ne!(version(), before, "{what}");
+        };
+        moved("a move to another column", &|| {
+            s.move_task(t.id, "doing", None).unwrap();
+        });
+        moved("a bulk tag", &|| s.update_tasks(&[t.id], None, "extra", "").unwrap());
+        moved("a bulk status", &|| s.update_tasks(&[t.id], Some("todo"), "", "").unwrap());
+
+        let solo = s.create_project("solo", "", None).unwrap();
+        let first = s.create_task(solo.id, "first", "").unwrap();
+        let before = s.task_version(first.id).unwrap();
+        assert_eq!(s.next_task(Some(solo.id)).unwrap().map(|t| t.id), Some(first.id));
+        assert_ne!(s.task_version(first.id).unwrap(), before, "next_task");
+    }
+
+    #[test]
+    fn a_guarded_edit_that_changes_nothing_keeps_the_version_and_a_stale_one_conflicts() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let t = s.create_task_in(p.id, "same", TaskPatch { description: Some("d".into()), ..Default::default() });
+        let t = t.unwrap();
+        s.update_task(t.id, waits(&blocker.id.to_string())).unwrap();
+        let v = s.task_version(t.id).unwrap();
+        let (changes, updated) = (s.changes().unwrap(), s.get_task(t.id).unwrap().updated_at);
+
+        let same = TaskPatch {
+            title: Some("same".into()),
+            description: Some(" d ".into()),
+            status: Some("todo".into()),
+            project_id: Some(p.id),
+            tags: Some("".into()),
+            url: Some("".into()),
+            human: Some(false),
+            waits_on: Some(format!("#{}", blocker.id)),
+        };
+        for patch in [same, TaskPatch::default(), retitle("same")] {
+            let (_, now) = s.update_task_if(t.id, patch, Some(&v)).unwrap();
+            assert_eq!(now.as_deref(), Some(v.as_str()));
+        }
+        assert_eq!(s.task_version(t.id).unwrap(), v);
+        assert_eq!((s.changes().unwrap(), s.get_task(t.id).unwrap().updated_at), (changes, updated));
+
+        s.update_task(t.id, retitle("changed")).unwrap();
+        let err = s.update_task_if(t.id, retitle("changed"), Some(&v)).unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "a stale version conflicts even when the edit would change nothing");
+    }
+
+    #[test]
+    fn a_restored_task_is_a_new_version() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap();
+        let t = s.create_task(p.id, "a", "").unwrap();
+        let start = s.task_version(t.id).unwrap();
+
+        // Changed and changed back: the same content, but not the version it was read at.
+        s.update_task(t.id, retitle("b")).unwrap();
+        s.update_task(t.id, retitle("a")).unwrap();
+        s.update_task(t.id, waits(&blocker.id.to_string())).unwrap();
+        s.update_task(t.id, waits("")).unwrap();
+        let back = s.get_task(t.id).unwrap();
+        assert_eq!((back.title.as_str(), back.waiting_on.is_empty()), ("a", true));
+        assert_ne!(s.task_version(t.id).unwrap(), start);
+        assert!(matches!(s.update_task_if(t.id, retitle("c"), Some(&start)), Err(Error::Conflict(_))));
+        assert_eq!(s.get_task(t.id).unwrap().title, "a");
+    }
+
+    #[test]
+    fn a_version_of_another_task_or_none_at_all_changes_nothing() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let a = s.create_task(p.id, "a", "").unwrap();
+        let b = s.create_task(p.id, "b", "").unwrap();
+        let (va, vb) = (s.task_version(a.id).unwrap(), s.task_version(b.id).unwrap());
+        let (id, rev) = va.split_once('.').unwrap();
+        assert_eq!(rev.len(), 32, "128 bits");
+        let changes = s.changes().unwrap();
+
+        let invalid = [
+            vb.clone(),
+            format!("{}.{rev}", b.id),
+            String::new(),
+            " ".into(),
+            "nope".into(),
+            "1.2".into(),
+            format!("{va}.9"),
+            format!("{id}.{}g", &rev[..31]),
+            format!("{id}.{}", &rev[..31]),
+            format!("x.{rev}"),
+        ];
+        for given in &invalid {
+            let err = s.update_task_if(a.id, retitle("hijacked"), Some(given)).unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{given:?}: {err}");
+        }
+        let made_up = format!("{id}.{}", "0".repeat(32));
+        assert!(matches!(s.update_task_if(a.id, retitle("hijacked"), Some(&made_up)), Err(Error::Conflict(_))));
+        assert!(matches!(s.update_task_if(999, retitle("x"), Some(&va)), Err(Error::NotFound(_))));
+
+        assert_eq!(s.get_task(a.id).unwrap().title, "a");
+        assert_eq!((s.changes().unwrap(), s.task_version(a.id).unwrap()), (changes, va.clone()));
+        assert_eq!(s.task_version(b.id).unwrap(), vb);
+        // Whitespace around a good one is fine.
+        let padded = format!(" {va}\n");
+        s.update_task_if(a.id, retitle("a2"), Some(&padded)).unwrap();
+    }
+
+    #[test]
+    fn a_refused_guarded_patch_changes_nothing_and_keeps_the_version() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let a = s.create_task(p.id, "a", "").unwrap();
+        let b = s.create_task(p.id, "b", "").unwrap();
+        s.update_task(a.id, waits(&b.id.to_string())).unwrap();
+        let v = s.task_version(b.id).unwrap();
+        let changes = s.changes().unwrap();
+
+        let looping = TaskPatch { title: Some("new".into()), waits_on: Some(a.id.to_string()), ..Default::default() };
+        let patches = [
+            looping,
+            TaskPatch { title: Some("new".into()), status: Some("nope".into()), ..Default::default() },
+            TaskPatch { title: Some("new".into()), url: Some("javascript:1".into()), ..Default::default() },
+            TaskPatch { title: Some("new".into()), waits_on: Some("999".into()), ..Default::default() },
+            retitle("  "),
+        ];
+        for patch in patches {
+            assert!(s.update_task_if(b.id, patch, Some(&v)).is_err());
+            assert_eq!(s.get_task(b.id).unwrap().title, "b");
+        }
+        assert_eq!((s.changes().unwrap(), s.task_version(b.id).unwrap()), (changes, v.clone()));
+        s.update_task_if(b.id, retitle("fine"), Some(&v)).unwrap();
+    }
+
+    /// What the board, bulk edits and older Kanzo versions do in SQL, with nothing from `Store`.
+    #[test]
+    fn writes_by_the_board_and_by_older_versions_count_too() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let [t, o, z, w] = ["t", "o", "z", "w"].map(|title| s.create_task(p.id, title, "").unwrap().id);
+        let project = p.id;
+        let run = |statement: String, moves: bool, what: &str| {
+            let before = s.task_version(t).unwrap();
+            s.conn.execute_batch(&statement).unwrap();
+            assert_eq!(s.task_version(t).unwrap() != before, moves, "{what}");
+        };
+        let old = "'2001-01-01T00:00:00Z'";
+        run(
+            format!(
+                "UPDATE tasks SET title = title, description = description, status = status, project_id = project_id,
+                   tags = tags, url = url, human = human, updated_at = {old} WHERE id = {t}"
+            ),
+            false,
+            "an older version writing the values it already has",
+        );
+        run(format!("UPDATE tasks SET position = position + 5 WHERE id = {t}"), false, "position");
+        run(format!("UPDATE tasks SET updated_at = {old} WHERE id = {t}"), false, "updated_at");
+        run(format!("INSERT INTO comments (task_id, author, body) VALUES ({t}, 'me', 'hi')"), false, "a comment");
+        run(format!("UPDATE tasks SET title = 'other', status = 'done' WHERE id = {o}"), false, "another task");
+        run(format!("INSERT INTO task_waits (task_id, waits_on_id) VALUES ({z}, {t})"), false, "a task waiting on it");
+        run(format!("UPDATE tasks SET title = 'legacy' WHERE id = {t}"), true, "title");
+        run(format!("UPDATE tasks SET description = 'legacy' WHERE id = {t}"), true, "description");
+        run(format!("UPDATE tasks SET status = 'doing', position = 9 WHERE id = {t}"), true, "status");
+        run(format!("UPDATE tasks SET tags = 'a,b' WHERE id = {t}"), true, "tags");
+        run(format!("UPDATE tasks SET url = 'https://x.test' WHERE id = {t}"), true, "url");
+        run(format!("UPDATE tasks SET human = 1 WHERE id = {t}"), true, "human");
+        run(format!("UPDATE tasks SET project_id = {project}, title = 'again' WHERE id = {t}"), true, "mixed");
+        run(format!("UPDATE OR REPLACE tasks SET title = 'replaced' WHERE id = {t}"), true, "an OR REPLACE update");
+        run(format!("INSERT INTO task_waits (task_id, waits_on_id) VALUES ({t}, {o})"), true, "a wait edge");
+        run(format!("INSERT OR IGNORE INTO task_waits (task_id, waits_on_id) VALUES ({t}, {w})"), true, "an OR IGNORE");
+        run(format!("DELETE FROM task_waits WHERE task_id = {t} AND waits_on_id = {o}"), true, "a wait edge removed");
+        run(format!("DELETE FROM task_waits WHERE task_id = {t}"), true, "all of them removed");
+
+        // A task an older version adds is versioned too, and never like another's.
+        s.conn
+            .execute("INSERT INTO tasks (project_id, title, status, position) VALUES (?1, 'new', 'todo', 1)", [project])
+            .unwrap();
+        let new = s.conn.last_insert_rowid();
+        let all: Vec<String> = [t, o, z, w, new].iter().map(|id| s.task_version(*id).unwrap()).collect();
+        let distinct: std::collections::HashSet<_> = all.iter().map(|v| v.rsplit('.').next().unwrap()).collect();
+        assert_eq!(distinct.len(), all.len(), "{all:?}");
+    }
+
+    #[test]
+    fn deleting_tasks_with_wait_edges_works_and_moves_the_waiters() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|title| s.create_task(p.id, title, "").unwrap().id);
+        s.update_task(a, waits(&format!("{b}, {d}"))).unwrap();
+        s.update_task(c, waits(&d.to_string())).unwrap();
+        let version = |id| s.task_version(id).unwrap();
+        let (va, vc) = (version(a), version(c));
+
+        s.delete_task(b).unwrap();
+        assert_ne!(version(a), va, "what it waited on is gone");
+        assert_eq!(version(c), vc);
+        s.delete_task(a).unwrap();
+        assert!(matches!(s.task_version(a), Err(Error::NotFound(_))));
+        assert_eq!(version(c), vc);
+        s.delete_task(d).unwrap();
+        assert_ne!(version(c), vc);
+        let revs: i64 = s.conn.query_row("SELECT count(*) FROM task_revs", [], |r| r.get(0)).unwrap();
+        assert_eq!(revs, 1, "a deleted task leaves no version behind");
+
+        let two = s.create_project("two", "", None).unwrap();
+        let x = s.create_task(two.id, "x", "").unwrap();
+        s.create_task_in(two.id, "y", waits(&x.id.to_string())).unwrap();
+        s.update_task(c, waits(&x.id.to_string())).unwrap();
+        s.delete_project("two").unwrap();
+        assert!(s.get_task(c).unwrap().waiting_on.is_empty());
+        let unversioned: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM tasks t WHERE NOT EXISTS (SELECT 1 FROM task_revs r WHERE r.task_id = t.id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unversioned, 0);
+    }
+
+    #[test]
+    fn a_recreated_task_never_takes_an_old_version() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "old", "").unwrap();
+        let v = s.task_version(t.id).unwrap();
+        s.delete_task(t.id).unwrap();
+        assert!(matches!(s.update_task_if(t.id, retitle("x"), Some(&v)), Err(Error::NotFound(_))));
+
+        // Ids aren't reused, but a restored or imported board could do it.
+        s.conn
+            .execute(
+                "INSERT INTO tasks (id, project_id, title, status, position) VALUES (?1, ?2, 'reborn', 'todo', 1)",
+                [t.id, p.id],
+            )
+            .unwrap();
+        assert_ne!(s.task_version(t.id).unwrap(), v);
+        assert!(matches!(s.update_task_if(t.id, retitle("x"), Some(&v)), Err(Error::Conflict(_))));
+        assert_eq!(s.get_task(t.id).unwrap().title, "reborn");
+    }
+
+    #[test]
+    fn a_guarded_edit_joins_a_write_that_is_already_open() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "a", "").unwrap();
+        let v = s.task_version(t.id).unwrap();
+        let edit = |c: &Connection, title: &str, expect: &str| -> Result<()> {
+            let current = s.get_task(t.id)?;
+            s.apply_edit(c, &current, &TaskPatch::default(), (Some(title), None), Some(expect))
+        };
+
+        // Two guarded edits in one write, the second on the version the first made, and a read inside it.
+        let title = s
+            .write(|c| {
+                edit(c, "b", &v)?;
+                let v2 = s.task_version(t.id)?;
+                edit(c, "c", &v2)?;
+                s.read(|| Ok(s.get_task(t.id)?.title))
+            })
+            .unwrap();
+        assert_eq!(title, "c");
+
+        // The second one holds the version the first already used up: both are undone.
+        let v = s.task_version(t.id).unwrap();
+        let err = s.write(|c| {
+            edit(c, "first", &v)?;
+            edit(c, "second", &v)
+        });
+        assert!(matches!(err, Err(Error::Conflict(_))));
+        assert_eq!(s.get_task(t.id).unwrap().title, "c");
+        assert_eq!(s.task_version(t.id).unwrap(), v);
+
+        let failed = s.read::<()>(|| Err(Error::Invalid("x".into())));
+        assert!(failed.is_err() && s.conn.is_autocommit(), "a failed read leaves no transaction open");
+    }
+
+    #[test]
+    fn a_read_sees_one_moment_while_a_writer_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let p = s.create_project("api", "", None).unwrap();
+        let id = s.create_task(p.id, "before", "").unwrap().id;
+        let writer = Store::open(&path, None).unwrap();
+        let (started, wait) = std::sync::mpsc::channel();
+
+        let (first, second, handle) = s
+            .read(|| {
+                let first = (s.get_task(id)?.title, s.task_version(id)?);
+                let handle = std::thread::spawn(move || {
+                    started.send(()).unwrap();
+                    writer.update_task(id, retitle("after")).unwrap();
+                });
+                wait.recv().unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+                let second = (s.get_task(id)?.title, s.task_version(id)?);
+                Ok((first, second, handle))
+            })
+            .unwrap();
+        assert_eq!(first, second, "the task and its version came from one moment");
+        handle.join().unwrap();
+        assert_eq!(s.get_task(id).unwrap().title, "after");
+        assert_ne!(s.task_version(id).unwrap(), first.1);
+    }
+
+    #[test]
+    fn two_writers_with_the_same_version_cannot_both_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let p = s.create_project("api", "", None).unwrap();
+        let id = s.create_task(p.id, "start", "").unwrap().id;
+
+        for round in 0..5 {
+            let v = s.task_version(id).unwrap();
+            let writers: Vec<Store> = (0..2).map(|_| Store::open(&path, None).unwrap()).collect();
+            let barrier = std::sync::Barrier::new(2);
+            let won: Vec<bool> = std::thread::scope(|scope| {
+                let handles: Vec<_> = writers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, writer)| {
+                        let (barrier, v) = (&barrier, v.as_str());
+                        scope.spawn(move || {
+                            barrier.wait();
+                            match writer.update_task_if(id, retitle(&format!("w{round}-{i}")), Some(v)) {
+                                Ok(_) => true,
+                                Err(Error::Conflict(_)) => false,
+                                Err(e) => panic!("{e}"),
+                            }
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert_eq!(won.iter().filter(|w| **w).count(), 1, "round {round}: {won:?}");
+            assert_ne!(s.task_version(id).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn migration_10_versions_the_tasks_a_board_already_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").unwrap();
+            for sql in &MIGRATIONS[..9] {
+                c.execute_batch(sql).unwrap();
+            }
+            c.execute_batch(
+                "INSERT INTO meta VALUES ('schema_version', '9'), ('compatible', '4');
+                 INSERT INTO projects (slug, name) VALUES ('api', 'api');
+                 INSERT INTO tasks (project_id, title, status, position) VALUES (1, 'a', 'todo', 1), (1, 'b', 'todo', 2);
+                 INSERT INTO task_waits (task_id, waits_on_id) VALUES (2, 1);
+                 INSERT INTO comments (task_id, author, body) VALUES (1, 'me', 'hi');",
+            )
+            .unwrap();
+            assert!(c.execute_batch("SELECT 1 FROM task_revs").is_err(), "version 9 has no versions");
+        }
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let (a, b) = (s.task_version(1).unwrap(), s.task_version(2).unwrap());
+        assert!(parse_version(&a).is_some() && parse_version(&b).is_some() && a != b, "{a} {b}");
+        assert_eq!((s.get_task(2).unwrap().waiting_on, s.get_task(1).unwrap().comments), (vec![1], 1));
+
+        let (_, v) = s.update_task_if(1, retitle("A"), Some(&a)).unwrap();
+        assert_ne!(v.unwrap(), a);
+        assert_eq!(s.task_version(2).unwrap(), b, "another task's version is its own");
+        s.migrate().unwrap();
+        assert_eq!(s.task_version(2).unwrap(), b);
+        // Every statement above the Store ran against what version 9 left, so an older Kanzo's writes
+        // reach the triggers the same way: see `writes_by_the_board_and_by_older_versions_count_too`.
+    }
+
+    #[test]
+    fn copies_of_a_board_edited_apart_never_share_a_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (dir.path().join("one.db"), dir.path().join("two.db"));
+        let first = Store::open(&one, None).unwrap();
+        first.migrate().unwrap();
+        let p = first.create_project("api", "", None).unwrap();
+        let id = first.create_task(p.id, "start", "").unwrap().id;
+        let read = first.task_version(id).unwrap();
+        drop(first);
+        std::fs::copy(&one, &two).unwrap();
+        assert_eq!(Store::open(&two, None).unwrap().task_version(id).unwrap(), read, "a copy is the same snapshot");
+
+        // The same task, edited once in each copy, from the same read: the same number of writes each.
+        let edit = |path: &Path, title: &str| -> String {
+            let s = Store::open(path, None).unwrap();
+            s.update_task_if(id, retitle(title), Some(&read)).unwrap().1.unwrap()
+        };
+        let (from_one, from_two) = (edit(&one, "from one"), edit(&two, "from two"));
+        assert_ne!(from_one, from_two);
+
+        // Sync swaps the other copy in between an agent's read of this one and its write.
+        std::fs::copy(&two, &one).unwrap();
+        let s = Store::open(&one, None).unwrap();
+        let changes = s.changes().unwrap();
+        let err = s.update_task_if(id, retitle("late"), Some(&from_one)).unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err}");
+        assert_eq!((s.get_task(id).unwrap().title.as_str(), s.changes().unwrap()), ("from two", changes));
+        // A version read from the very state now on the board is still good: it is that snapshot.
+        s.update_task_if(id, retitle("fine"), Some(&from_two)).unwrap();
+
+        // Also when the two copies are each edited by older code, in SQL.
+        std::fs::copy(&one, &two).unwrap();
+        let (a, b) = (Store::open(&one, None).unwrap(), Store::open(&two, None).unwrap());
+        let before = a.task_version(id).unwrap();
+        a.conn.execute("UPDATE tasks SET title = 'legacy a' WHERE id = ?1", [id]).unwrap();
+        b.conn.execute("UPDATE tasks SET title = 'legacy b' WHERE id = ?1", [id]).unwrap();
+        let (va, vb) = (a.task_version(id).unwrap(), b.task_version(id).unwrap());
+        assert!(va != vb && va != before && vb != before);
+    }
+
+    #[test]
+    fn a_guarded_reply_is_built_inside_the_write_it_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let p = s.create_project("api", "", None).unwrap();
+        let blocker = s.create_task(p.id, "blocker", "").unwrap().id;
+        let task = s.create_task_in(p.id, "t", waits(&blocker.to_string())).unwrap().id;
+        let v = s.task_version(task).unwrap();
+        let writer = Store::open(&path, None).unwrap();
+        let (started, wait) = std::sync::mpsc::channel();
+        let key = format!("api#{task}");
+
+        // While the edit's reply is built, another writer tries to finish the blocker and hide waiting.
+        let seen = s
+            .update_task_as(
+                || s.find_task(&key),
+                retitle("renamed"),
+                Some(&v),
+                |before, after, version| {
+                    let handle = std::thread::spawn(move || {
+                        started.send(()).unwrap();
+                        let done = TaskPatch { status: Some("done".into()), ..Default::default() };
+                        writer.update_task(blocker, done).unwrap();
+                        writer.set_property("waiting", false).unwrap();
+                    });
+                    wait.recv().unwrap();
+                    std::thread::sleep(Duration::from_millis(300));
+                    let live = (s.get_task(after.id)?.waiting_on, s.hidden_properties()?);
+                    Ok((before.title.clone(), after.waiting_on, version, live, handle))
+                },
+            )
+            .unwrap();
+        let (before, waiting, version, live, handle) = seen;
+        assert_eq!((before.as_str(), waiting), ("t", vec![blocker]));
+        assert_eq!(live, (vec![blocker], Vec::<String>::new()), "the reply saw the board as the edit did");
+        assert_eq!(version.as_deref(), Some(s.task_version(task).unwrap().as_str()));
+
+        handle.join().unwrap();
+        assert!(s.get_task(task).unwrap().waiting_on.is_empty(), "the other writer came after");
+        assert_eq!(s.hidden_properties().unwrap(), ["waiting"]);
+
+        // A key that names another task's project, or no task, fails in the write and changes nothing.
+        let changes = s.changes().unwrap();
+        let v = s.task_version(task).unwrap();
+        for key in [format!("web#{task}"), "api#999".to_string()] {
+            let outcome = s.update_task_as(|| s.find_task(&key), retitle("x"), Some(&v), |_, after, _| Ok(after.title));
+            assert!(matches!(outcome, Err(Error::NotFound(_))), "{key}");
+        }
+        assert_eq!((s.get_task(task).unwrap().title.as_str(), s.changes().unwrap()), ("renamed", changes));
     }
 }
