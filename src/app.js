@@ -43,6 +43,9 @@ const state = {
 // A joined board's page reaches the shared board under /remote.
 const base = (board = state.on) => board === "shared" ? "/remote" : "";
 
+// Slugs are lowercase letters, digits and -, so this never matches a project.
+const PROJECT_PICK_MENU = "$task-project";
+
 async function api(method, path, body, board) {
   const image = body instanceof Blob;
   const res = await fetch(base(board) + "/api" + path, {
@@ -637,6 +640,8 @@ function toggleMenu(name) {
 }
 
 function closeMenu() {
+  const pick = $("#p-project .project-pick");
+  if (pick) pick.setAttribute("aria-expanded", "false");
   if (!state.menu) return;
   state.menu = null;
   document.querySelector(".menu")?.remove();
@@ -648,7 +653,7 @@ function closeMenu() {
 
 // A click on a menu's own button is left to toggle it.
 document.addEventListener("mousedown", (e) => {
-  if (!e.target.closest(".menu, .nav .more, #settings, #network, #network-menu")) closeMenu();
+  if (!e.target.closest(".menu, .nav .more, #settings, #network, #network-menu, .project-pick")) closeMenu();
 });
 document.addEventListener("mousedown", (e) => {
   if (state.task && e.button === 0 && !e.target.closest("#panel, .card, .menu, .search-dialog")) closeTask();
@@ -1328,6 +1333,7 @@ const taskLink = (t) => el("button", { type: "button", class: "tag", title: key(
   statusIcon(t.status), el("span", {}, t.title));
 
 async function openTask(id) {
+  closeMenu();
   clearSelection();
   leavePanelField();
   if (fresh !== id) dropFresh();
@@ -1351,6 +1357,7 @@ function leavePanelField() {
 }
 
 function closeTask() {
+  closeMenu();
   leavePanelField();
   dropFresh();
   state.task = null;
@@ -1380,7 +1387,7 @@ async function refreshTask() {
   $("#p-key").textContent = key(task);
   $("#p-key").title = tr("Copy {0}", key(task));
   // Never overwrite what is being typed or picked.
-  if (!$("#p-project").contains(document.activeElement)) renderProjectPick(task);
+  if (state.menu !== PROJECT_PICK_MENU && !$("#p-project").contains(document.activeElement)) renderProjectPick(task);
   for (const [field, value] of [[$("#p-title"), task.title], [$("#p-desc"), task.description], [$("#p-tags"), task.tags.join(", ")], [$("#p-url"), task.url || ""], [$("#p-waits"), panelWaits]]) {
     if (document.activeElement !== field) { field.value = value; fit(field); }
   }
@@ -1424,17 +1431,50 @@ async function deleteComment(c) {
 }
 
 function renderProjectPick(task) {
-  const projects = state.board ? state.board.projects.map((p) => p.slug) : [];
-  if (!projects.includes(task.project)) projects.push(task.project);
-  const select = el("select", { title: tr("Project"), "aria-label": tr("Project") },
-    ...projects.map((slug) => el("option", { value: slug }, slug)));
-  select.value = task.project;
-  select.addEventListener("change", () => {
-    localStorageSet("kanzo.newTaskProject", select.value);
-    patchTask({ project: select.value });
+  const button = el("button", { type: "button", class: "tag project-pick", title: tr("Project"),
+                                "aria-label": `${tr("Project")} ${task.project}`, "aria-haspopup": "menu", "aria-expanded": "false",
+                                onclick: () => toggleProjectPick(button, task.project) },
+    el("span", { class: "dot", style: `background:${projectColor(task.project)}` }), task.project);
+  $("#p-project").replaceChildren(button);
+}
+
+function toggleProjectPick(button, fallback) {
+  if (!toggleMenu(PROJECT_PICK_MENU)) return;
+  button.setAttribute("aria-expanded", "true");
+  const current = panelTask ? panelTask.project : fallback;
+  const projects = (state.board ? state.board.projects : []).map((p) => ({ slug: p.slug, name: p.name }));
+  if (!projects.some((p) => p.slug === current)) projects.push({ slug: current, name: current });
+  const menu = el("div", { class: "menu", role: "menu", "aria-label": tr("Project"), tabindex: "-1" },
+    ...projects.map((p) => el("button", { type: "button", role: "menuitemradio", "aria-checked": String(p.slug === current),
+                                          onclick: () => pickTaskProject(p.slug, current) },
+      el("span", { class: "dot", style: `background:${projectColor(p.slug)}` }),
+      el("span", { class: "name" }, p.name),
+      p.slug === current ? el("span", { class: "value" }, icon("check")) : null)));
+  document.body.append(menu);
+  const r = button.getBoundingClientRect();
+  const below = r.bottom + 4 + menu.offsetHeight <= innerHeight;
+  menu.style.top = `${below ? r.bottom + 4 : r.top - 4 - menu.offsetHeight}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.addEventListener("keydown", (e) => {
+    if (!/^(ArrowDown|ArrowUp|Home|End)$/.test(e.key)) return;
+    const items = [...menu.querySelectorAll("button")];
+    if (!items.length) return;
+    e.preventDefault();
+    const i = items.indexOf(document.activeElement);
+    const next = e.key === "Home" ? 0
+      : e.key === "End" ? items.length - 1
+      : i < 0 ? (e.key === "ArrowDown" ? 0 : items.length - 1)
+      : (i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
   });
-  $("#p-project").replaceChildren(el("label", { class: "tag project-pick" },
-    el("span", { class: "dot", style: `background:${projectColor(task.project)}` }), select));
+  (menu.querySelector('[aria-checked="true"]') || menu).focus();
+}
+
+function pickTaskProject(slug, current) {
+  closeMenu();
+  if (slug === current) return;
+  localStorageSet("kanzo.newTaskProject", slug);
+  patchTask({ project: slug });
 }
 
 function fit(t) {
@@ -1807,7 +1847,12 @@ document.addEventListener("keydown", (e) => {
   if (!$("#ask-dialog").hidden) return;
   const typing = e.target.closest("input, textarea, select");
   const plain = !typing && !e.metaKey && !e.ctrlKey;
-  if (e.key === "Escape" && state.menu) { closeMenu(); return; }
+  if (e.key === "Escape" && state.menu) {
+    const pick = state.menu === PROJECT_PICK_MENU;
+    closeMenu();
+    if (pick) $("#p-project .project-pick")?.focus();
+    return;
+  }
   // Only in the installed app: in a browser tab, these keys belong to the browser.
   if (/^\d$/.test(e.key) && (e.metaKey || e.ctrlKey) && state.board && matchMedia("(display-mode: standalone)").matches) {
     const { projects } = state.board;

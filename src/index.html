@@ -323,11 +323,8 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .panel .top .ghost, .bulk .ghost { width: auto; padding: 6px; color: var(--muted); }
 .panel .top .ghost:hover, .bulk .ghost:hover { color: var(--text); }
 .panel .top .ghost.danger:hover, .bulk .danger:hover { color: var(--danger); background: var(--danger-bg); }
-.panel .project-pick select {
-  appearance: none; -webkit-appearance: none; border: 0; background: none; padding: 0; margin: 0;
-  font-size: inherit; color: inherit; cursor: pointer; field-sizing: content;
-}
-.panel .project-pick:hover, .panel .project-pick:focus-within { background: var(--active); color: var(--text); }
+.panel .project-pick { appearance: none; -webkit-appearance: none; border: 0; cursor: pointer; }
+.panel .project-pick:hover, .panel .project-pick:focus-within, .panel .project-pick[aria-expanded="true"] { background: var(--active); color: var(--text); }
 .panel-edge { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; cursor: col-resize; }
 .panel-edge:hover { background: var(--active); }
 .panel .body { overflow-y: auto; padding: 8px max(20px, calc(50% - 430px)) 24px; display: flex; flex-direction: column; gap: 20px; flex: 1; }
