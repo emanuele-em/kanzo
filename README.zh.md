@@ -191,7 +191,7 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
   <img alt="另一台电脑上的共享弹窗：已连接到共享看板，并有一个“离开”按钮" src="docs/img/join-light.jpg">
 </picture>
 
-不用重启，也不用配置。它们的看板会显示共享的看板，它们的智能体通过同样的 `kanzo mcp` 使用它，仍然根据所在仓库找到项目。你可以随时关闭共享，或点击 **离开**。
+不用重启，也不用配置。它们的侧边栏会在自己的项目下方显示共享看板的项目，私有项目仍然一键可达；它们的智能体通过同样的 `kanzo mcp` 使用它，仍然根据所在仓库找到项目。你可以随时关闭共享，或点击 **离开**。
 
 在终端中，或者对智能体来说，命令是 `kanzo share on` 和 `kanzo join <address>`，然后是 `kanzo share off` 和 `kanzo leave`。
 
