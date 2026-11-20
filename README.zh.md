@@ -25,7 +25,7 @@ Kanzo 把浏览器里的看板和 MCP 服务器装进一个 4.7 MB 的程序，�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.gif">
-  <img alt="Kanzo 看板：智能体移动卡片，你在一旁看着；⌘K 在所有项目中查找任务；让一个任务等待另一个任务；拖动两个选中的任务；列表按状态分组显示任务；折叠侧边栏；笔记本 A 共享看板，笔记本 B 加入" src="docs/img/board-light.gif">
+  <img alt="Kanzo 看板：智能体移动卡片，你在一旁看着；⌘K 在所有项目中查找任务；让一个任务等待另一个任务；拖动两个选中的任务；列表按状态分组显示任务；折叠侧边栏；笔记本 A 共享看板，笔记本 B 加入，共享的项目显示在它自己的项目下方" src="docs/img/board-light.gif">
 </picture>
 
 ## 安装
