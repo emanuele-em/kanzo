@@ -6,3 +6,9 @@ LIBSQLITE3_FLAGS = """\
   -USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE \
   -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION \
   -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_MAX_EXPR_DEPTH=0"""
+
+# Ubuntu 26.04's x64 runners install the amd64v3 packages, whose gcc makes AVX2, BMI and
+# FMA code unless told otherwise. Without this, the bundled SQLite in the x64 Linux
+# release crashed with "Illegal instruction" on CPUs without AVX2, like Intel Celerons
+# and Atoms. Rust already builds for plain x86-64; this does the same for C.
+CFLAGS_x86_64_unknown_linux_musl = "-march=x86-64"
