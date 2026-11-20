@@ -82,6 +82,7 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 - **List view:** the list icon shows the same tasks as rows to sort and group.
 - **Human tasks:** mark a task Human and agents leave it to you. The person icon shows only those.
 - **Images:** paste or drop one into a task or a comment.
+- **Move to another project:** pick it in a task's panel. Its number stays, so `api#12` becomes `web#12`. Agents move it with `project`.
 - **Links:** give a task a URL, like its pull request, and open it from its card. Agents set it with `url`.
 - **Files:** `[name](file:///path)` in a description or comment opens in your editor.
 - **Task panel:** drag its left edge to resize it, or expand it to the whole window. Double-click the edge to reset it.

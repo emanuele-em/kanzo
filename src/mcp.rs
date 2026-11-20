@@ -245,6 +245,8 @@ struct UpdateTaskArgs {
     description: Option<String>,
     /// Column, like review.
     status: Option<String>,
+    /// Slug to move it to.
+    project: Option<String>,
     /// Comma-separated; "" clears.
     tags: Option<String>,
     /// For the user, not for agents.
@@ -500,6 +502,8 @@ impl Kanzo {
             .run(move |_, store| {
                 let before = args.id.find(store)?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase());
+                let project = args.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+                let project_id = project.map(|p| store.find_project(p)).transpose()?.map(|p| p.id);
                 let after = store.update_task(
                     before.id,
                     TaskPatch {
@@ -507,18 +511,19 @@ impl Kanzo {
                         description: args.description,
                         status,
                         tags: args.tags,
-                        project_id: None,
+                        project_id,
                         human: args.human,
                         url: args.url,
                         waits_on: args.waits_on,
                     },
                 )?;
+                let was = if before.project != after.project { format!("{} -> ", before.key()) } else { String::new() };
                 let moved = if before.status != after.status {
                     format!(", {} -> {}", before.status, after.status)
                 } else {
                     String::new()
                 };
-                Ok(format!("Updated {}{moved}: {}{}", after.key(), after.title, waits_note(store, &after)?))
+                Ok(format!("Updated {was}{}{moved}: {}{}", after.key(), after.title, waits_note(store, &after)?))
             })
             .await)
     }
@@ -828,6 +833,38 @@ mod tests {
 
             home.store().unwrap().set_property("waiting", false).unwrap();
             assert!(!call("get_task", json!({ "id": "api#2" })).await.contains("waits on"));
+        });
+    }
+
+    #[test]
+    fn agents_move_a_task_to_another_project() {
+        block_on(async {
+            let (dir, home, task) = board();
+            home.store().unwrap().create_project("web", "", None).unwrap();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let mut call = async |name: &str, args: Value| -> String {
+                let params = json!({ "name": name, "arguments": args, "_meta": stateless(None) });
+                let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+                let result = &agent.send(message).await.unwrap()["result"];
+                let text = result["content"][0]["text"].as_str().unwrap();
+                if result["isError"] == true { format!("Error: {text}") } else { text.to_string() }
+            };
+
+            let moved = call("update_task", json!({ "id": task.key(), "project": "web", "status": "doing" })).await;
+            assert_eq!(moved, "Updated api#1 -> web#1, todo -> doing: Ship it");
+            let saved = home.store().unwrap().get_task(task.id).unwrap();
+            assert_eq!((saved.key(), saved.status.as_str()), ("web#1".into(), "doing"));
+            assert_eq!(call("get_task", json!({ "id": "api#1" })).await, "Error: no task api#1 (#1 is web#1)");
+
+            // An unknown project refuses the whole update, and says which projects there are.
+            let args = json!({ "id": "web#1", "project": "nope", "status": "review", "title": "Renamed" });
+            assert_eq!(call("update_task", args).await, r#"Error: no project "nope" (projects: api, web)"#);
+            let kept = home.store().unwrap().get_task(task.id).unwrap();
+            assert_eq!((kept.key(), kept.status.as_str(), kept.title.as_str()), ("web#1".into(), "doing", "Ship it"));
+
+            // Blank, or the project it's already in, changes nothing and says nothing extra.
+            assert_eq!(call("update_task", json!({ "id": "web#1", "project": " " })).await, "Updated web#1: Ship it");
+            assert_eq!(call("update_task", json!({ "id": "web#1", "project": "WEB" })).await, "Updated web#1: Ship it");
         });
     }
 
