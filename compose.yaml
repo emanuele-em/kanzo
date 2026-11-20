@@ -1,0 +1,17 @@
+services:
+  kanzo:
+    image: ghcr.io/emanuele-em/kanzo:latest
+    build: .
+    container_name: kanzo
+    restart: unless-stopped
+    ports:
+      - "4242:4242"
+    volumes:
+      - kanzo-data:/data
+    # Optional environment variables:
+    # environment:
+    #   - KANZO_PORT=4242
+    #   - KANZO_LISTEN=0.0.0.0
+
+volumes:
+  kanzo-data:

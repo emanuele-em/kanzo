@@ -1,0 +1,19 @@
+[Unit]
+Description=Kanzo Kanban Board
+Documentation=https://github.com/emanuele-em/kanzo
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=ghcr.io/emanuele-em/kanzo:latest
+ContainerName=kanzo
+PublishPort=127.0.0.1:4242:4242
+Volume=kanzo-data.volume:/data:Z
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -10,6 +10,7 @@ mod sync;
 mod update;
 mod web;
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -30,6 +31,10 @@ struct Cli {
     /// Port for the board [default: from config.toml]
     #[arg(long)]
     port: Option<u16>,
+
+    /// Address the board listens on [default: from config.toml]
+    #[arg(long)]
+    listen: Option<IpAddr>,
 
     /// Start the board without opening the browser
     #[arg(long)]
@@ -141,8 +146,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         _ => Home::resolve(cli.home)?,
     };
     let mut home = Home::open(dir)?;
-    if let Some(port) = cli.port {
+    if let Some(port) = resolve_port(cli.port) {
         home.config.port = port;
+    }
+    if let Some(listen) = resolve_listen(cli.listen) {
+        home.config.listen = listen;
     }
     match cli.command {
         None => web::serve(home, !cli.no_open).await,
@@ -207,4 +215,41 @@ async fn network(home: Home, change: Option<share::Change>, open: bool) -> anyho
     }
     println!("{}", status.message());
     Ok(())
+}
+
+fn resolve_port(cli_port: Option<u16>) -> Option<u16> {
+    cli_port.or_else(|| std::env::var("KANZO_PORT").ok().and_then(|v| v.parse().ok()))
+}
+
+fn resolve_listen(cli_listen: Option<IpAddr>) -> Option<IpAddr> {
+    cli_listen.or_else(|| std::env::var("KANZO_LISTEN").ok().and_then(|v| v.parse().ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_cli_flags() {
+        let cli = Cli::parse_from(["kanzo", "--port", "4300", "--listen", "0.0.0.0", "--no-open"]);
+        assert_eq!(cli.port, Some(4300));
+        assert_eq!(cli.listen, Some("0.0.0.0".parse().unwrap()));
+        assert!(cli.no_open);
+    }
+
+    #[test]
+    fn resolves_cli_over_env() {
+        unsafe {
+            std::env::set_var("KANZO_PORT", "5000");
+            std::env::set_var("KANZO_LISTEN", "10.0.0.1");
+        }
+        assert_eq!(resolve_port(Some(4300)), Some(4300));
+        assert_eq!(resolve_listen(Some("0.0.0.0".parse().unwrap())), Some("0.0.0.0".parse().unwrap()));
+        assert_eq!(resolve_port(None), Some(5000));
+        assert_eq!(resolve_listen(None), Some("10.0.0.1".parse().unwrap()));
+        unsafe {
+            std::env::remove_var("KANZO_PORT");
+            std::env::remove_var("KANZO_LISTEN");
+        }
+    }
 }

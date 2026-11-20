@@ -1,0 +1,5 @@
+[Unit]
+Description=Kanzo data volume
+
+[Volume]
+VolumeName=kanzo-data
