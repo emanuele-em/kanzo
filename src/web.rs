@@ -324,6 +324,11 @@ impl Guard {
         })
     }
 
+    /// A reverse proxy serves the board, so a request from 127.0.0.1 may come from anyone.
+    fn proxied(&self) -> bool {
+        !self.hosts.is_empty()
+    }
+
     /// One of `hosts`, on any port: the proxy in front decides which.
     fn listed(&self, host: &str) -> bool {
         let name = split_host(host).0;
@@ -385,9 +390,11 @@ async fn remote(Extension(guard): Extension<Arc<Guard>>, mut req: Request) -> Re
 }
 
 /// A reverse proxy here connects from 127.0.0.1 for whoever reaches it, so a request for one
-/// of `hosts` counts as from another computer too.
+/// of `hosts` counts as from another computer too. So does one the proxy says it forwarded:
+/// a proxy that passes on its visitor's `Host` would otherwise let `Host: localhost` through.
 async fn this_computer(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
-    if guest(&req).is_some() || guard.listed(host(&req)) {
+    let forwarded = ["forwarded", "x-forwarded-for", "x-forwarded-host"].iter().any(|h| req.headers().contains_key(*h));
+    if guest(&req).is_some() || guard.listed(host(&req)) || (guard.proxied() && forwarded) {
         return fail(StatusCode::FORBIDDEN, "only the computer with the board can do that").into_response();
     }
     next.run(req).await
@@ -1239,6 +1246,42 @@ mod tests {
             let off = json!({ "change": "off" }).to_string();
             assert_eq!(proxied(listed, "POST /api/network HTTP/1.0\r\nHost: board.example.ts.net", &off).await, "403");
             assert_eq!(proxied(listed, "GET /api/network HTTP/1.0\r\nHost: 127.0.0.1:PORT", "").await, "200");
+        });
+    }
+
+    #[test]
+    fn a_proxy_cant_pass_a_visitor_off_as_this_computer() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut home = Home::open(tmp.path().to_path_buf()).unwrap();
+            home.config.editor = Some("true".into());
+            let file = tmp.path().join("notes.md");
+            std::fs::write(&file, "").unwrap();
+            let open = json!({ "path": file }).to_string();
+            let listed = &["board.example.ts.net"];
+            // A proxy that passes on whatever Host its visitor sent, from 127.0.0.1.
+            for forwarded in
+                ["X-Forwarded-For: 203.0.113.9", "Forwarded: for=203.0.113.9", "X-Forwarded-Host: board.example.ts.net"]
+            {
+                for host in ["localhost:PORT", "127.0.0.1:PORT"] {
+                    let open_head = format!("POST /api/open HTTP/1.0\r\nHost: {host}\r\n{forwarded}");
+                    let network_head = format!("GET /api/network HTTP/1.0\r\nHost: {host}\r\n{forwarded}");
+                    assert_eq!(
+                        status(&home, Net::Private, listed, None, &open_head, &open).await,
+                        "403",
+                        "{open_head}"
+                    );
+                    assert_eq!(
+                        status(&home, Net::Private, listed, None, &network_head, "").await,
+                        "403",
+                        "{network_head}"
+                    );
+                }
+            }
+            // This computer's own browser sends none of them.
+            let head = "GET /api/network HTTP/1.0\r\nHost: localhost:PORT";
+            assert_eq!(status(&home, Net::Private, listed, None, head, "").await, "200");
         });
     }
 
