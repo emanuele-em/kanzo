@@ -191,7 +191,7 @@ Birden çok bilgisayar, tek pano, aynı anda: herkes aynı görevleri görür ve
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/join-dark.jpg">
-  <img alt="Başka bir bilgisayardaki paylaşma penceresi: paylaşılan panoya bağlı, Leave düğmesiyle" src="docs/img/join-light.jpg">
+  <img alt="Paylaşılan panoya bağlı başka bir bilgisayar: kenar çubuğu önce bu bilgisayarın projelerini, sonra paylaşılan panonunkileri listeliyor; paylaşma penceresinde Leave düğmesi var" src="docs/img/join-light.jpg">
 </picture>
 
 Hiçbir şey yeniden başlamaz ve hiçbir şeyi ayarlamak gerekmez. Kenar çubukları, paylaşılan panonun projelerini kendi projelerinin altında gösterir, böylece özel projeleri bir tık uzakta kalır; ajanları da paylaşılan panoyu aynı `kanzo mcp` üzerinden kullanır ve projeyi hâlâ çalıştıkları repodan bulur. Paylaşımı istediğin an kapat ya da **Leave**'e tıkla.
