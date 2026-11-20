@@ -112,6 +112,25 @@ Then ask: *"take the next task from kanzo and do it."* The agent:
   <img alt="A task open on the board, with Claude Code's comments, one saying how to resume its session, and a reply" src="docs/img/task-light.jpg">
 </picture>
 
+## Hand a task off
+
+> [!TIP]
+> **Just ask your agent:** *"when you stop, move kanzo#12 to review for me, with a handoff comment."*
+
+When an agent stops, one `update_task` call can save the status, the `human` flag and a comment together, so a task is never moved without its notes. The comment is optional, up to 16 KiB, and signed with the agent's client name. Keep it short and factual:
+
+```text
+Completed: what is done
+Remaining: what is left
+Verified: what was checked, and how
+Next step: what to do first
+```
+
+- **To you:** `status: "review"` with `human: true`. Agents leave human tasks alone, and a human task in `review` shows **Human review** on the board and in the list. Turning off the Human property in Settings hides it.
+- **To another agent:** move it to `todo` with the comment. The next agent reads it with `get_task`.
+- **All or nothing:** if the comment is empty or too long, or any other change is refused, nothing is saved.
+- **Not for secrets or transcripts:** write what happened, not private reasoning or the whole conversation.
+
 ## Park ideas in a backlog
 
 Turn on Backlog in Settings for a column agents leave alone, until you move its tasks to `todo`.

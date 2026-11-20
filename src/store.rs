@@ -171,6 +171,17 @@ pub struct TaskPatch {
     pub waits_on: Option<String>,
 }
 
+/// The most a comment saved with a task edit (`update_task`'s `comment`) can hold: 16 KiB of
+/// UTF-8, after trimming. Enough for a short Completed / Remaining / Verified / Next step note.
+/// `add_comment` keeps having no limit of its own.
+pub const HANDOFF_MAX: usize = 16 * 1024;
+
+/// A comment saved in the same write as a task edit.
+pub struct NewComment<'a> {
+    pub author: &'a str,
+    pub body: &'a str,
+}
+
 const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 
 pub const DONE: &str = STATUSES[3];
@@ -751,49 +762,72 @@ impl Store {
     }
 
     pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
+        self.update_task_with_comment(id, patch, None)
+    }
+
+    /// The edit and the comment, if any, are one write: both are saved or neither, and a refused
+    /// comment or edit changes nothing, not even the change counter.
+    pub fn update_task_with_comment(&self, id: i64, patch: TaskPatch, comment: Option<NewComment<'_>>) -> Result<Task> {
+        let edit = self.check_edit(&patch)?;
+        let comment = comment.as_ref().map(check_handoff).transpose()?;
+        self.write(|c| {
+            self.apply_edit(c, id, &edit)?;
+            if let Some(comment) = &comment {
+                Self::insert_comment(c, id, comment.author, comment.body)?;
+            }
+            Ok(())
+        })?;
+        self.get_task(id)
+    }
+
+    /// Refuses what is wrong with a patch before a write begins, so nothing waits on the lock for it.
+    fn check_edit<'a>(&self, patch: &'a TaskPatch) -> Result<Edit<'a>> {
         let title = patch.title.as_deref().map(clean_title).transpose()?;
         let url = patch.url.as_deref().map(clean_url).transpose()?;
         if let Some(s) = &patch.status {
             self.check_status(s)?;
         }
-        self.write(|c| {
-            let current = self.get_task(id)?;
-            // Only what the patch changes is written, and only then is the task newer.
-            let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
+        let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
+        Ok(Edit { patch, title, url, tags })
+    }
+
+    /// Runs in the caller's write, on its connection `c`: a later failure there undoes it.
+    fn apply_edit(&self, c: &Connection, id: i64, edit: &Edit) -> Result<()> {
+        let patch = edit.patch;
+        let current = self.get_task(id)?;
+        // Only what the patch changes is written, and only then is the task newer.
+        c.execute(
+            &format!(
+                "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
+                   human = coalesce(?3, human), tags = coalesce(?4, tags),
+                   description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
+                 WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
+                   coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
+                   <> (title, project_id, human, tags, description, url)"
+            ),
+            params![
+                edit.title,
+                patch.project_id,
+                patch.human,
+                edit.tags,
+                patch.description.as_deref().map(str::trim),
+                id,
+                edit.url
+            ],
+        )?;
+        if let Some(s) = &patch.status
+            && *s != current.status
+        {
+            let position = Self::end_of_column(c, s, id)?;
             c.execute(
-                &format!(
-                    "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
-                       human = coalesce(?3, human), tags = coalesce(?4, tags),
-                       description = coalesce(?5, description), url = coalesce(?7, url), updated_at = {NOW}
-                     WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
-                       coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url))
-                       <> (title, project_id, human, tags, description, url)"
-                ),
-                params![
-                    title,
-                    patch.project_id,
-                    patch.human,
-                    tags,
-                    patch.description.as_deref().map(str::trim),
-                    id,
-                    url
-                ],
+                &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
+                params![s, position, id],
             )?;
-            if let Some(s) = &patch.status
-                && *s != current.status
-            {
-                let position = Self::end_of_column(c, s, id)?;
-                c.execute(
-                    &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
-                    params![s, position, id],
-                )?;
-            }
-            if let Some(keys) = &patch.waits_on {
-                self.set_waits(c, id, keys)?;
-            }
-            Ok(())
-        })?;
-        self.get_task(id)
+        }
+        if let Some(keys) = &patch.waits_on {
+            self.set_waits(c, id, keys)?;
+        }
+        Ok(())
     }
 
     /// In one write: all or nothing, and about 60 times faster than one write per task. Tags are
@@ -978,17 +1012,10 @@ impl Store {
             return Err(Error::Invalid("comment body is empty".into()));
         }
         images.iter().try_for_each(|f| check_image(f))?;
-        let author = match author.trim() {
-            "" => "me",
-            a => a,
-        };
+        let author = clean_author(author);
         self.get_task(task_id)?;
         let id = self.write(|c| {
-            c.execute(
-                "INSERT INTO comments (task_id, author, body) VALUES (?1, ?2, ?3)",
-                params![task_id, author, body],
-            )?;
-            let id = c.last_insert_rowid();
+            let id = Self::insert_comment(c, task_id, author, body)?;
             let mut insert = c.prepare("INSERT INTO images (task_id, comment_id, file) VALUES (?1, ?2, ?3)")?;
             for file in images {
                 insert.execute(params![task_id, id, file])?;
@@ -996,6 +1023,13 @@ impl Store {
             Ok(id)
         })?;
         self.get_comment(id)
+    }
+
+    /// Runs in the caller's write, on its connection `c`. `author` and `body` are already clean.
+    fn insert_comment(c: &Connection, task_id: i64, author: &str, body: &str) -> Result<i64> {
+        let sql = "INSERT INTO comments (task_id, author, body) VALUES (?1, ?2, ?3)";
+        c.execute(sql, params![task_id, author, body])?;
+        Ok(c.last_insert_rowid())
     }
 
     fn get_comment(&self, id: i64) -> Result<Comment> {
@@ -1329,6 +1363,34 @@ fn clean_title(title: &str) -> Result<String> {
     Ok(title)
 }
 
+fn clean_author(author: &str) -> &str {
+    match author.trim() {
+        "" => "me",
+        a => a,
+    }
+}
+
+/// An explicitly passed handoff comment must have something in it and fit `HANDOFF_MAX` bytes.
+fn check_handoff<'a>(comment: &NewComment<'a>) -> Result<NewComment<'a>> {
+    let body = comment.body.trim();
+    if body.is_empty() {
+        return Err(Error::Invalid("comment is empty".into()));
+    }
+    if body.len() > HANDOFF_MAX {
+        let (size, most) = (body.len(), HANDOFF_MAX);
+        return Err(Error::Invalid(format!("comment is {size} bytes; the most is {most} (16 KiB)")));
+    }
+    Ok(NewComment { author: clean_author(comment.author), body })
+}
+
+/// A patch with its text cleaned and its status checked.
+struct Edit<'a> {
+    patch: &'a TaskPatch,
+    title: Option<String>,
+    url: Option<String>,
+    tags: Option<String>,
+}
+
 fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
     let key = key.trim();
     let (slug, num) = match key.rsplit_once('#') {
@@ -1437,6 +1499,124 @@ mod tests {
 
         s.update_task(a, waits("")).unwrap();
         assert!(s.get_task(a).unwrap().waiting_on.is_empty());
+    }
+
+    /// All a task edit with a comment could change: the change counter, the task and its comments.
+    fn state(s: &Store, id: i64) -> (i64, String, usize) {
+        (s.changes().unwrap(), format!("{:?}", s.get_task(id).unwrap()), s.list_comments(id).unwrap().len())
+    }
+
+    fn handoff() -> TaskPatch {
+        TaskPatch {
+            status: Some("review".into()),
+            human: Some(true),
+            tags: Some("handoff".into()),
+            ..Default::default()
+        }
+    }
+
+    fn note(body: &str) -> Option<NewComment<'_>> {
+        Some(NewComment { author: "codex", body })
+    }
+
+    #[test]
+    fn a_handoff_saves_the_edit_the_human_flag_and_the_comment_together() {
+        let (dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Ship it", "").unwrap();
+        let before = s.changes().unwrap();
+
+        let after = s.update_task_with_comment(t.id, handoff(), note("  Completed: a\nRemaining: b \n")).unwrap();
+        assert_eq!((after.status.as_str(), after.human, after.comments), ("review", true, 1));
+        assert_eq!(after.tags, ["handoff"]);
+        assert!(s.changes().unwrap() > before);
+
+        // A new connection, as after a restart, finds all of it.
+        let again = Store::open(&dir.path().join("kanzo.db"), None).unwrap();
+        let task = again.get_task(t.id).unwrap();
+        assert_eq!((task.status.as_str(), task.human), ("review", true));
+        let comments = again.list_comments(t.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!((comments[0].author.as_str(), comments[0].body.as_str()), ("codex", "Completed: a\nRemaining: b"));
+    }
+
+    #[test]
+    fn a_comment_can_go_with_an_edit_that_changes_nothing() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Ship it", "").unwrap();
+        let note = Some(NewComment { author: " ", body: "Still on it" });
+        s.update_task_with_comment(t.id, TaskPatch::default(), note).unwrap();
+        assert_eq!(s.get_task(t.id).unwrap().status, "todo");
+        assert_eq!(s.list_comments(t.id).unwrap()[0].author, "me", "a blank author is `me`, as in add_comment");
+    }
+
+    #[test]
+    fn a_refused_comment_changes_nothing_not_even_the_counter() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Ship it", "").unwrap();
+        let before = state(&s, t.id);
+
+        // 8193 characters, but 16386 bytes: the limit counts bytes.
+        let wide = "é".repeat(HANDOFF_MAX / 2 + 1);
+        assert!(wide.chars().count() < HANDOFF_MAX);
+        let long = "x".repeat(HANDOFF_MAX + 1);
+        for body in ["", " \n\t ", long.as_str(), wide.as_str()] {
+            let err = s.update_task_with_comment(t.id, handoff(), note(body)).unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{err}");
+            assert_eq!(state(&s, t.id), before, "{} bytes", body.len());
+        }
+
+        // Exactly the limit fits, measured after trimming; add_comment keeps its own, no limit.
+        let fits = format!("  {}\n", "é".repeat(HANDOFF_MAX / 2));
+        s.update_task_with_comment(t.id, TaskPatch::default(), note(&fits)).unwrap();
+        assert_eq!(s.list_comments(t.id).unwrap()[0].body.len(), HANDOFF_MAX);
+        s.add_comment(t.id, "me", &long, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_refused_edit_changes_nothing_and_saves_no_comment() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let [a, b] = ["a", "b"].map(|t| s.create_task(p.id, t, "").unwrap().id);
+        s.update_task(a, waits(&b.to_string())).unwrap();
+        let before = state(&s, b);
+
+        // The status and the human flag are written before the list of waits is refused.
+        let patches = [
+            TaskPatch { waits_on: Some(a.to_string()), ..handoff() },
+            TaskPatch { waits_on: Some("999".into()), ..handoff() },
+            TaskPatch { status: Some("nope".into()), ..handoff() },
+            TaskPatch { title: Some("  ".into()), ..handoff() },
+            TaskPatch { url: Some("not a link".into()), ..handoff() },
+        ];
+        for patch in patches {
+            assert!(s.update_task_with_comment(b, patch, note("Completed: x")).is_err());
+            assert_eq!(state(&s, b), before);
+        }
+        assert!(s.update_task_with_comment(999, handoff(), note("Completed: x")).is_err());
+        assert_eq!(state(&s, b), before);
+    }
+
+    #[test]
+    fn a_comment_that_cannot_be_saved_undoes_the_edit() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let [t, other] = ["t", "other"].map(|t| s.create_task(p.id, t, "").unwrap().id);
+        let trigger = "CREATE TRIGGER stop BEFORE INSERT ON comments BEGIN SELECT RAISE(ABORT, 'closed'); END;";
+        s.conn.execute_batch(trigger).unwrap();
+        let before = state(&s, t);
+
+        let patch = TaskPatch { waits_on: Some(other.to_string()), ..handoff() };
+        let err = s.update_task_with_comment(t, patch, note("Completed: x")).unwrap_err();
+        assert!(matches!(err, Error::Db(_)) && err.to_string().contains("closed"), "{err}");
+        assert_eq!(state(&s, t), before, "status, flag, tags and waits are undone with it");
+
+        // The connection is still usable, and the same edit without a comment goes through.
+        let patch = TaskPatch { waits_on: Some(other.to_string()), ..handoff() };
+        let after = s.update_task(t, patch).unwrap();
+        assert_eq!((after.status.as_str(), after.human, after.waiting_on), ("review", true, vec![other]));
     }
 
     #[test]

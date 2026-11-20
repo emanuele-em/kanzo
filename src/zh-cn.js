@@ -38,6 +38,7 @@ const ZH_CN = {
   "Show older": "显示更早的",
   "Show {0} older": "显示更早的 {0} 个",
   "Human task: agents skip it": "人工任务：智能体会跳过",
+  "Human review": "人工评审",
   "Copy {0}": "复制 {0}",
   "Copied {0}": "已复制 {0}",
   "Show {0}": "展开{0}",
