@@ -75,6 +75,12 @@ aside {
 .nav a .count { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 .nav .label { color: var(--faint); padding: 18px 10px 6px; }
 .nav .item { position: relative; }
+/* A joined board's sidebar: this computer's projects, then the shared board's. */
+.nav .board-label { display: flex; align-items: center; gap: 6px; padding-top: 10px; font-size: 12px; }
+.nav .board-label .icon svg { width: 14px; height: 14px; }
+.nav .board-label .board-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav .board-label .down { margin-left: auto; color: var(--danger); }
+.nav .board-sep { height: 1px; margin: 12px 10px 4px; background: var(--border); }
 .nav .more {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none;
   width: 28px; height: 28px; padding: 5px; border: 0; border-radius: 8px; background: none; color: var(--muted);
@@ -531,6 +537,10 @@ label.setting { cursor: pointer; }
   .nav { flex-direction: row; overflow-x: auto; }
   .nav a { width: auto; }
   .nav .label { display: none; }
+  .nav .board-sep { width: 1px; height: auto; margin: 6px 4px; }
+  /* Only the section's icon, so the two boards' All projects still tell apart. */
+  .nav .board-label { display: flex; padding: 0 2px 0 6px; color: var(--muted); }
+  .nav .board-label .board-name, .nav .board-label .down { display: none; }
   #new-project-toggle, #rail, .panel-edge, #p-wide, .row .tags { display: none; }
   .list { padding: 0 12px 12px; }
   .panel { width: 100vw; }
@@ -550,6 +560,7 @@ html:not(.ready) aside { visibility: hidden; }
   .rail .brand { font-size: 0; gap: 12px; flex-direction: column; padding: 4px 0 12px; }
   .rail .brand .ghost { margin: 0; }
   .rail .nav .name, .rail .nav .count, .rail .nav .item .more, .rail .nav .label { display: none; }
+  .rail .nav .board-sep { margin: 8px 6px; }
 }
 </style>
 </head>
@@ -564,6 +575,7 @@ html:not(.ready) aside { visibility: hidden; }
   <button class="ghost" id="new-project-toggle" title="New project"><span class="icon" data-icon="newProject"></span>New project</button>
   <nav class="nav" id="nav"></nav>
   <button class="ghost update" id="update" hidden><span class="icon" data-icon="update"></span><span id="update-label"></span></button>
+  <button class="ghost update" id="update-shared" hidden><span class="icon" data-icon="update"></span><span id="update-shared-label"></span></button>
   <button class="ghost" id="install" title="Use the board as an app of its own" hidden><span class="icon" data-icon="update"></span>Install app</button>
   <button class="ghost" id="settings" title="Settings" aria-haspopup="menu"><span class="icon" data-icon="settings"></span>Settings</button>
 </aside>
