@@ -174,7 +174,7 @@ impl Status {
                 out
             }
             State::Joined => format!(
-                "Using the board at {}. Your agents use it too, from their next call.",
+                "Using the board at {}, shown in the sidebar under this computer's. Your agents use it, from their next call.",
                 self.host.as_deref().unwrap_or_default()
             ),
             State::Private => "Not shared: the board is on this computer only.".into(),

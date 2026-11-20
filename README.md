@@ -191,7 +191,7 @@ Several computers, one board, at the same time: everyone sees the same tasks, an
   <img alt="The share popover on another computer: connected to the shared board, with a Leave button" src="docs/img/join-light.jpg">
 </picture>
 
-Nothing restarts and nothing needs configuring. Their board shows the shared one, and their agents use it through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
+Nothing restarts and nothing needs configuring. Their sidebar shows the shared board's projects under their own, so their private projects stay one click away, and their agents use the shared board through the same `kanzo mcp`, still finding the project from the repo they work in. Turn sharing off, or click **Leave**, at any time.
 
 From a terminal, or for an agent, it's `kanzo share on` and `kanzo join <address>`, then `kanzo share off` and `kanzo leave`.
 
