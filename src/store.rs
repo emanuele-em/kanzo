@@ -110,8 +110,10 @@ const MIGRATIONS: &[&str] = &[
          SELECT 'task.updated', t.id, t.project_id, p.slug, t.status
          FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = old.task_id;
      END;
+     -- Keeps the last `events_kept` (Settings), 1000 when unset.
      CREATE TRIGGER events_keep_recent AFTER INSERT ON events BEGIN
-         DELETE FROM events WHERE id <= new.id - 10000;
+         DELETE FROM events
+         WHERE id <= new.id - coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'events_kept'), 1000);
      END;",
 ];
 
@@ -191,15 +193,20 @@ impl Task {
     }
 }
 
+/// Events `/api/events` keeps unless Settings says otherwise: enough for a reader that
+/// was away a while, about 80 KB on disk.
+pub const EVENTS_KEPT: i64 = 1000;
+const EVENTS_KEPT_RANGE: std::ops::RangeInclusive<i64> = 100..=100_000;
+
 /// A page of events after a reader's cursor.
 #[derive(Debug, Clone, Serialize)]
 pub struct EventPage {
     pub events: Vec<Event>,
     /// The cursor to pass as `since` next time.
     pub last: String,
-    /// The cursor names no event of this board: it was dropped (only the last 10,000 are
-    /// kept), or the board was replaced, as by `kanzo sync`. Read the board again, then go
-    /// on from `last`.
+    /// The cursor names no event of this board: it was dropped (only the last `events_kept`
+    /// are kept), or the board was replaced, as by `kanzo sync`. Read the board again, then
+    /// go on from `last`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reset: bool,
 }
@@ -450,6 +457,32 @@ impl Store {
         Ok(self.conn.prepare_cached("SELECT coalesce(max(id), 0) FROM events")?.query_row([], |r| r.get(0))?)
     }
 
+    /// How many of the newest events `/api/events` keeps.
+    pub fn events_kept(&self) -> Result<i64> {
+        let kept: Option<i64> = self
+            .conn
+            .query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'events_kept'", [], |r| r.get(0))
+            .optional()?;
+        Ok(kept.unwrap_or(EVENTS_KEPT))
+    }
+
+    pub fn set_events_kept(&self, kept: i64) -> Result<()> {
+        if !EVENTS_KEPT_RANGE.contains(&kept) {
+            let (min, max) = (EVENTS_KEPT_RANGE.start(), EVENTS_KEPT_RANGE.end());
+            return Err(Error::Invalid(format!("keep between {min} and {max} events")));
+        }
+        self.write(|c| {
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES ('events_kept', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [kept.to_string()],
+            )?;
+            // Fewer at once, not only when the next event comes.
+            c.execute("DELETE FROM events WHERE id <= (SELECT max(id) FROM events) - ?1", [kept])?;
+            c.execute("UPDATE meta SET value = value + 1 WHERE key = 'changes'", [])?;
+            Ok(())
+        })
+    }
+
     /// The events after `since`, a cursor from an earlier page; without one, an empty page
     /// that says where to start. Read in one transaction, so the page and its cursor agree.
     pub fn events_after(&self, since: Option<&str>, project_id: Option<i64>, limit: usize) -> Result<EventPage> {
@@ -464,6 +497,12 @@ impl Store {
             return Ok(EventPage { events: Vec::new(), last: newest, reset: false });
         };
         let after = if since == "0" {
+            // `0` came from a board with no events yet; if some were dropped since, the
+            // reader missed them.
+            let oldest: i64 = self.conn.query_row("SELECT coalesce(min(id), 1) FROM events", [], |r| r.get(0))?;
+            if oldest > 1 {
+                return Ok(EventPage { events: Vec::new(), last: newest, reset: true });
+            }
             0
         } else {
             let parsed = since
@@ -1699,19 +1738,50 @@ mod tests {
     }
 
     #[test]
-    fn only_the_last_ten_thousand_events_are_kept() {
+    fn only_the_last_events_kept_in_settings_are_kept() {
         let (_dir, s) = store();
         let p = s.create_project("api", "", None).unwrap();
-        s.conn
-            .execute_batch(&format!(
-                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10050)
-                 INSERT INTO events (kind, task_id, project_id, project) SELECT 'task.created', i, {}, 'api' FROM n;",
-                p.id
-            ))
-            .unwrap();
-        let (oldest, newest) = s.event_range().unwrap();
-        assert_eq!(newest - oldest + 1, 10_000);
-        assert_eq!(newest, 10_050);
+        let add = |n: i64| {
+            s.conn
+                .execute_batch(&format!(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {n})
+                     INSERT INTO events (kind, task_id, project_id, project) SELECT 'task.created', i, {}, 'api' FROM n;",
+                    p.id
+                ))
+                .unwrap();
+        };
+        add(1050);
+        assert_eq!(s.events_kept().unwrap(), 1000);
+        assert_eq!(s.event_range().unwrap(), (51, 1050));
+
+        // More is kept from now on, fewer at once.
+        s.set_events_kept(2000).unwrap();
+        add(1500);
+        assert_eq!(s.event_range().unwrap(), (551, 2550));
+        s.set_events_kept(300).unwrap();
+        assert_eq!(s.event_range().unwrap(), (2251, 2550));
+        assert_eq!(s.events_kept().unwrap(), 300);
+
+        assert!(matches!(s.set_events_kept(99), Err(Error::Invalid(_))));
+        assert!(matches!(s.set_events_kept(100_001), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn a_reader_at_zero_starts_over_once_events_were_dropped() {
+        let (_dir, s) = store();
+        let start = s.events_after(None, None, 500).unwrap();
+        assert_eq!(start.last, "0");
+        let p = s.create_project("api", "", None).unwrap();
+        s.create_task(p.id, "one", "").unwrap();
+        assert_eq!(s.events_after(Some("0"), None, 500).unwrap().events.len(), 1);
+
+        s.set_events_kept(100).unwrap();
+        for i in 0..100 {
+            s.create_task(p.id, &format!("t{i}"), "").unwrap();
+        }
+        let page = s.events_after(Some("0"), None, 500).unwrap();
+        assert!(page.reset && page.events.is_empty());
+        assert_ne!(page.last, "0");
     }
 
     #[test]

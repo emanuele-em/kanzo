@@ -576,6 +576,7 @@ struct BoardQuery {
 struct Board {
     changes: String,
     done_hidden: usize,
+    events_kept: i64,
     hidden_properties: Vec<String>,
     projects: Vec<store::Project>,
     statuses: Vec<String>,
@@ -598,6 +599,7 @@ async fn board(State(home): Shared, Query(q): Query<BoardQuery>) -> Response {
         Ok(Board {
             changes: change_token(h, s)?,
             done_hidden,
+            events_kept: s.events_kept()?,
             hidden_properties: s.hidden_properties()?,
             projects: s.list_projects()?,
             statuses: s.statuses().to_vec(),
@@ -700,12 +702,14 @@ async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
 enum Settings {
     Backlog { backlog: bool },
     Property { property: String, visible: bool },
+    EventsKept { events_kept: i64 },
 }
 
 async fn update_settings(State(home): Shared, Json(r): Json<Settings>) -> Response {
     with_store(home, move |_, s| match r {
         Settings::Backlog { backlog } => s.set_backlog(backlog),
         Settings::Property { property, visible } => s.set_property(&property, visible),
+        Settings::EventsKept { events_kept } => s.set_events_kept(events_kept),
     })
     .await
 }
@@ -1252,6 +1256,23 @@ mod tests {
             assert_eq!(code, "200");
             assert_eq!(got["events"][0]["kind"], "task.created");
             assert!(began.elapsed() < Duration::from_secs(5), "answers when the event comes, not after the wait");
+        });
+    }
+
+    #[test]
+    fn settings_change_how_many_events_are_kept() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = test_home(&tmp);
+            let (_, board) = get_from(&home, "/api/board").await;
+            assert_eq!(board["events_kept"], 1000);
+
+            let patch = "PATCH /api/settings HTTP/1.0\r\nHost: 127.0.0.1:PORT";
+            assert_eq!(status(&home, Net::Private, &[], None, patch, r#"{"events_kept":300}"#).await, "200");
+            let (_, board) = get_from(&home, "/api/board").await;
+            assert_eq!(board["events_kept"], 300);
+            assert_eq!(status(&home, Net::Private, &[], None, patch, r#"{"events_kept":50}"#).await, "400");
         });
     }
 

@@ -190,6 +190,8 @@ const ZH_CN = {
   "The language of the board's interface": "看板界面的显示语言",
   "Backlog column": "暂存列",
   "A column before todo, for tasks agents leave alone": "待办之前的列，智能体不会动里面的任务",
+  "Events kept": "保留的事件",
+  "Recent changes /api/events remembers for services": "/api/events 为外部服务保留的最近变更",
   "Task properties": "任务属性",
   "Turn one off to hide it on the board and leave it out of what agents get. Nothing is deleted.":
     "关掉一项即可在看板上隐藏，智能体也拿不到它。内容不会被删除。",
