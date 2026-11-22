@@ -139,6 +139,9 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 
 ## 响应变化
 
+> [!TIP]
+> **直接告诉你的智能体：** *“写一个脚本，每当有 kanzo 任务进入 todo 时就启动一个智能体。”*
+
 服务可以跟随看板的变化做出反应，例如任务进入 `todo` 时启动一个智能体，而不必一遍遍读取整个看板。
 
 - **开始：** `GET /api/events` 返回 `{"events": [], "last": "41.9f3c…"}`。记住游标 `last`；`0` 表示第一个事件之前。
@@ -146,6 +149,7 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 - **内容：** 每个事件有 `id`、`at`、`kind`（`task.created`、`task.moved`、`task.updated`、`task.deleted`、`comment.added`）、`task`（如 `api#12`）、`project`，适用时还有 `from` 和 `to`（列）以及评论的 `author`。一次编辑就是一个事件：改变了列就是 `task.moved`（无论还改了什么），否则是 `task.updated`。在同一列内调整顺序不算事件。任务移到另一个项目时，按新项目报告。
 - **不会丢失：** 事件与变更写在同一个事务里。保留最近 1,000 个，或按“看板”设置里的数量。
 - 回复中出现 `"reset": true` 时**重新开始**：游标不对应此看板的任何事件，因为它已被丢弃，或看板已被替换（例如 `kanzo sync`）。重新读取看板，然后从 `last` 继续。
+- **在加入了另一个看板的电脑上，** `/api/events` 是本电脑自己的看板；共享看板的事件在 `/remote/api/events`。
 
 ## 筛选和搜索
 
