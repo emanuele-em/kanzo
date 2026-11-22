@@ -19,6 +19,13 @@ const STATUS_COLORS = ["#8a8a83", "#3b82f6", "#e8a317", "#2f9e44", "#ae3ec9", "#
 
 const state = {
   project: "all",
+  // Which board is on screen: this computer's, or the shared one it joined ("shared").
+  on: "local",
+  // The shared board's address while this computer has joined one.
+  joined: null,
+  // The projects of the board not on screen, for the sidebar of a joined board.
+  other: null,
+  sharedDown: false,
   board: null,
   changes: null,
   task: null,
@@ -33,9 +40,12 @@ const state = {
   sweeping: false,
 };
 
-async function api(method, path, body) {
+// A joined board's page reaches the shared board under /remote.
+const base = (board = state.on) => board === "shared" ? "/remote" : "";
+
+async function api(method, path, body, board) {
   const image = body instanceof Blob;
-  const res = await fetch("/api" + path, {
+  const res = await fetch(base(board) + "/api" + path, {
     method,
     headers: body ? { "Content-Type": image ? body.type : "application/json" } : {},
     body: image || !body ? body : JSON.stringify(body),
@@ -71,6 +81,41 @@ function localStorageSet(k, v) {
   try { localStorage.setItem(k, v); } catch {}
 }
 
+const systemTheme = matchMedia("(prefers-color-scheme: dark)");
+let themePreference = readThemePreference();
+
+function readThemePreference() {
+  const saved = localStorageGet("kanzo.theme");
+  return saved === "light" || saved === "dark" ? saved : "system";
+}
+
+function applyTheme() {
+  const dark = themePreference === "dark" || (themePreference === "system" && systemTheme.matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  $('meta[name="theme-color"]').content = dark ? "#000000" : "#f9f9f9";
+  $("#settings-theme").value = themePreference;
+}
+
+function onSystemThemeChange() {
+  if (themePreference === "system") applyTheme();
+}
+
+// Safari 13.1 only supports the older MediaQueryList API.
+if (systemTheme.addEventListener) systemTheme.addEventListener("change", onSystemThemeChange);
+else systemTheme.addListener(onSystemThemeChange);
+window.addEventListener("storage", (e) => {
+  if (e.key === "kanzo.theme" || e.key === null) {
+    themePreference = readThemePreference();
+    applyTheme();
+  }
+});
+$("#settings-theme").addEventListener("change", (e) => {
+  themePreference = e.target.value;
+  localStorageSet("kanzo.theme", themePreference);
+  applyTheme();
+});
+applyTheme();
+
 // The board's language: a saved choice wins, else the browser's. English is the
 // source strings, so it runs with no dictionary at all.
 const LANG = (() => {
@@ -104,6 +149,7 @@ function el(tag, attrs = {}, ...children) {
 const ICONS = {
   newProject: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/>',
   board: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7M12 7v4M16 7v9"/>',
+  laptop: '<path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16"/>',
   folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
@@ -170,8 +216,8 @@ const PROJECT_COLORS = {
   teal: "#14b8a6", blue: "#3b82f6", purple: "#a855f7", pink: "#ec4899",
 };
 
-function projectColorName(slug) {
-  const picked = state.board?.projects.find((p) => p.slug === slug)?.color;
+function projectColorName(slug, board = state.on) {
+  const picked = projectsOf(board).find((p) => p.slug === slug)?.color;
   if (PROJECT_COLORS[picked]) return picked;
   const names = Object.keys(PROJECT_COLORS).filter((n) => n !== "gray");
   let h = 0;
@@ -179,8 +225,12 @@ function projectColorName(slug) {
   return names[h % names.length];
 }
 
-function projectColor(slug) {
-  return PROJECT_COLORS[projectColorName(slug)];
+function projectColor(slug, board) {
+  return PROJECT_COLORS[projectColorName(slug, board)];
+}
+
+function projectsOf(board) {
+  return (board === state.on ? state.board?.projects : state.other?.projects) || [];
 }
 
 function statusStep(status) {
@@ -361,24 +411,54 @@ async function loadBoard() {
   }
 }
 
+// The shared board's projects start with @, as its slugs can be this computer's too.
 function updateHash() {
-  const hash = "#" + state.project + (state.task ? "/" + state.task : "");
+  const hash = "#" + (state.on === "shared" ? "@" : "") + state.project + (state.task ? "/" + state.task : "");
   if (location.hash !== hash) history.replaceState(null, "", hash);
 }
 
 function readHash() {
   let hash = location.hash.slice(1);
   try { hash = decodeURIComponent(hash); } catch {}
-  const [slug, task] = hash.split("/");
-  return { slug: slug || null, task: Number(task) || null };
+  const shared = hash.startsWith("@");
+  const [slug, task] = hash.slice(shared ? 1 : 0).split("/");
+  return { slug: slug || null, task: Number(task) || null, board: shared ? "shared" : "local" };
 }
 
-function setProject(slug) {
+function setProject(slug, board = state.on) {
+  if (board === "shared" && !state.joined) board = "local";
+  if (board !== state.on) {
+    if (state.task) closeTask();
+    // The board on screen becomes the other one in the sidebar, until each reloads.
+    state.other = state.board && { projects: state.board.projects, changes: state.changes };
+    state.on = board;
+    state.changes = null;
+    state.board = state.board && { ...state.board, projects: [], tasks: [] };
+  }
   state.project = slug;
-  localStorageSet("kanzo.project", slug);
+  localStorageSet("kanzo.project", (board === "shared" ? "@" : "") + slug);
   updateHash();
   state.layout = "";
   loadBoard();
+  loadOther();
+}
+
+// The other board's projects, for the sidebar. Only a joined board has one.
+let otherRequest = 0;
+
+async function loadOther() {
+  const request = ++otherRequest;
+  if (!state.joined) {
+    state.other = null;
+    if (state.board) renderNav();
+    return;
+  }
+  const board = state.on === "shared" ? "local" : "shared";
+  let other;
+  try { other = await api("GET", "/projects", null, board); } catch { other = { projects: [], changes: null }; }
+  if (request !== otherRequest) return;
+  state.other = other;
+  if (state.board) renderNav();
 }
 
 function render() {
@@ -392,24 +472,43 @@ function renderNav() {
   if (renaming && document.contains(renaming.input)) return;
   // Nor while dragging a project: it would cancel the drag.
   if (movingProject) return;
-  const { projects } = state.board;
-  const open = projects.reduce((n, p) => n + p.open, 0);
-  const link = (slug, name, count, glyph) =>
-    el("a", { href: "#" + slug, title: name, draggable: "false", class: state.project === slug ? "active" : null,
-              onclick: (e) => { e.preventDefault(); setProject(slug); } },
+  const link = (board, slug, name, count, glyph) =>
+    el("a", { href: "#" + (board === "shared" ? "@" : "") + slug, title: name, draggable: "false",
+              class: state.on === board && state.project === slug ? "active" : null,
+              onclick: (e) => { e.preventDefault(); setProject(slug, board); } },
       glyph,
       el("span", { class: "name" }, name),
       el("span", { class: "count" }, String(count)));
-  const item = (p) => renaming && renaming.slug === p.slug
-    ? el("div", { class: "item renaming" }, icon("folder", projectColor(p.slug)), renaming.input)
+  // The board on screen's projects can be changed from here; the other's once it is on screen.
+  const item = (board) => (p) => renaming && renaming.slug === p.slug && board === state.on
+    ? el("div", { class: "item renaming" }, icon("folder", projectColor(p.slug, board)), renaming.input)
+    : board !== state.on ? el("div", { class: "item" }, link(board, p.slug, p.name, p.open, icon("folder", projectColor(p.slug, board))))
     : el("div", { class: "item" + (state.menu === p.slug ? " menu-open" : ""), draggable: "true", "data-slug": p.slug },
-    link(p.slug, p.name, p.open, icon("folder", projectColor(p.slug))),
+    link(board, p.slug, p.name, p.open, icon("folder", projectColor(p.slug, board))),
     el("button", { class: "more", title: tr("More"), "aria-label": tr("More for {0}", p.name), "aria-haspopup": "menu",
                    onclick: (e) => toggleProjectMenu(p, e.currentTarget) }, icon("more")));
+  const all = (board, projects) => link(board, "all", tr("All projects"), projects.reduce((n, p) => n + p.open, 0), icon("board"));
+  if (!state.joined) {
+    const { projects } = state.board;
+    $("#nav").replaceChildren(
+      all("local", projects),
+      ...(projects.length ? [el("div", { class: "label" }, tr("Projects"))] : []),
+      ...projects.map(item("local")),
+    );
+    return;
+  }
+  const local = projectsOf("local"), shared = projectsOf("shared");
+  const host = state.joined.replace(/:4242$/, "");
   $("#nav").replaceChildren(
-    link("all", tr("All projects"), open, icon("board")),
-    ...(projects.length ? [el("div", { class: "label" }, tr("Projects"))] : []),
-    ...projects.map(item),
+    el("div", { class: "label board-label", title: tr("This computer") }, icon("laptop"), el("span", { class: "board-name" }, tr("This computer"))),
+    all("local", local),
+    ...local.map(item("local")),
+    el("div", { class: "board-sep" }),
+    el("div", { class: "label board-label", title: tr("Shared by {0}", host) }, icon("share"),
+      el("span", { class: "board-name" }, tr("Shared · {0}", host)),
+      state.sharedDown ? el("span", { class: "down" }, tr("unreachable")) : null),
+    all("shared", shared),
+    ...shared.map(item("shared")),
   );
 }
 
@@ -594,7 +693,7 @@ function renderHeader() {
 
 async function deleteProject(p) {
   const tasks = p.total ? tr(" and its {0}, with their comments", plural(p.total, "task")) : "";
-  if (!confirm(tr("Delete project {0}{1}? This cannot be undone.", p.slug, tasks))) return;
+  if (!(await ask(tr("Delete project {0}{1}? This cannot be undone.", p.slug, tasks)))) return;
   try {
     await api("DELETE", `/projects/${encodeURIComponent(p.slug)}`);
     if (panelTask?.project === p.slug) { fresh = null; closeTask(); }
@@ -777,8 +876,8 @@ $("#columns").addEventListener("mousedown", (e) => {
   sweep(e);
 });
 
-async function changeSelected(change) {
-  const ids = state.board.tasks.filter((t) => state.selected.has(t.id)).map((t) => t.id);
+async function changeSelected(change, selected = state.selected) {
+  const ids = state.board.tasks.filter((t) => selected.has(t.id)).map((t) => t.id);
   try { await api("POST", "/tasks/bulk", { ids, ...change }); } catch (err) { toast(err.message); }
   loadBoard();
 }
@@ -792,8 +891,9 @@ $("#bulk-status").addEventListener("change", (e) => {
   changeSelected({ status: e.target.value });
   e.target.value = "";
 });
-$("#bulk-delete").addEventListener("click", () => {
-  if (confirm(`Delete ${plural(state.selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true });
+$("#bulk-delete").addEventListener("click", async () => {
+  const selected = new Set(state.selected);
+  if (await ask(`Delete ${plural(selected.size, "task")}, with comments and images? This cannot be undone.`)) changeSelected({ delete: true }, selected);
 });
 $("#bulk-clear").addEventListener("click", clearSelection);
 
@@ -1157,10 +1257,10 @@ window.addEventListener("pagehide", () => {
     : null;
   if (fields) {
     fresh = null;
-    fetch(`/api/tasks/${panelTask.id}`, { method: "PATCH", keepalive: true,
+    fetch(`${base()}/api/tasks/${panelTask.id}`, { method: "PATCH", keepalive: true,
                                           headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) });
   }
-  if (fresh) fetch(`/api/tasks/${fresh}`, { method: "DELETE", keepalive: true });
+  if (fresh) fetch(`${base()}/api/tasks/${fresh}`, { method: "DELETE", keepalive: true });
 });
 
 function showNewProject() {
@@ -1172,6 +1272,29 @@ function hideNewProject() {
   $("#new-project").reset();
   $("#project-dialog").hidden = true;
 }
+
+// The browser's own confirm dialog, in the page: a browser can turn the native one
+// off, as a sandboxed frame does, and it then answers Cancel without asking.
+let answerAsk = null;
+
+function ask(message) {
+  answerAsk?.(false);
+  const back = document.activeElement;
+  $("#ask-text").textContent = message;
+  $("#ask-dialog").hidden = false;
+  $("#ask-ok").focus();
+  return new Promise((resolve) => {
+    answerAsk = (yes) => {
+      answerAsk = null;
+      $("#ask-dialog").hidden = true;
+      back?.focus?.();
+      resolve(yes);
+    };
+  });
+}
+
+$("#ask").addEventListener("submit", (e) => { e.preventDefault(); answerAsk?.(true); });
+$("#ask-cancel").addEventListener("click", () => answerAsk?.(false));
 
 $("#new-task").addEventListener("click", newTask);
 $("#human-only").addEventListener("click", () => setHumanOnly(!isHumanOnly()));
@@ -1292,7 +1415,7 @@ async function refreshTask() {
 }
 
 async function deleteComment(c) {
-  if (!confirm(tr("Delete this comment? This cannot be undone."))) return;
+  if (!(await ask(tr("Delete this comment? This cannot be undone.")))) return;
   try {
     await api("DELETE", `/comments/${c.id}`);
     await refreshTask();
@@ -1353,7 +1476,7 @@ panel.addEventListener("click", async (e) => {
   e.preventDefault();
   try {
     const path = decodeURIComponent(link.getAttribute("href").slice(7)).replace(/^\/([a-zA-Z]:)/, "$1");
-    await api("POST", "/open", { path });
+    await api("POST", "/open", { path }, "local");
   } catch (err) { toast(err.message); }
 });
 
@@ -1461,7 +1584,7 @@ async function attachImages(images, toComment) {
 
 function thumb(file, onRemove) {
   return el("div", { class: "thumb" },
-    el("a", { href: `/images/${file}`, target: "_blank", rel: "noopener" }, el("img", { src: `/images/${file}`, alt: tr("Attached image") })),
+    el("a", { href: `${base()}/images/${file}`, target: "_blank", rel: "noopener" }, el("img", { src: `${base()}/images/${file}`, alt: tr("Attached image") })),
     onRemove ? el("button", { type: "button", class: "remove-image", title: tr("Remove image"), "aria-label": tr("Remove image"), onclick: onRemove }, icon("close")) : null);
 }
 
@@ -1609,11 +1732,12 @@ $("#p-comment").addEventListener("keydown", (e) => {
 
 $("#p-delete").addEventListener("click", async () => {
   if (!panelTask) return;
-  const extra = panelTask.comments ? tr(" and its {0}", plural(panelTask.comments, "comment")) : "";
-  if (!confirm(tr("Delete {0}{1}? This cannot be undone.", key(panelTask), extra))) return;
+  const task = panelTask;
+  const extra = task.comments ? tr(" and its {0}", plural(task.comments, "comment")) : "";
+  if (!(await ask(tr("Delete {0}{1}? This cannot be undone.", key(task), extra)))) return;
   try {
-    if (fresh === panelTask.id) fresh = null;
-    await api("DELETE", `/tasks/${panelTask.id}`);
+    if (fresh === task.id) fresh = null;
+    await api("DELETE", `/tasks/${task.id}`);
     closeTask();
     loadBoard();
   } catch (err) { toast(err.message); }
@@ -1679,6 +1803,8 @@ $("#search").addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  // The board waits behind a question, as it would behind confirm().
+  if (!$("#ask-dialog").hidden) return;
   const typing = e.target.closest("input, textarea, select");
   const plain = !typing && !e.metaKey && !e.ctrlKey;
   if (e.key === "Escape" && state.menu) { closeMenu(); return; }
@@ -1701,32 +1827,45 @@ document.addEventListener("keydown", (e) => {
 });
 
 window.addEventListener("hashchange", () => {
-  const { slug, task } = readHash();
-  if ((slug || "all") !== state.project) setProject(slug || "all");
+  const { slug, task, board } = readHash();
+  if ((slug || "all") !== state.project || board !== state.on) setProject(slug || "all", board);
   if (task && task !== state.task) openTask(task);
   else if (!task && state.task) closeTask();
 });
 
 async function poll() {
   if (document.hidden) return schedulePoll();
-  try {
-    const { changes, guests = null } = await api("GET", "/changes");
-    $("#offline").hidden = true;
-    if (guests !== state.guests) {
-      state.guests = guests;
-      renderNetwork();
-      if (state.menu === "network") loadNetwork();
-    }
-    if (changes !== state.changes) {
-      state.changes = changes;
-      // Joining or leaving a board, even from the terminal, shows another board.
-      loadNetwork();
-      await loadBoard();
-      if (state.task) refreshTask();
-    }
-  } catch {
-    $("#offline").hidden = false;
+  let local = null, shared = null;
+  try { local = await api("GET", "/changes", null, "local"); } catch {}
+  // Joining or leaving a board, even from the terminal, shows it in the sidebar or takes it away.
+  const joined = local ? local.joined ?? null : state.joined;
+  if (joined !== state.joined) {
+    state.joined = joined;
+    loadNetwork();
+    checkSharedUpdate();
+    if (!joined && state.on === "shared") setProject("all", "local");
+    else loadOther();
   }
+  if (state.joined) {
+    try { shared = await api("GET", "/changes", null, "shared"); } catch {}
+    if (!shared !== state.sharedDown) { state.sharedDown = !shared; if (state.board) renderNav(); }
+  }
+  const current = state.on === "shared" ? shared : local;
+  const other = state.on === "shared" ? local : shared;
+  $("#offline").hidden = !!current;
+  // A joined board's count comes from the shared board.
+  const guests = state.joined ? shared?.guests ?? null : local?.guests ?? null;
+  if ((state.joined ? shared : local) && guests !== state.guests) {
+    state.guests = guests;
+    renderNetwork();
+    if (state.menu === "network") loadNetwork();
+  }
+  if (current && current.changes !== state.changes) {
+    state.changes = current.changes;
+    await loadBoard();
+    if (state.task) refreshTask();
+  }
+  if (state.joined && other && other.changes !== state.other?.changes) loadOther();
   schedulePoll();
 }
 
@@ -1754,15 +1893,15 @@ async function syncNow(keep) {
   if (diverged) chooseSide(diverged);
 }
 
-function chooseSide({ first }) {
+async function chooseSide({ first }) {
   const repo = repoName(syncRemote);
   if (first) {
-    if (confirm(tr("{0} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.", repo))) syncNow("remote");
-    else if (confirm(tr("Replace the board in {0} with this machine's board instead?", repo))) syncNow("local");
+    if (await ask(tr("{0} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.", repo))) syncNow("remote");
+    else if (await ask(tr("Replace the board in {0} with this machine's board instead?", repo))) syncNow("local");
     return;
   }
-  if (confirm(tr("This machine and another one both changed the board since the last sync, and boards can't be merged.\n\nKeep THIS machine's board, and overwrite the other one?"))) syncNow("local");
-  else if (confirm(tr("Take the other machine's board instead? This machine's board is kept in kanzo.db.bak."))) syncNow("remote");
+  if (await ask(tr("This machine and another one both changed the board since the last sync, and boards can't be merged.\n\nKeep THIS machine's board, and overwrite the other one?"))) syncNow("local");
+  else if (await ask(tr("Take the other machine's board instead? This machine's board is kept in kanzo.db.bak."))) syncNow("remote");
 }
 
 let syncRemote = null;
@@ -1801,7 +1940,7 @@ $("#sync-form").addEventListener("submit", async (e) => {
 
 async function loadNetwork() {
   let net = null;
-  try { net = await api("GET", "/network"); } catch {}
+  try { net = await api("GET", "/network", null, "local"); } catch {}
   setNet(net);
 }
 
@@ -1816,9 +1955,12 @@ function renderNetwork() {
   const net = state.net;
   const button = $("#network");
   // Opened from another computer's browser, the board can't tell which computer it is on.
-  const away = !net && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  // The base URL, not location: it is the board's address even where the page runs
+  // without one of its own, as in an app that shows the board in a sandboxed frame.
+  const here = new URL(document.baseURI).hostname;
+  const away = !net && !["localhost", "127.0.0.1", "[::1]"].includes(here);
   const hosted = net?.state === "joined" || away;
-  const host = net?.host?.replace(/:4242$/, "") || location.hostname;
+  const host = net?.host?.replace(/:4242$/, "") || here;
   const n = state.guests;
   const shared = hosted || n != null;
   const computers = n == null ? "" : tr(": {0} connected", plural(n, "computer"));
@@ -1864,7 +2006,7 @@ function renderNetworkMenu() {
   $("#network-join").hidden = !net;
   $("#network-join").classList.toggle("disabled", now === "sharing");
   $("#network-join-text").replaceChildren(joined ? tr("Connected to {0}", net.host) : tr("Join a shared board"),
-    el("span", {}, joined ? tr("This computer uses that board")
+    el("span", {}, joined ? tr("Its projects show in the sidebar, under this computer's")
       : now === "sharing" ? tr("Stop sharing to join another board")
       : tr("The address the sharing computer shows")));
   $("#network-leave").hidden = !joined;
@@ -1886,14 +2028,18 @@ function toggleNetworkMenu() {
   loadNetwork();
 }
 
-// Joining or leaving shows another board, so the page reloads.
+// Joining or leaving adds or takes away a board, so the page reloads, on the board just joined.
 async function changeNetwork(change) {
   $("#network-error").hidden = true;
   networkBusy = true;
   let net = state.net;
   try {
-    net = await api("POST", "/network", change);
-    if (change.action === "join" || change.action === "leave") { location.reload(); return; }
+    net = await api("POST", "/network", change, "local");
+    if (change.action === "join" || change.action === "leave") {
+      history.replaceState(null, "", change.action === "join" ? "#@all" : "#all");
+      location.reload();
+      return;
+    }
   } catch (err) {
     $("#network-error").textContent = err.message;
     $("#network-error").hidden = false;
@@ -1982,7 +2128,7 @@ $("#settings-nav").addEventListener("click", (e) => {
 });
 $("#settings-close").addEventListener("click", closeSettings);
 for (const [dialog, close] of [[$("#project-dialog"), hideNewProject], [$("#search-dialog"), closeSearch],
-                               [$("#settings-dialog"), closeSettings]]) {
+                               [$("#settings-dialog"), closeSettings], [$("#ask-dialog"), () => answerAsk?.(false)]]) {
   dialog.addEventListener("mousedown", (e) => { if (e.target === dialog) close(); });
   dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
 }
@@ -2017,28 +2163,43 @@ $("#settings-update").addEventListener("click", checkForUpdates);
 
 async function checkUpdate() {
   try {
-    showUpdate(await api("GET", "/update"));
+    showUpdate(await api("GET", "/update", null, "local"));
   } catch {}
+  checkSharedUpdate();
 }
 
-function showUpdate({ current, available }) {
-  const button = $("#update");
+// The computer sharing the board may have no page open, like a Raspberry Pi: the
+// computers that joined it offer its update, so it never falls behind them.
+async function checkSharedUpdate() {
+  let status = {};
+  if (state.joined) try { status = await api("GET", "/update", null, "shared"); } catch {}
+  showUpdate(status, "shared");
+}
+
+const UPDATE_TEXT = {
+  local: { label: "Update to {0}", button: "#update" },
+  shared: { label: "Update shared board to {0}", button: "#update-shared" },
+};
+
+function showUpdate({ current, available }, board = "local") {
+  const button = $(UPDATE_TEXT[board].button);
   button.hidden = !available;
   if (!available) return;
-  $("#update-label").textContent = tr("Update to {0}", available);
-  button.title = tr("You have {0}", current);
-  button.onclick = () => {
-    if (confirm(tr("Update Kanzo from {0} to {1}? The board restarts, which takes a few seconds.", current, available))) installUpdate(available);
-  };
+  button.querySelector("span:last-child").textContent = tr(UPDATE_TEXT[board].label, available);
+  button.title = board === "shared" ? tr("The shared board has {0}", current) : tr("You have {0}", current);
+  const question = board === "shared"
+    ? tr("Update the shared board from {0} to {1}? It restarts, which takes a few seconds.", current, available)
+    : tr("Update Kanzo from {0} to {1}? The board restarts, which takes a few seconds.", current, available);
+  button.onclick = async () => { if (await ask(question)) installUpdate(available, board); };
 }
 
 async function checkForUpdates() {
   toast(tr("Checking for updates…"));
   try {
-    const status = await api("GET", "/update?now=1");
+    const status = await api("GET", "/update?now=1", null, "local");
     showUpdate(status);
     if (status.available) {
-      if (confirm(tr("Kanzo {0} is out (you have {1}). Download and install it now? The board restarts.", status.available, status.current))) {
+      if (await ask(tr("Kanzo {0} is out (you have {1}). Download and install it now? The board restarts.", status.available, status.current))) {
         installUpdate(status.available);
       }
     } else if (status.latest) {
@@ -2049,29 +2210,31 @@ async function checkForUpdates() {
   } catch (err) { toast(err.message); }
 }
 
-async function installUpdate(available) {
-  const button = $("#update");
+async function installUpdate(available, board = "local") {
+  const button = $(UPDATE_TEXT[board].button);
+  const label = button.querySelector("span:last-child");
   button.hidden = false;
   button.disabled = true;
-  $("#update-label").textContent = tr("Updating…");
+  label.textContent = tr("Updating…");
   let res;
   try {
-    res = await api("POST", "/update");
+    res = await api("POST", "/update", null, board);
   } catch (err) {
     toast(err.message);
     button.disabled = false;
-    $("#update-label").textContent = tr("Update to {0}", available);
+    label.textContent = tr(UPDATE_TEXT[board].label, available);
     return;
   }
   if (!res.restarting) {
-    $("#update-label").textContent = tr("Restart Kanzo to finish");
-    toast(tr("Kanzo {0} is installed. Restart Kanzo to use it.", available));
+    label.textContent = tr("Restart Kanzo to finish");
+    toast(board === "shared" ? tr("Kanzo {0} is installed on the shared board. Restart Kanzo there to use it.", available)
+      : tr("Kanzo {0} is installed. Restart Kanzo to use it.", available));
     return;
   }
   // The old program answered, then gives way to the new one: wait for it, then reload.
   await new Promise((r) => setTimeout(r, 1500));
   for (let i = 0; i < 60; i++) {
-    try { await api("GET", "/update"); break; } catch { await new Promise((r) => setTimeout(r, 1000)); }
+    try { await api("GET", "/update", null, board); break; } catch { await new Promise((r) => setTimeout(r, 1000)); }
   }
   location.reload();
 }
@@ -2139,8 +2302,21 @@ loadDictionary().then(() => {
   loadNetwork();
   schedulePoll();
   {
-    const { slug, task } = readHash();
-    state.project = slug || localStorageGet("kanzo.project") || "all";
-    loadBoard().then(() => { if (task) openTask(task); });
+    let { slug, task, board } = readHash();
+    if (!slug) {
+      const saved = localStorageGet("kanzo.project") || "all";
+      board = saved.startsWith("@") ? "shared" : "local";
+      slug = saved.replace(/^@/, "");
+    }
+    // The shared board shows only if this computer still uses it.
+    api("GET", "/changes", null, "local").catch(() => ({})).then(({ joined = null }) => {
+      state.joined = joined;
+      checkSharedUpdate();
+      state.on = joined ? board : "local";
+      state.project = joined || board === "local" ? slug : "all";
+      updateHash();
+      loadOther();
+      loadBoard().then(() => { if (task) openTask(task); });
+    });
   }
 });

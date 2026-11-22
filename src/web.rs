@@ -9,7 +9,7 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{any, delete, get, patch, post};
 use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -31,12 +31,13 @@ const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 const MANIFEST: &str = r##"{"id":"/","name":"Kanzo","start_url":"/","display":"standalone","background_color":"#ffffff","icons":[{"src":"/icon.png","sizes":"192x192 512x512","type":"image/png"}]}"##;
 
 /// Scripts only from this server, so even a bug in the Markdown renderer cannot run injected script.
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+/// The one inline script, which sets the theme before the first paint, runs by its hash.
+const CSP: &str = "default-src 'none'; script-src 'self' 'sha256-qbmIwOLWfXjTJcvp/pTTPC8bx25itrEad7276b6Vh5A='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
                    connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 pub async fn serve(home: Home, open: bool) -> Result<()> {
     let port = home.config.port;
-    let guard = Arc::new(Guard::new(port, home.config.listen, Net::load(&home)));
+    let guard = Arc::new(Guard::new(port, home.config.listen, Net::load(&home), home.config.hosts.clone()));
     let url = format!("http://localhost:{port}");
     let listener = match TcpListener::bind(SocketAddr::new(guard.address(), port)).await {
         Ok(l) => l,
@@ -57,7 +58,7 @@ pub async fn serve(home: Home, open: bool) -> Result<()> {
     println!("Kanzo board at {url}, data in {}", home.dir.display());
     match guard.net() {
         Net::Private => {}
-        Net::Joined(host) => println!("It shows the board at {host}."),
+        Net::Joined(host) => println!("It also shows the board at {host}."),
         _ => {
             println!("{}", guard.status().message());
             println!("Anyone who can reach port {port} can read and change this board.");
@@ -173,18 +174,21 @@ async fn stop_signal() {
 }
 
 fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router {
-    let mut shared = Router::new();
+    // A joined board sends its agents to the shared one, while its page shows both boards.
+    let mut agents = Router::new();
     if home.config.mcp_http {
-        shared = shared.nest_service("/mcp", crate::mcp::http_service(home.clone(), shutdown.clone()));
+        agents = agents
+            .nest_service("/mcp", crate::mcp::http_service(home.clone(), shutdown.clone()))
+            .route_layer(middleware::from_fn_with_state(guard.clone(), forward));
     }
-    let shared = shared
+    let board = Router::new()
         .route("/images/{file}", get(image_file))
         .route("/api/changes", get(changes))
         // Shutdown also answers waiting readers, which would otherwise hold it up.
         .route("/api/events", get(events).layer(Extension(shutdown)))
         .route("/api/board", get(board))
         .route("/api/search", get(search))
-        .route("/api/projects", post(create_project))
+        .route("/api/projects", get(projects).post(create_project))
         .route("/api/projects/{slug}", patch(update_project).delete(delete_project))
         .route("/api/projects/{slug}/repos", post(link_repo).delete(unlink_repo))
         .route("/api/projects/{slug}/move", post(move_project))
@@ -199,8 +203,7 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         .route("/api/images/{id}", delete(delete_image))
         .route("/api/tasks/{id}/images", post(attach_image))
         .route("/api/sync", get(sync_status).post(sync_now).put(sync_repo))
-        .route("/api/settings", patch(update_settings))
-        .route_layer(middleware::from_fn_with_state(guard.clone(), forward));
+        .route("/api/settings", patch(update_settings));
     Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS) }))
@@ -217,10 +220,15 @@ fn router(home: Home, guard: Arc<Guard>, shutdown: CancellationToken) -> Router 
         )
         .route("/api/ping", get(|| async { "kanzo" }))
         .route("/api/update", get(update_status).post(update_now))
-        .route("/api/network", get(network).post(change_network).route_layer(middleware::from_fn(this_computer)))
-        // Not forwarded by a joined board either: the files are on this computer.
-        .route("/api/open", post(open_file).route_layer(middleware::from_fn(this_computer)))
-        .merge(shared)
+        .route(
+            "/api/network",
+            get(network).post(change_network).route_layer(middleware::from_fn_with_state(guard.clone(), this_computer)),
+        )
+        // The files are on this computer, whichever board the task is on.
+        .route("/api/open", post(open_file).route_layer(middleware::from_fn_with_state(guard.clone(), this_computer)))
+        .route("/remote/{*path}", any(remote))
+        .merge(board)
+        .merge(agents)
         .layer(Extension(guard.clone()))
         .layer(middleware::from_fn_with_state(guard, protect))
         .layer(middleware::map_response(stamp_version))
@@ -235,13 +243,14 @@ async fn stamp_version(mut res: Response) -> Response {
 }
 
 /// DNS rebinding needs a domain name the attacker controls, so the board only accepts
-/// `localhost`, IP addresses and, when it listens on the network, this machine's own names.
+/// `localhost`, IP addresses, the names in `hosts` and, when it listens on the network, this machine's own names.
 struct Guard {
     port: u16,
     listen: IpAddr,
     net: Mutex<Net>,
     guests: Mutex<HashMap<IpAddr, (Instant, Option<String>)>>,
     names: OnceLock<Vec<String>>,
+    hosts: Vec<String>,
     rebind: Mutex<CancellationToken>,
 }
 
@@ -249,13 +258,14 @@ struct Guard {
 const GUEST_GONE: Duration = Duration::from_secs(30);
 
 impl Guard {
-    fn new(port: u16, listen: IpAddr, net: Net) -> Self {
+    fn new(port: u16, listen: IpAddr, net: Net, hosts: Vec<String>) -> Self {
         Self {
             port,
             listen,
             net: Mutex::new(net),
             guests: Mutex::default(),
             names: OnceLock::new(),
+            hosts: hosts.into_iter().map(|h| h.trim_end_matches('.').to_string()).collect(),
             rebind: Mutex::default(),
         }
     }
@@ -316,21 +326,44 @@ impl Guard {
         })
     }
 
+    /// A reverse proxy serves the board, so a request from 127.0.0.1 may come from anyone.
+    fn proxied(&self) -> bool {
+        !self.hosts.is_empty()
+    }
+
+    /// One of `hosts`, on any port: the proxy in front decides which.
+    fn listed(&self, host: &str) -> bool {
+        let name = split_host(host).0;
+        !name.is_empty() && self.hosts.iter().any(|h| h.eq_ignore_ascii_case(name))
+    }
+
     fn allows(&self, host: &str) -> bool {
-        let (name, port) = match host.rsplit_once(':') {
-            Some((n, p)) if !p.contains(']') => (n, Some(p)),
-            _ => (host, None),
-        };
+        if self.listed(host) {
+            return true;
+        }
+        let (name, port) = split_host(host);
         if port.is_some_and(|p| p.parse() != Ok(self.port)) {
             return false;
         }
-        let name = name.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
         let ip = name.parse::<IpAddr>().ok();
         if name.eq_ignore_ascii_case("localhost") || ip.is_some_and(|ip| ip.is_loopback()) {
             return true;
         }
         self.lan() && (ip.is_some() || self.names().iter().any(|n| n.eq_ignore_ascii_case(name)))
     }
+}
+
+/// A `Host` header's name, without brackets or a trailing dot, and its port.
+fn split_host(host: &str) -> (&str, Option<&str>) {
+    let (name, port) = match host.rsplit_once(':') {
+        Some((n, p)) if !p.contains(']') => (n, Some(p)),
+        _ => (host, None),
+    };
+    (name.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.'), port)
+}
+
+fn host(req: &Request) -> &str {
+    req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("")
 }
 
 fn guest(req: &Request) -> Option<IpAddr> {
@@ -344,24 +377,46 @@ async fn forward(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> R
     }
 }
 
-async fn this_computer(req: Request, next: Next) -> Response {
-    match guest(&req) {
-        Some(_) => fail(StatusCode::FORBIDDEN, "only the computer with the board can do that").into_response(),
-        None => next.run(req).await,
+/// The shared board, for the page of a board that joined it: `/remote/api/board` is its `/api/board`.
+async fn remote(Extension(guard): Extension<Arc<Guard>>, mut req: Request) -> Response {
+    let Net::Joined(host) = guard.net() else {
+        return fail(StatusCode::NOT_FOUND, "this board has not joined another").into_response();
+    };
+    let path = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    let path = path.strip_prefix("/remote").unwrap_or(path);
+    match path.parse() {
+        Ok(uri) => *req.uri_mut() = uri,
+        Err(e) => return fail(StatusCode::BAD_REQUEST, e).into_response(),
     }
+    share::forward(&host, req).await
+}
+
+/// A reverse proxy here connects from 127.0.0.1 for whoever reaches it, so a request for one
+/// of `hosts` counts as from another computer too. So does one the proxy says it forwarded:
+/// a proxy that passes on its visitor's `Host` would otherwise let `Host: localhost` through.
+async fn this_computer(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
+    let forwarded = ["forwarded", "x-forwarded-for", "x-forwarded-host"].iter().any(|h| req.headers().contains_key(*h));
+    if guest(&req).is_some() || guard.listed(host(&req)) || (guard.proxied() && forwarded) {
+        return fail(StatusCode::FORBIDDEN, "only the computer with the board can do that").into_response();
+    }
+    next.run(req).await
 }
 
 async fn protect(State(guard): State<Arc<Guard>>, req: Request, next: Next) -> Response {
     let guest = guest(&req);
     let ok = {
-        let header = |name| req.headers().get(name).and_then(|h: &HeaderValue| h.to_str().ok());
-        let host = header(header::HOST).unwrap_or("");
+        let host = host(&req);
+        // Behind a proxy the browser may well be on https.
+        let schemes: &[&str] = if guard.listed(host) { &["http://", "https://"] } else { &["http://"] };
         let same_origin = |o: &str| {
-            o.len() == host.len() + 7
-                && o.as_bytes()[..7].eq_ignore_ascii_case(b"http://")
-                && o.as_bytes()[7..].eq_ignore_ascii_case(host.as_bytes())
+            schemes.iter().any(|s| {
+                o.len() == s.len() + host.len()
+                    && o.as_bytes()[..s.len()].eq_ignore_ascii_case(s.as_bytes())
+                    && o.as_bytes()[s.len()..].eq_ignore_ascii_case(host.as_bytes())
+            })
         };
-        guard.allows(host) && header(header::ORIGIN).is_none_or(same_origin) && (guest.is_none() || guard.lan())
+        let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok());
+        guard.allows(host) && origin.is_none_or(same_origin) && (guest.is_none() || guard.lan())
     };
     if let Some(ip) = guest.filter(|_| ok) {
         let name =
@@ -437,11 +492,28 @@ fn change_token(home: &Home, s: &Store) -> store::Result<String> {
 struct Changes {
     changes: String,
     guests: Option<usize>,
+    /// The shared board this one joined, so its page shows it, or stops, from the next check.
+    joined: Option<String>,
 }
 
 async fn changes(State(home): Shared, Extension(guard): Extension<Arc<Guard>>) -> Response {
     let guests = guard.lan().then(|| guard.guests().len());
-    with_store(home, move |h, s| Ok(Changes { changes: change_token(h, s)?, guests })).await
+    let joined = match guard.net() {
+        Net::Joined(host) => Some(host),
+        _ => None,
+    };
+    with_store(home, move |h, s| Ok(Changes { changes: change_token(h, s)?, guests, joined })).await
+}
+
+#[derive(Serialize)]
+struct Projects {
+    changes: String,
+    projects: Vec<store::Project>,
+}
+
+/// The sidebar of a board that joined another lists both boards' projects, without their tasks.
+async fn projects(State(home): Shared) -> Response {
+    with_store(home, move |h, s| Ok(Projects { changes: change_token(h, s)?, projects: s.list_projects()? })).await
 }
 
 #[derive(Deserialize)]
@@ -1004,23 +1076,32 @@ mod tests {
         }
     }
 
-    /// The status of asking a board to open `path`, from `from`.
-    async fn open_from(home: &Home, from: Option<IpAddr>, path: &str) -> String {
+    #[test]
+    fn csp_allows_the_inline_theme_script() {
+        use base64::Engine;
+        use sha2::Digest;
+        let script = INDEX.split("<script>").nth(1).and_then(|s| s.split("</script>").next()).unwrap();
+        let hash = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(script));
+        assert!(CSP.contains(&format!("'sha256-{hash}'")), "put 'sha256-{hash}' in CSP's script-src");
+    }
+
+    /// The status of a board's answer to `head`, its request line and headers with `PORT` for
+    /// its port, and a JSON `body`, sent from `from`.
+    async fn status(home: &Home, net: Net, hosts: &[&str], from: Option<IpAddr>, head: &str, body: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), Net::Sharing));
+        let hosts = hosts.iter().map(|h| h.to_string()).collect();
+        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), net, hosts));
         let mut app = router(home.clone(), guard, CancellationToken::new());
         if let Some(ip) = from {
             app = app.layer(Extension(ConnectInfo(SocketAddr::new(ip, 1))));
         }
         tokio::spawn(async move { axum::serve(listener, app).await });
-        let body = json!({ "path": path }).to_string();
         let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        let head = format!(
-            "POST /api/open HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        );
-        conn.write_all(format!("{head}{body}").as_bytes()).await.unwrap();
+        let head = head.replace("PORT", &port.to_string());
+        let request =
+            format!("{head}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        conn.write_all(request.as_bytes()).await.unwrap();
         let mut reply = String::new();
         conn.read_to_string(&mut reply).await.unwrap();
         reply.split(' ').nth(1).unwrap().to_string()
@@ -1034,7 +1115,7 @@ mod tests {
     async fn get_stopping(home: &Home, path: &str, shutdown: CancellationToken) -> (String, serde_json::Value) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), Net::Private));
+        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), Net::Private, Vec::new()));
         let app = router(home.clone(), guard, shutdown);
         tokio::spawn(async move { axum::serve(listener, app).await });
         let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -1196,6 +1277,12 @@ mod tests {
         });
     }
 
+    /// The status of asking a board to open `path`, from `from`.
+    async fn open_from(home: &Home, from: Option<IpAddr>, path: &str) -> String {
+        let body = json!({ "path": path }).to_string();
+        status(home, Net::Sharing, &[], from, "POST /api/open HTTP/1.0\r\nHost: 127.0.0.1:PORT", &body).await
+    }
+
     #[test]
     fn only_this_computer_opens_a_file_and_only_a_file() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1217,9 +1304,211 @@ mod tests {
         });
     }
 
+    /// A board for `home` on a free port, on the network the way `net` says.
+    async fn serve_board(home: &Home, net: Net) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let guard = Arc::new(Guard::new(port, Ipv4Addr::LOCALHOST.into(), net, Vec::new()));
+        let app = router(home.clone(), guard, CancellationToken::new());
+        tokio::spawn(
+            async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await },
+        );
+        port
+    }
+
+    /// The status and body of `GET path` on the board at `port`.
+    async fn get(port: u16, path: &str) -> (u16, String) {
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let head = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        conn.write_all(head.as_bytes()).await.unwrap();
+        let mut reply = Vec::new();
+        conn.read_to_end(&mut reply).await.unwrap();
+        let reply = String::from_utf8_lossy(&reply).into_owned();
+        let status = reply.split(' ').nth(1).unwrap().parse().unwrap();
+        let body = reply.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_string();
+        (status, body)
+    }
+
+    fn slugs(body: &str) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        value["projects"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// A host sharing a board with project `api`, and a guest joined to it with its own project `mine`.
+    async fn joined_boards() -> (tempfile::TempDir, tempfile::TempDir, u16, u16) {
+        let host_dir = tempfile::tempdir().unwrap();
+        let host = Home::open(host_dir.path().to_path_buf()).unwrap();
+        host.store().unwrap().create_project("api", "API", None).unwrap();
+        let host_port = serve_board(&host, Net::Sharing).await;
+
+        let guest_dir = tempfile::tempdir().unwrap();
+        let guest = Home::open(guest_dir.path().to_path_buf()).unwrap();
+        guest.store().unwrap().create_project("mine", "Mine", None).unwrap();
+        let guest_port = serve_board(&guest, Net::Joined(format!("127.0.0.1:{host_port}"))).await;
+        (host_dir, guest_dir, host_port, guest_port)
+    }
+
+    #[test]
+    fn a_joined_board_keeps_showing_its_own_projects() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (_host_dir, _guest_dir, _, guest) = joined_boards().await;
+            let (status, body) = get(guest, "/api/board").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["mine"]);
+        });
+    }
+
+    #[test]
+    fn a_joined_board_reaches_the_shared_one_under_remote() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (_host_dir, _guest_dir, _, guest) = joined_boards().await;
+            let (status, body) = get(guest, "/remote/api/board").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["api"]);
+            let (status, body) = get(guest, "/remote/api/projects").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["api"]);
+        });
+    }
+
+    #[test]
+    fn only_a_joined_board_has_a_remote_one() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = Home::open(tmp.path().to_path_buf()).unwrap();
+            let port = serve_board(&home, Net::Private).await;
+            let (status, body) = get(port, "/remote/api/board").await;
+            assert_eq!(status, 404, "{body}");
+            assert!(body.contains("not joined"), "{body}");
+        });
+    }
+
+    #[test]
+    fn projects_lists_a_board_without_its_tasks() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = Home::open(tmp.path().to_path_buf()).unwrap();
+            home.store().unwrap().create_project("web", "Web", None).unwrap();
+            let port = serve_board(&home, Net::Private).await;
+            let (status, body) = get(port, "/api/projects").await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(slugs(&body), ["web"]);
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(value["changes"].is_string(), "{body}");
+            assert!(value.get("tasks").is_none(), "{body}");
+        });
+    }
+
+    #[test]
+    fn a_joined_board_sees_the_update_the_shared_one_can_take() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            update::pretend_latest("999.0.0");
+            let (_host_dir, _guest_dir, _, guest) = joined_boards().await;
+            let (status, body) = get(guest, "/remote/api/update").await;
+            assert_eq!(status, 200, "{body}");
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["current"], update::CURRENT, "{body}");
+            assert_eq!(value["available"], "999.0.0", "{body}");
+        });
+    }
+
+    #[test]
+    fn changes_say_which_board_this_one_joined() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (_host_dir, _guest_dir, host, guest) = joined_boards().await;
+            let (_, body) = get(guest, "/api/changes").await;
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["joined"], format!("127.0.0.1:{host}"), "{body}");
+            let (_, body) = get(host, "/api/changes").await;
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(value["joined"].is_null(), "{body}");
+        });
+    }
+
+    #[test]
+    fn a_listed_host_reaches_the_board_but_not_this_computer() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut home = Home::open(tmp.path().to_path_buf()).unwrap();
+            home.config.editor = Some("true".into());
+            let file = tmp.path().join("notes.md");
+            std::fs::write(&file, "").unwrap();
+            let open = json!({ "path": file }).to_string();
+            // A reverse proxy on this computer: every request comes from 127.0.0.1.
+            let proxied = async |hosts: &[&str], head: &str, body: &str| {
+                status(&home, Net::Private, hosts, None, head, body).await
+            };
+            let listed = &["board.example.ts.net"];
+
+            for origin in ["", "\r\nOrigin: https://board.example.ts.net", "\r\nOrigin: http://board.example.ts.net"] {
+                let head = format!("GET /api/board HTTP/1.0\r\nHost: board.example.ts.net{origin}");
+                assert_eq!(proxied(listed, &head, "").await, "200", "{origin}");
+            }
+            for head in [
+                "GET /api/board HTTP/1.0\r\nHost: other.example.ts.net",
+                "GET /api/board HTTP/1.0\r\nHost: board.example.ts.net\r\nOrigin: https://evil.com",
+                "GET /api/board HTTP/1.0\r\nHost: board.example.ts.net\r\nOrigin: https://other.example.ts.net",
+                // https is only for the listed names.
+                "GET /api/board HTTP/1.0\r\nHost: 127.0.0.1:PORT\r\nOrigin: https://127.0.0.1:PORT",
+            ] {
+                assert_eq!(proxied(listed, head, "").await, "403", "{head}");
+            }
+            assert_eq!(proxied(&[], "GET /api/board HTTP/1.0\r\nHost: board.example.ts.net", "").await, "403");
+
+            assert_eq!(proxied(listed, "POST /api/open HTTP/1.0\r\nHost: board.example.ts.net", &open).await, "403");
+            assert_eq!(proxied(listed, "GET /api/network HTTP/1.0\r\nHost: board.example.ts.net", "").await, "403");
+            let off = json!({ "change": "off" }).to_string();
+            assert_eq!(proxied(listed, "POST /api/network HTTP/1.0\r\nHost: board.example.ts.net", &off).await, "403");
+            assert_eq!(proxied(listed, "GET /api/network HTTP/1.0\r\nHost: 127.0.0.1:PORT", "").await, "200");
+        });
+    }
+
+    #[test]
+    fn a_proxy_cant_pass_a_visitor_off_as_this_computer() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut home = Home::open(tmp.path().to_path_buf()).unwrap();
+            home.config.editor = Some("true".into());
+            let file = tmp.path().join("notes.md");
+            std::fs::write(&file, "").unwrap();
+            let open = json!({ "path": file }).to_string();
+            let listed = &["board.example.ts.net"];
+            // A proxy that passes on whatever Host its visitor sent, from 127.0.0.1.
+            for forwarded in
+                ["X-Forwarded-For: 203.0.113.9", "Forwarded: for=203.0.113.9", "X-Forwarded-Host: board.example.ts.net"]
+            {
+                for host in ["localhost:PORT", "127.0.0.1:PORT"] {
+                    let open_head = format!("POST /api/open HTTP/1.0\r\nHost: {host}\r\n{forwarded}");
+                    let network_head = format!("GET /api/network HTTP/1.0\r\nHost: {host}\r\n{forwarded}");
+                    assert_eq!(
+                        status(&home, Net::Private, listed, None, &open_head, &open).await,
+                        "403",
+                        "{open_head}"
+                    );
+                    assert_eq!(
+                        status(&home, Net::Private, listed, None, &network_head, "").await,
+                        "403",
+                        "{network_head}"
+                    );
+                }
+            }
+            // This computer's own browser sends none of them.
+            let head = "GET /api/network HTTP/1.0\r\nHost: localhost:PORT";
+            assert_eq!(status(&home, Net::Private, listed, None, head, "").await, "200");
+        });
+    }
+
     #[test]
     fn hosts() {
-        let local = Guard::new(4242, Ipv4Addr::LOCALHOST.into(), Net::Private);
+        let local = Guard::new(4242, Ipv4Addr::LOCALHOST.into(), Net::Private, Vec::new());
         for ok in ["localhost", "localhost:4242", "127.0.0.1:4242", "[::1]:4242", "LOCALHOST:4242"] {
             assert!(local.allows(ok), "{ok}");
         }
@@ -1227,7 +1516,7 @@ mod tests {
             assert!(!local.allows(bad), "{bad}");
         }
 
-        let lan = Guard::new(4242, Ipv4Addr::LOCALHOST.into(), Net::Sharing);
+        let lan = Guard::new(4242, Ipv4Addr::LOCALHOST.into(), Net::Sharing, Vec::new());
         lan.names.set(vec!["pi".into(), "pi.local".into()]).unwrap();
         for ok in ["localhost:4242", "192.168.1.5:4242", "[fe80::1]:4242", "pi.local:4242", "pi:4242", "PI.LOCAL."] {
             assert!(lan.allows(ok), "{ok}");
@@ -1239,5 +1528,14 @@ mod tests {
         lan.set(Net::Private);
         assert!(!lan.allows("192.168.1.5:4242"));
         assert_eq!(lan.address(), IpAddr::from(Ipv4Addr::LOCALHOST));
+
+        let proxied = Guard::new(4242, Ipv4Addr::LOCALHOST.into(), Net::Private, vec!["Board.example.ts.net.".into()]);
+        for ok in ["board.example.ts.net", "BOARD.example.ts.net.", "board.example.ts.net:443", "localhost:4242"] {
+            assert!(proxied.allows(ok), "{ok}");
+        }
+        for bad in ["example.ts.net", "board.example.ts.net.evil.com", "evil.board.example.ts.net", "", ":4242"] {
+            assert!(!proxied.allows(bad), "{bad}");
+        }
+        assert!(proxied.listed("board.example.ts.net:443") && !proxied.listed("localhost:4242"));
     }
 }

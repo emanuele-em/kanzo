@@ -46,6 +46,12 @@ pub fn latest(now: bool) -> Option<String> {
     version
 }
 
+/// Tests answer from this instead of asking GitHub.
+#[cfg(test)]
+pub fn pretend_latest(version: &str) {
+    *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), Some(version.into())));
+}
+
 pub fn newer(version: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> { v.split(['.', '-', '+']).take(3).map(|p| p.parse().unwrap_or(0)).collect() };
     parts(version) > parts(CURRENT)
