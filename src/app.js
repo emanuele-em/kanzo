@@ -2091,6 +2091,8 @@ $("#settings").addEventListener("click", toggleSettingsMenu);
 function openSettings(section = "board") {
   closeMenu();
   $("#settings-backlog").checked = state.board?.statuses.includes("backlog") ?? false;
+  // A board on an older version sends no events_kept.
+  $("#settings-events-kept").value = state.board?.events_kept ?? 1000;
   document.querySelectorAll("[data-property]").forEach((box) => { box.checked = !isPropertyHidden(box.dataset.property); });
   $("#sync-url").value = syncRemote || "";
   $("#sync-create").hidden = !!syncRemote;
@@ -2139,6 +2141,12 @@ async function saveSetting(box, fields) {
   } catch (err) { box.checked = !box.checked; toast(err.message); }
 }
 $("#settings-backlog").addEventListener("change", (e) => saveSetting(e.target, { backlog: e.target.checked }));
+$("#settings-events-kept").addEventListener("change", async (e) => {
+  try {
+    await api("PATCH", "/settings", { events_kept: Number(e.target.value) });
+    loadBoard();
+  } catch (err) { e.target.value = state.board?.events_kept ?? 1000; toast(err.message); }
+});
 $('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL", "Human", "Waiting", "Created", "Updated", "Comments", "Images"].map((name) => {
   const property = name.toLowerCase();
   return el("label", { class: "setting" }, el("span", { class: "text" }, tr(name)),

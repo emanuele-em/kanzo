@@ -673,6 +673,10 @@ html:not(.ready) aside { visibility: hidden; }
           <span class="text">Backlog column<span>A column before todo, for tasks agents leave alone</span></span>
           <span class="switch"><input type="checkbox" id="settings-backlog" aria-label="Backlog column"><span></span></span>
         </label>
+        <label class="setting">
+          <span class="text">Events kept<span>Recent changes /api/events remembers for services</span></span>
+          <input class="field" type="number" id="settings-events-kept" min="100" max="100000" step="100" style="width:7em" aria-label="Events kept">
+        </label>
         <h3>Task properties</h3>
         <p>Turn one off to hide it on the board and leave it out of what agents get. Nothing is deleted.</p>
       </section>
