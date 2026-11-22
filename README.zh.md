@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> | 简体中文 | <a href="README.tr.md">Türkçe</a>
+  <a href="README.md">English</a> | 简体中文 | <a href="README.tr.md">Türkçe</a> | <a href="README.ja.md">日本語</a>
 </p>
 
 Kanzo 把浏览器里的看板和 MCP 服务器装进一个 4.7 MB 的程序，让你和你的编程智能体处理同一批任务：可以在一台电脑上，也可以让多台电脑共享一个看板。无需账号，无需服务器，无需配置：运行 `kanzo` 就能用。
