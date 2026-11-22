@@ -27,6 +27,11 @@ listen = "127.0.0.1"
 # that cannot start `kanzo mcp` themselves.
 mcp_http = true
 
+# Names a reverse proxy on this machine passes the board on under, like
+# "board.example.ts.net" for `tailscale serve`. Requests for them count as
+# from another computer, so they can't open files or change sharing.
+# hosts = ["board.example.ts.net"]
+
 # The editor that file:/// links in tasks open in, as a full path. Without it,
 # macOS uses your default text editor, and other systems can't open them.
 # editor = "/usr/local/bin/cursor"
@@ -59,6 +64,7 @@ pub struct Config {
     _statuses: Option<toml::Value>,
     pub mcp_http: bool,
     pub editor: Option<PathBuf>,
+    pub hosts: Vec<String>,
 }
 
 impl Default for Config {
@@ -69,6 +75,7 @@ impl Default for Config {
             _statuses: None,
             mcp_http: true,
             editor: None,
+            hosts: Vec::new(),
         }
     }
 }
