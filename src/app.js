@@ -1444,7 +1444,7 @@ function toggleProjectPick(button, fallback) {
   const current = panelTask ? panelTask.project : fallback;
   const projects = (state.board ? state.board.projects : []).map((p) => ({ slug: p.slug, name: p.name }));
   if (!projects.some((p) => p.slug === current)) projects.push({ slug: current, name: current });
-  const menu = el("div", { class: "menu", role: "menu", "aria-label": tr("Project"), tabindex: "-1" },
+  const menu = el("div", { class: "menu project-menu", role: "menu", "aria-label": tr("Project"), tabindex: "-1" },
     ...projects.map((p) => el("button", { type: "button", role: "menuitemradio", "aria-checked": String(p.slug === current),
                                           onclick: () => pickTaskProject(p.slug, current) },
       el("span", { class: "dot", style: `background:${projectColor(p.slug)}` }),
@@ -1452,7 +1452,10 @@ function toggleProjectPick(button, fallback) {
       p.slug === current ? el("span", { class: "value" }, icon("check")) : null)));
   document.body.append(menu);
   const r = button.getBoundingClientRect();
-  const below = r.bottom + 4 + menu.offsetHeight <= innerHeight;
+  // Below if it fits, else on the roomier side; a long list scrolls inside the menu there.
+  const below = r.bottom + 4 + menu.offsetHeight <= innerHeight - 8 || innerHeight - r.bottom >= r.top;
+  const room = below ? innerHeight - r.bottom - 12 : r.top - 12;
+  if (menu.offsetHeight > room) menu.style.maxHeight = `${room}px`;
   menu.style.top = `${below ? r.bottom + 4 : r.top - 4 - menu.offsetHeight}px`;
   menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
   menu.addEventListener("keydown", (e) => {
