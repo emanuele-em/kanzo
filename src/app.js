@@ -165,6 +165,7 @@ const ICONS = {
   human: '<circle cx="12" cy="8" r="4"/><path d="M5 21v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1"/>',
   url: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   github: '<path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.1-1.3-.3-2.5-1-3.5.3-1.2.3-2.4 0-3.5 0 0-1 0-3 1.5a12 12 0 0 0-8 0C6 2 5 2 5 2c-.3 1.2-.3 2.4 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.4.5-.7 1-.8 1.7-.2.6-.3 1.2-.2 1.8v4"/><path d="M9 18c-4.5 2-5-2-7-2"/>',
+  gitBranch: '<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
   sync: '<path d="M12 13v8"/><path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.2"/><path d="m8 17 4-4 4 4"/>',
   collapse: '<path d="m13 17 5-5-5-5M6 17l5-5-5-5"/>',
   expand: '<path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/>',
@@ -529,7 +530,7 @@ function toggleProjectMenu(p, button) {
   drawSwatches();
   const repos = el("div", { class: "repos" });
   const drawRepos = (list, focus) => {
-    const input = el("input", { class: "field", placeholder: tr("Link a repo: owner/repo"), "aria-label": tr("Link a GitHub repo"),
+    const input = el("input", { class: "field", placeholder: tr("Link a repo: owner/repo or its URL"), "aria-label": tr("Link a repo"),
                                 autocomplete: "off", spellcheck: "false" });
     input.addEventListener("keydown", async (e) => {
       if (e.key !== "Enter" || !input.value.trim()) return;
@@ -694,8 +695,12 @@ function renderHeader() {
   header.replaceChildren(
     el("h1", {}, p.name),
     el("span", { class: "sub" }, open(p.open)),
-    ...p.repos.map((r) => el("a", { class: "repo-link", href: `https://github.com/${r}`, target: "_blank", rel: "noopener",
-                                    title: tr("Open {0} on GitHub", r) }, icon("github"), r)),
+    // A board on an older version sends no repo_urls.
+    ...p.repos.map((r, i) => {
+      const url = p.repo_urls?.[i] ?? `https://github.com/${r}`, host = new URL(url).host;
+      return el("a", { class: "repo-link", href: url, target: "_blank", rel: "noopener", title: tr("Open {0} on {1}", r, host) },
+        icon(host === "github.com" ? "github" : "gitBranch"), r);
+    }),
   );
 }
 
@@ -720,7 +725,7 @@ function renderColumns() {
     columns.style.display = "flex";
     columns.replaceChildren(el("div", { class: "empty" },
       el("h1", {}, tr("Welcome to Kanzo")),
-      el("p", {}, tr("Create your first project in the sidebar. Link it to a GitHub repo and agents working in that repo will find it on their own.")),
+      el("p", {}, tr("Create your first project in the sidebar. Link it to a git repo and agents working in that repo will find it on their own.")),
       el("button", { class: "btn primary", onclick: showNewProject }, tr("New project"))));
     return;
   }

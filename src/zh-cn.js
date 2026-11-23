@@ -33,8 +33,8 @@ const ZH_CN = {
 
   // Columns and cards.
   "Welcome to Kanzo": "欢迎使用 Kanzo",
-  "Create your first project in the sidebar. Link it to a GitHub repo and agents working in that repo will find it on their own.":
-    "在侧边栏创建你的第一个项目。把它关联到 GitHub 仓库，在那个仓库里干活的智能体会自己找到它。",
+  "Create your first project in the sidebar. Link it to a git repo and agents working in that repo will find it on their own.":
+    "在侧边栏创建你的第一个项目。把它关联到 git 仓库，在那个仓库里干活的智能体会自己找到它。",
   "Show older": "显示更早的",
   "Show {0} older": "显示更早的 {0} 个",
   "Human task: agents skip it": "人工任务：智能体会跳过",
@@ -48,8 +48,8 @@ const ZH_CN = {
   "More for {0}": "{0} 的更多操作",
   "Color": "颜色",
   "Repos": "仓库",
-  "Link a repo: owner/repo": "关联仓库：owner/repo",
-  "Link a GitHub repo": "关联 GitHub 仓库",
+  "Link a repo: owner/repo or its URL": "关联仓库：owner/repo 或仓库 URL",
+  "Link a repo": "关联仓库",
   "Unlink {0}": "取消关联 {0}",
   "Rename": "重命名",
   "Rename {0}": "重命名 {0}",
@@ -111,7 +111,7 @@ const ZH_CN = {
 
   // Header counts and relative times.
   "{0} in {1}": "{1} 中的 {0}",
-  "Open {0} on GitHub": "在 GitHub 上打开 {0}",
+  "Open {0} on {1}": "在 {1} 上打开 {0}",
   "just now": "刚刚",
   "{0}m ago": "{0} 分钟前",
   "{0}h ago": "{0} 小时前",
@@ -167,7 +167,8 @@ const ZH_CN = {
   "Checking…": "检查中…",
   "Save and sync": "保存并同步",
   "Repository URL": "仓库 URL",
-  "Create a private repo on GitHub": "在 GitHub 上新建私有仓库",
+  "Create a private repo on": "新建私有仓库：",
+  "or": "或",
   "Keep this board the same on all your machines through a private git repo you own. Use the same repo on each machine.":
     "通过你自己的私有 git 仓库，让所有电脑上的看板保持一致。每台电脑填同一个仓库。",
   "{0} already has a board. Use it on this machine?\n\nThis machine's current board is kept in kanzo.db.bak.":
@@ -219,8 +220,8 @@ const ZH_CN = {
   "Slug": "slug",
   "Name (optional)": "名称（可选）",
   "Name": "名称",
-  "GitHub owner/repo (optional)": "GitHub owner/repo（可选）",
-  "GitHub repo": "GitHub 仓库",
+  "Repo: owner/repo or its URL (optional)": "仓库：owner/repo 或仓库 URL（可选）",
+  "Repo": "仓库",
   "Letters, digits and -, up to 32": "字母、数字和 -，最长 32 个",
   "Cancel": "取消",
   "OK": "确定",

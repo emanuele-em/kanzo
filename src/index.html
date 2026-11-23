@@ -467,7 +467,7 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .settings-pane p { margin: 0; color: var(--muted); line-height: 1.45; }
 .settings-pane .error { color: var(--danger); white-space: pre-line; font-size: 13px; }
 .settings-pane .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.settings-pane .row a { color: var(--muted); font-size: 13px; }
+.settings-pane .row a, #sync-create { color: var(--muted); font-size: 13px; }
 .settings-pane .row a:hover { color: var(--text); }
 .settings-pane .row .btn { margin-left: auto; }
 .settings-pane .btn:disabled { opacity: .6; cursor: default; }
@@ -683,7 +683,7 @@ html:not(.ready) aside { visibility: hidden; }
         <input class="field" id="sync-url" placeholder="https://github.com/you/kanzo-data" autocomplete="off" spellcheck="false" aria-label="Repository URL">
         <p class="error" id="sync-error" hidden></p>
         <div class="row">
-          <a id="sync-create" href="https://github.com/new?name=kanzo-data&amp;visibility=private" target="_blank" rel="noopener">Create a private repo on GitHub</a>
+          <span id="sync-create">Create a private repo on <a href="https://github.com/new?name=kanzo-data&amp;visibility=private" target="_blank" rel="noopener">GitHub</a> or <a href="https://gitlab.com/projects/new#blank_project" target="_blank" rel="noopener">GitLab</a></span>
           <button class="btn primary" type="submit" id="sync-save">Save and sync</button>
         </div>
       </form>
@@ -729,7 +729,7 @@ html:not(.ready) aside { visibility: hidden; }
     <p>The slug starts each task's key, like api#12.</p>
     <input class="field" name="slug" placeholder="Slug, like api" aria-label="Slug" required autocomplete="off" spellcheck="false" pattern="[a-zA-Z0-9][a-zA-Z0-9\-]{0,31}" title="Letters, digits and -, up to 32">
     <input class="field" name="name" placeholder="Name (optional)" aria-label="Name" autocomplete="off">
-    <input class="field" name="repo" placeholder="GitHub owner/repo (optional)" aria-label="GitHub repo" autocomplete="off" spellcheck="false">
+    <input class="field" name="repo" placeholder="Repo: owner/repo or its URL (optional)" aria-label="Repo" autocomplete="off" spellcheck="false">
     <div class="row">
       <button class="btn" type="button" id="new-project-cancel">Cancel</button>
       <button class="btn primary" type="submit">Create</button>

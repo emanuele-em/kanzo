@@ -33,7 +33,9 @@ pub fn set_remote(home: &Home, url: &str, prompt: bool) -> Result<String> {
     let dir = &home.dir;
     let url = url.trim().trim_end_matches('/');
     if url.is_empty() {
-        bail!("Paste the URL of a git repository, like https://github.com/you/kanzo-data");
+        bail!(
+            "Paste the URL of a git repository, like https://github.com/you/kanzo-data or https://gitlab.com/you/kanzo-data"
+        );
     }
     // Git would read it as an option, like --upload-pack, which runs a command.
     if url.starts_with('-') {
@@ -73,8 +75,8 @@ pub fn set_remote(home: &Home, url: &str, prompt: bool) -> Result<String> {
 fn reason(error: &str) -> String {
     let lines: Vec<&str> = error.lines().map(str::trim).collect();
     if error.contains("terminal prompts disabled") {
-        return "Git asked to sign in: sign in on this machine first (`gh auth login` for GitHub), \
-                or use the repo's SSH URL."
+        return "Git asked to sign in: sign in on this machine first (`gh auth login` for GitHub, \
+                `glab auth login` for GitLab), or use the repo's SSH URL."
             .into();
     }
     let pick = |prefix: &str| lines.iter().find(|l| l.starts_with(prefix)).copied();
@@ -119,7 +121,7 @@ pub fn sync(home: &Home, keep: Option<Keep>, prompt: bool) -> Result<String> {
     let git_ok = |args: &[&str]| git_ok(dir, prompt, args);
     let Some((remote, _)) = remote(dir)? else {
         bail!(
-            "Sync isn't set up yet. Create an empty private repo, on GitHub for example, then press the \
+            "Sync isn't set up yet. Create an empty private repo, on GitHub or GitLab for example, then press the \
              sync button on the board and paste its URL, or run:\n  kanzo sync --repo <url>"
         );
     };

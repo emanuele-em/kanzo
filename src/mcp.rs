@@ -45,7 +45,7 @@ macro_rules! instructions {
 }
 
 const INSTRUCTIONS: &str =
-    instructions!("this", "Without `project`, Kanzo uses the project linked to this folder's GitHub repo.");
+    instructions!("this", "Without `project`, Kanzo uses the project linked to this folder's git repo.");
 const HTTP_INSTRUCTIONS: &str =
     instructions!("their", "Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects).");
 
@@ -53,9 +53,9 @@ const NO_PROJECTS: &str = "There are no projects yet. Create one with create_pro
 
 pub async fn serve(home: Home) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let repos = git_repos(&cwd);
+    let (repos, remotes) = git_repos(&cwd);
     let images = home.images();
-    let ctx = Ctx { home, cwd: Some(cwd), repos, images, host: Default::default() };
+    let ctx = Ctx { home, cwd: Some(cwd), repos, remotes, images, host: Default::default() };
     let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
     serve_stdio(server).await
 }
@@ -76,7 +76,8 @@ async fn serve_stdio(server: Kanzo) -> Result<()> {
 /// so rmcp's localhost-only list is turned off.
 pub fn http_service(home: Home, shutdown: CancellationToken) -> StreamableHttpService<Kanzo, LocalSessionManager> {
     let images = home.images();
-    let ctx = Arc::new(Ctx { home, cwd: None, repos: Vec::new(), images, host: Default::default() });
+    let ctx =
+        Arc::new(Ctx { home, cwd: None, repos: Vec::new(), remotes: Vec::new(), images, host: Default::default() });
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts().with_cancellation_token(shutdown);
     // rmcp makes a server per session, and for some requests; the tool list is built once.
     let tool_router = Kanzo::tools();
@@ -91,6 +92,8 @@ struct Ctx {
     home: Home,
     cwd: Option<PathBuf>,
     repos: Vec<String>,
+    /// The git remote of each of `repos`, when this process saw the folder itself.
+    remotes: Vec<String>,
     images: PathBuf,
     host: tokio::sync::Mutex<Option<share::Upstream>>,
 }
@@ -133,6 +136,16 @@ impl Ctx {
         };
         Err(Error::NotFound(msg))
     }
+
+    /// The folder's remote for an owner/repo, so a repo linked by name keeps its host, like gitlab.com.
+    fn remote(&self, repo: &str) -> String {
+        let key = store::repo_from_url(repo);
+        let at = self.repos.iter().position(|r| Some(r) == key.as_ref());
+        match at.and_then(|i| self.remotes.get(i)) {
+            Some(url) if store::host_from_url(repo).is_none() => url.clone(),
+            _ => repo.to_string(),
+        }
+    }
 }
 
 fn reply(outcome: Result<String, String>) -> CallToolResult {
@@ -150,22 +163,25 @@ fn caller(context: &RequestContext<RoleServer>) -> Option<Implementation> {
     }
 }
 
-fn git_repos(dir: &std::path::Path) -> Vec<String> {
+/// The folder's repos, and the remote each came from.
+fn git_repos(dir: &std::path::Path) -> (Vec<String>, Vec<String>) {
     let Ok(text) = crate::home::output(Command::new("git").arg("-C").arg(dir).args(["remote", "-v"])) else {
-        return Vec::new();
+        return Default::default();
     };
     // `origin` first, so it wins when several remotes are linked to different projects.
     let mut lines: Vec<&str> = text.lines().collect();
     lines.sort_by_key(|l| !l.starts_with("origin\t"));
-    let mut repos = Vec::new();
+    let (mut repos, mut remotes) = (Vec::new(), Vec::new());
     for line in lines {
-        if let Some(repo) = line.split_whitespace().nth(1).and_then(store::repo_from_url)
+        if let Some(url) = line.split_whitespace().nth(1)
+            && let Some(repo) = store::repo_from_url(url)
             && !repos.contains(&repo)
         {
             repos.push(repo);
+            remotes.push(url.to_string());
         }
     }
-    repos
+    (repos, remotes)
 }
 
 #[derive(Clone)]
@@ -196,7 +212,7 @@ struct CreateProjectArgs {
     /// Short lowercase id, like api.
     slug: String,
     name: Option<String>,
-    /// GitHub owner/repo.
+    /// owner/repo.
     repo: Option<String>,
 }
 
@@ -272,7 +288,7 @@ struct AddCommentArgs {
 struct LinkRepoArgs {
     /// Slug.
     project: String,
-    /// GitHub owner/repo.
+    /// owner/repo.
     repo: String,
 }
 
@@ -334,6 +350,7 @@ impl Kanzo {
                     .filter(|r| !r.is_empty())
                     .map(String::from)
                     .collect(),
+                remotes: Vec::new(),
                 images: header(share::IMAGES_HEADER).map_or_else(|| self.ctx.images.clone(), PathBuf::from),
                 host: Default::default(),
             }),
@@ -384,19 +401,20 @@ impl Kanzo {
         Parameters(args): Parameters<CreateProjectArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |_, store| {
-                let p = store.create_project(&args.slug, args.name.as_deref().unwrap_or(""), args.repo.as_deref())?;
+            .run(move |ctx, store| {
+                let repo = args.repo.map(|r| ctx.remote(&r));
+                let p = store.create_project(&args.slug, args.name.as_deref().unwrap_or(""), repo.as_deref())?;
                 let repo = p.repos.first().map(|r| format!(", linked to {r}")).unwrap_or_default();
                 Ok(format!("Created project {} ({}){repo}.", p.slug, p.name))
             })
             .await)
     }
 
-    #[tool(description = "Link another GitHub repo to a project.")]
+    #[tool(description = "Link another repo to a project.")]
     async fn link_repo(&self, Parameters(args): Parameters<LinkRepoArgs>) -> Result<CallToolResult, ErrorData> {
         Ok(self
-            .run(move |_, store| {
-                let p = store.link_repo(&args.project, &args.repo)?;
+            .run(move |ctx, store| {
+                let p = store.link_repo(&args.project, &ctx.remote(&args.repo))?;
                 Ok(format!("Project {} is linked to {}.", p.slug, p.repos.join(", ")))
             })
             .await)
@@ -742,7 +760,14 @@ mod tests {
     impl Agent {
         fn start(home: Home, folder: &std::path::Path) -> Self {
             let images = home.images();
-            let ctx = Ctx { home, cwd: Some(folder.into()), repos: Vec::new(), images, host: Default::default() };
+            let ctx = Ctx {
+                home,
+                cwd: Some(folder.into()),
+                repos: Vec::new(),
+                remotes: Vec::new(),
+                images,
+                host: Default::default(),
+            };
             let server = Kanzo { ctx: Arc::new(ctx), tool_router: Kanzo::tools() };
             let (ours, theirs) = tokio::io::duplex(1 << 16);
             tokio::spawn(async move { server.serve(tokio::io::split(theirs)).await.unwrap().waiting().await });
@@ -919,5 +944,22 @@ mod tests {
             assert!(reply.contains("Comment added"), "{reply}");
             assert_eq!(authors(&home, &task), ["agent"]);
         });
+    }
+
+    #[test]
+    fn a_repo_linked_by_name_keeps_the_host_of_the_folders_remote() {
+        let (_dir, home, _) = board();
+        let images = home.images();
+        let ctx = Ctx {
+            home,
+            cwd: None,
+            repos: vec!["acme/api".into()],
+            remotes: vec!["git@gitlab.com:acme/api.git".into()],
+            images,
+            host: Default::default(),
+        };
+        assert_eq!(ctx.remote("Acme/API"), "git@gitlab.com:acme/api.git");
+        assert_eq!(ctx.remote("https://git.example.com/acme/api"), "https://git.example.com/acme/api");
+        assert_eq!(ctx.remote("me/web"), "me/web");
     }
 }
