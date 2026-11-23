@@ -140,6 +140,20 @@ Settings'te Backlog'u açarsan ajanların dokunmadığı bir sütun gelir; göre
   <img alt="Bir görevin paneli: Waits on alanına log yazılmış, seçmek için iki görev öneriliyor; yanında Waits on #7 yazan soluk bir kart" src="docs/img/waits-light.jpg">
 </picture>
 
+## Değişikliklere tepki ver
+
+> [!TIP]
+> **Ajanına söylemen yeterli:** *"todo'ya bir kanzo görevi düştüğünde bir ajan başlatan bir betik yaz."*
+
+Bir servis, panonun tamamını tekrar tekrar okumadan değişiklikleri takip edebilir; örneğin bir görev `todo`'ya geldiğinde bir ajan başlatabilir.
+
+- **Başla:** `GET /api/events` şunu döndürür: `{"events": [], "last": "41.9f3c…"}`. Bir imleç olan `last`'ı sakla; `0` ilk olaydan öncesi demektir.
+- **Takip et:** `GET /api/events?since=<last>&wait=25` bir şey değişir değişmez yanıt verir, olay olmazsa 25 saniye sonra. Bir dahaki sefere yeni `last`'ı gönder. Tek bir proje için `project=api` ekle.
+- **Ne alırsın:** her olayda `id`, `at`, `kind` (`task.created`, `task.moved`, `task.updated`, `task.deleted`, `comment.added`), `api#12` gibi `task`, `project` ve gerektiğinde `from` ile `to` (sütunlar) ve bir yorumun `author`'ı bulunur. Bir düzenleme bir olaydır: sütunu değiştiriyorsa, başka neyi değiştirirse değiştirsin `task.moved`, değiştirmiyorsa `task.updated`. Bir sütundaki kartları yeniden sıralamak olay sayılmaz. Başka bir projeye taşınan görev yeni projenin altında bildirilir.
+- **Hiçbir şey kaybolmaz:** olay, değişiklikle aynı işlemde (transaction) yazılır. Son 1.000 olay saklanır, ya da Settings'te Board altında yazan sayı kadar.
+- **Yanıt `"reset": true` diyorsa baştan başla:** imleç bu panonun hiçbir olayını göstermiyor, çünkü olay silindi ya da pano değiştirildi (örneğin `kanzo sync` ile). Panoyu yeniden oku, sonra `last`'tan devam et.
+- **Başka bir panoya katılmış bir bilgisayarda** `/api/events` bu bilgisayarın kendi panosudur; paylaşılan panonun olayları `/remote/api/events` adresindedir.
+
 ## Filtrele ve ara
 
 > [!TIP]

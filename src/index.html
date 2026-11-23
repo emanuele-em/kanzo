@@ -323,11 +323,8 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .panel .top .ghost, .bulk .ghost { width: auto; padding: 6px; color: var(--muted); }
 .panel .top .ghost:hover, .bulk .ghost:hover { color: var(--text); }
 .panel .top .ghost.danger:hover, .bulk .danger:hover { color: var(--danger); background: var(--danger-bg); }
-.panel .project-pick select {
-  appearance: none; -webkit-appearance: none; border: 0; background: none; padding: 0; margin: 0;
-  font-size: inherit; color: inherit; cursor: pointer; field-sizing: content;
-}
-.panel .project-pick:hover, .panel .project-pick:focus-within { background: var(--active); color: var(--text); }
+.panel .project-pick { appearance: none; -webkit-appearance: none; border: 0; cursor: pointer; }
+.panel .project-pick:hover, .panel .project-pick:focus-within, .panel .project-pick[aria-expanded="true"] { background: var(--active); color: var(--text); }
 .panel-edge { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; cursor: col-resize; }
 .panel-edge:hover { background: var(--active); }
 .panel .body { overflow-y: auto; padding: 8px max(20px, calc(50% - 430px)) 24px; display: flex; flex-direction: column; gap: 20px; flex: 1; }
@@ -672,6 +669,10 @@ html:not(.ready) aside { visibility: hidden; }
         <label class="setting">
           <span class="text">Backlog column<span>A column before todo, for tasks agents leave alone</span></span>
           <span class="switch"><input type="checkbox" id="settings-backlog" aria-label="Backlog column"><span></span></span>
+        </label>
+        <label class="setting">
+          <span class="text">Events kept<span>Recent changes /api/events remembers for services</span></span>
+          <input class="field" type="number" id="settings-events-kept" min="100" max="100000" step="100" style="width:7em" aria-label="Events kept">
         </label>
         <h3>Task properties</h3>
         <p>Turn one off to hide it on the board and leave it out of what agents get. Nothing is deleted.</p>

@@ -137,6 +137,20 @@ Turn on Backlog in Settings for a column agents leave alone, until you move its 
   <img alt="A task's panel with log typed in Waits on, offering two tasks to pick, beside a dimmed card that says Waits on #7" src="docs/img/waits-light.jpg">
 </picture>
 
+## React to changes
+
+> [!TIP]
+> **Just ask your agent:** *"write a script that starts an agent whenever a kanzo task lands in todo."*
+
+A service can follow the board as it changes, like starting an agent when a task lands in `todo`, without reading the whole board over and over.
+
+- **Start:** `GET /api/events` answers `{"events": [], "last": "41.9f3c…"}`. Keep `last`, a cursor; `0` stands for before the first event.
+- **Follow:** `GET /api/events?since=<last>&wait=25` answers as soon as something changes, or after 25 seconds with no events. Pass the new `last` next time. Add `project=api` for one project.
+- **What you get:** each event has an `id`, `at`, `kind` (`task.created`, `task.moved`, `task.updated`, `task.deleted`, `comment.added`), `task` like `api#12`, `project`, and where it applies `from` and `to` (columns) and `author` (of a comment). One edit is one event: `task.moved` when it changes the column, whatever else it changes, `task.updated` otherwise. Reordering cards in a column is none. A task moved to another project is reported under the new one.
+- **Nothing is lost:** an event is written in the same transaction as the change. The last 1,000 are kept, or as many as Settings says under Board.
+- **Start over** when a reply says `"reset": true`: the cursor names no event of this board, because it was dropped or the board was replaced, as by `kanzo sync`. Read the board again, then go on from `last`.
+- **On a computer that joined another board,** `/api/events` is this computer's own board; the shared board's events are at `/remote/api/events`.
+
 ## Filter and search
 
 > [!TIP]
