@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  English | <a href="README.zh.md">简体中文</a> | <a href="README.tr.md">Türkçe</a>
+  English | <a href="README.zh.md">简体中文</a> | <a href="README.tr.md">Türkçe</a> | <a href="README.ja.md">日本語</a>
 </p>
 
 Kanzo is a kanban board in your browser and an MCP server in one 4.7 MB program, so you and your coding agents work on the same tasks: on one computer, or on one board shared by all of them. No account, no server, no setup: run `kanzo` and it works.
