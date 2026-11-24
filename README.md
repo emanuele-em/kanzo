@@ -135,6 +135,10 @@ One `update_task` call moves a task and saves its `comment`, signed with the age
 
 `get_task` with `include_version: true` adds the task's `version`. Pass it to `update_task` as `if_version`, and if the task changed since, the edit is refused and nothing is written. Without them, nothing changes.
 
+## Retry without doing it twice
+
+An agent that never got a reply can send `create_task` or `next_task` again with the same `request_id`, a new one for each call: the retry answers with the task the first call made or took, and does nothing again. An id is kept for a day, and goes with its task. Without it, nothing changes.
+
 ## Park ideas in a backlog
 
 Turn on Backlog in Settings for a column agents leave alone, until you move its tasks to `todo`.

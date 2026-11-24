@@ -165,6 +165,17 @@ const MIGRATIONS: &[&str] = &[
          DELETE FROM task_revs WHERE task_id = OLD.task_id;
          INSERT INTO task_revs (task_id, rev) VALUES (OLD.task_id, random());
      END;",
+    // The request_id of a create_task or next_task call, and the task it made or took, so a retry of
+    // the call answers with that task instead of doing it again. `request` is a hash of what the call
+    // asked, to refuse an id sent again with another call. Kept for a day, and deleted with its task.
+    // No triggers: a receipt is no change to the board.
+    "CREATE TABLE requests (
+         request_id TEXT PRIMARY KEY,
+         request    INTEGER NOT NULL,
+         task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     ) WITHOUT ROWID;
+     CREATE INDEX requests_by_task ON requests(task_id);",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -344,6 +355,36 @@ pub struct NewComment<'a> {
     pub body: &'a str,
 }
 
+/// The longest `request_id`, in bytes.
+const REQUEST_ID_MAX: usize = 128;
+
+/// A call's `request_id`, and a hash of what the call asked.
+struct Request {
+    id: String,
+    hash: i64,
+}
+
+impl Request {
+    /// The id must be 1-128 bytes with no whitespace or control characters; one that isn't is an
+    /// error, not a call without retry protection. `call` is what the call asked, cleaned.
+    fn new(id: &str, call: &[&str]) -> Result<Self> {
+        if id.is_empty() || id.len() > REQUEST_ID_MAX || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(Error::Invalid(format!(
+                "request_id must be 1-{REQUEST_ID_MAX} bytes, with no spaces or control characters"
+            )));
+        }
+        // FNV-1a over each part and its length, so parts can't run into each other. Stable across
+        // versions and machines, unlike std's hasher, and only for telling two calls apart.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for part in call {
+            for byte in (part.len() as u64).to_le_bytes().iter().chain(part.as_bytes()) {
+                hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        Ok(Self { id: id.to_string(), hash: hash as i64 })
+    }
+}
+
 const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 
 pub const DONE: &str = STATUSES[3];
@@ -441,6 +482,25 @@ impl Store {
                 let _ = self.conn.execute_batch("ROLLBACK");
                 Err(e)
             }
+        }
+    }
+
+    /// The task an earlier call with this `request_id` made or took, if that was this same call, less
+    /// than a day ago. The same id with another call is refused. Runs in the caller's write.
+    fn receipt(c: &Connection, request: &Request) -> Result<Option<i64>> {
+        c.execute("DELETE FROM requests WHERE created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 day')", [])?;
+        let found: Option<(i64, i64)> = c
+            .query_row("SELECT request, task_id FROM requests WHERE request_id = ?1", [&request.id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        match found {
+            Some((hash, _)) if hash != request.hash => Err(Error::Invalid(format!(
+                "request_id {:?} was sent before with another call; send a new one with every call",
+                request.id
+            ))),
+            Some((_, task)) => Ok(Some(task)),
+            None => Ok(None),
         }
     }
 
@@ -977,26 +1037,60 @@ impl Store {
     // One write, or an agent could take a task before it's human, or before it waits.
     // Uses description, status, tags, human, waits_on.
     pub fn create_task_in(&self, project_id: i64, title: &str, patch: TaskPatch) -> Result<Task> {
+        Ok(self.create_task_once(project_id, title, patch, None)?.0)
+    }
+
+    /// `create_task_in`, and with a `request_id`, once: a retry of the same call gets the task the
+    /// first one made, and `true`, and makes no other.
+    pub fn create_task_once(
+        &self,
+        project_id: i64,
+        title: &str,
+        patch: TaskPatch,
+        request_id: Option<&str>,
+    ) -> Result<(Task, bool)> {
         let title = clean_title(title)?;
         let status = patch.status.as_deref().unwrap_or(STATUSES[0]);
         self.check_status(status)?;
         let description = patch.description.as_deref().unwrap_or("").trim();
         let tags = clean_tags(patch.tags.as_deref().unwrap_or("")).join(",");
-        let id = self.write(|c| {
+        let human = patch.human.unwrap_or(false);
+        let (project, flag) = (project_id.to_string(), if human { "1" } else { "0" });
+        let waits = patch.waits_on.as_deref().unwrap_or("").trim();
+        let call = ["create_task", &project, &title, description, status, &tags, flag, waits];
+        let request = request_id.map(|id| Request::new(id, &call)).transpose()?;
+        let (id, again) = self.write(|c| {
+            if let Some(request) = &request
+                && let Some(id) = Self::receipt(c, request)?
+            {
+                return Ok((id, true));
+            }
             let position = Self::end_of_column(c, status, 0)?;
             c.execute(
                 "INSERT INTO tasks (project_id, title, description, status, position, tags, human) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false)],
+                params![project_id, title, description, status, position, tags, human],
             )?;
             let id = c.last_insert_rowid();
             if let Some(keys) = &patch.waits_on {
                 // Part of task.created.
                 self.set_waits(c, id, keys)?;
             }
-            Ok(id)
+            if let Some(request) = &request {
+                Self::keep(c, request, id)?;
+            }
+            Ok((id, false))
         })?;
-        self.get_task(id)
+        Ok((self.get_task(id)?, again))
+    }
+
+    /// Remembers that `request` made or took `task`. Runs in the caller's write.
+    fn keep(c: &Connection, request: &Request, task: i64) -> Result<()> {
+        c.execute(
+            "INSERT INTO requests (request_id, request, task_id) VALUES (?1, ?2, ?3)",
+            params![request.id, request.hash, task],
+        )?;
+        Ok(())
     }
 
     /// Replaces what a task waits on. Part of the task's write, so a refused list changes nothing.
@@ -1351,10 +1445,31 @@ impl Store {
         Ok(self.conn.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0))?)
     }
 
+    #[cfg(test)]
     pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
+        Ok(self.next_task_once(project_id, query, None)?.map(|(task, _)| task))
+    }
+
+    /// Takes the top todo task for agents that matches `query`, and with a `request_id`, once: a retry
+    /// of the same call gets the task the first one took, and `true`, and takes no other. A call that
+    /// took nothing keeps no receipt, for there is nothing to do twice. A retry after the task was
+    /// deleted takes another.
+    pub fn next_task_once(
+        &self,
+        project_id: Option<i64>,
+        query: &str,
+        request_id: Option<&str>,
+    ) -> Result<Option<(Task, bool)>> {
         let (todo, values) = self.agents_todo(project_id, query)?;
+        let scope = project_id.map_or("all".to_string(), |p| p.to_string());
+        let request = request_id.map(|id| Request::new(id, &["next_task", &scope, query.trim()])).transpose()?;
         let to = STATUSES[1];
-        let id = self.write(|c| {
+        let taken = self.write(|c| {
+            if let Some(request) = &request
+                && let Some(id) = Self::receipt(c, request)?
+            {
+                return Ok(Some((id, true)));
+            }
             let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY t.position LIMIT 1");
             let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
             if let Some(id) = id {
@@ -1366,10 +1481,13 @@ impl Store {
                     ),
                     params![to, position, id],
                 )?;
+                if let Some(request) = &request {
+                    Self::keep(c, request, id)?;
+                }
             }
-            Ok(id)
+            Ok(id.map(|id| (id, false)))
         })?;
-        id.map(|id| self.get_task(id)).transpose()
+        taken.map(|(id, again)| Ok((self.get_task(id)?, again))).transpose()
     }
 
     pub fn delete_task(&self, id: i64) -> Result<Task> {
@@ -3585,5 +3703,131 @@ mod tests {
             assert!(matches!(outcome, Err(Error::NotFound(_))), "{key}");
         }
         assert_eq!((s.get_task(task).unwrap().title.as_str(), s.changes().unwrap()), ("renamed", changes));
+    }
+
+    fn receipts(s: &Store) -> i64 {
+        s.conn.query_row("SELECT count(*) FROM requests", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_retried_create_task_makes_one_task() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let patch = || TaskPatch { description: Some("Why".into()), tags: Some("bug".into()), ..Default::default() };
+        let (first, again) = s.create_task_once(p.id, "Fix it", patch(), Some("req-1")).unwrap();
+        assert!(!again);
+        let (changes, events) = (s.changes().unwrap(), s.last_event().unwrap());
+
+        // Spacing that cleaning takes out is the same call.
+        let (retry, again) = s.create_task_once(p.id, "  Fix   it ", patch(), Some("req-1")).unwrap();
+        assert_eq!((retry.id, again), (first.id, true));
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1);
+        assert_eq!((s.changes().unwrap(), s.last_event().unwrap()), (changes, events), "a retry changes nothing");
+
+        // Without a request_id, or with a new one, it makes another.
+        s.create_task_once(p.id, "Fix it", patch(), None).unwrap();
+        s.create_task_once(p.id, "Fix it", patch(), Some("req-2")).unwrap();
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 3);
+        assert_eq!(receipts(&s), 2);
+    }
+
+    #[test]
+    fn a_request_id_sent_again_with_another_call_is_refused() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let one = s.create_task_once(p.id, "One", TaskPatch::default(), Some("same")).unwrap().0;
+        let changes = s.changes().unwrap();
+
+        let err = s.create_task_once(p.id, "Two", TaskPatch::default(), Some("same")).unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)) && err.to_string().contains("send a new one"), "{err}");
+        let tagged = TaskPatch { tags: Some("x".into()), ..Default::default() };
+        assert!(s.create_task_once(p.id, "One", tagged, Some("same")).is_err());
+        assert!(s.next_task_once(None, "", Some("same")).is_err());
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1);
+        assert_eq!(s.get_task(one.id).unwrap().status, "todo", "next_task took nothing");
+        assert_eq!(s.changes().unwrap(), changes);
+
+        let long = "x".repeat(REQUEST_ID_MAX + 1);
+        for bad in ["", " ", "a b", "tab\there", long.as_str()] {
+            let err = s.create_task_once(p.id, "Three", TaskPatch::default(), Some(bad)).unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{bad:?}: {err}");
+        }
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_retried_next_task_takes_one_task() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let [a, b] = ["a", "b"].map(|t| s.create_task(p.id, t, "").unwrap().id);
+        let taken =
+            |request: &str| s.next_task_once(Some(p.id), "", Some(request)).unwrap().map(|(t, again)| (t.id, again));
+        assert_eq!(taken("next-1"), Some((a, false)));
+        assert_eq!(taken("next-1"), Some((a, true)));
+        assert_eq!(s.get_task(b).unwrap().status, "todo", "the retry took no other task");
+
+        // One that took nothing keeps no receipt: retried, it takes what is there by then.
+        s.next_task_once(Some(p.id), "", None).unwrap();
+        assert_eq!(taken("next-2"), None);
+        assert_eq!(receipts(&s), 1);
+        let c = s.create_task(p.id, "c", "").unwrap().id;
+        assert_eq!(taken("next-2"), Some((c, false)));
+    }
+
+    #[test]
+    fn a_receipt_goes_with_its_task_and_after_a_day() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let create = || s.create_task_once(p.id, "Once", TaskPatch::default(), Some("gone")).unwrap();
+        let first = create().0;
+        s.delete_task(first.id).unwrap();
+        assert_eq!(receipts(&s), 0, "deleted with its task");
+        let (second, again) = create();
+        assert!(second.id != first.id && !again);
+
+        // Within a day it holds; after one, the id is free again and the old receipt is gone.
+        let age = |ago: &str| {
+            let sql = format!("UPDATE requests SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '{ago}')");
+            s.conn.execute(&sql, []).unwrap();
+        };
+        age("-23 hours");
+        let (kept, again) = create();
+        assert_eq!((kept.id, again), (second.id, true));
+        age("-25 hours");
+        let (third, again) = create();
+        assert!(third.id != second.id && !again);
+        assert_eq!(receipts(&s), 1);
+
+        // A deleted project's tasks take theirs with them.
+        s.delete_project("api").unwrap();
+        assert_eq!(receipts(&s), 0);
+    }
+
+    #[test]
+    fn two_writers_with_one_request_id_make_one_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let project = s.create_project("api", "", None).unwrap().id;
+        let barrier = std::sync::Barrier::new(2);
+        let made: Vec<(i64, bool)> = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..2)
+                .map(|_| {
+                    let (barrier, path) = (&barrier, &path);
+                    scope.spawn(move || {
+                        let writer = Store::open(path, None).unwrap();
+                        barrier.wait();
+                        let (task, again) =
+                            writer.create_task_once(project, "Race", TaskPatch::default(), Some("race")).unwrap();
+                        (task.id, again)
+                    })
+                })
+                .collect();
+            writers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        assert_eq!(made[0].0, made[1].0);
+        assert_eq!(made.iter().filter(|(_, again)| *again).count(), 1);
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1);
     }
 }

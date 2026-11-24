@@ -138,6 +138,10 @@ Tek bir `update_task` çağrısı görevi taşır ve `comment`'ini kaydeder; yor
 
 `get_task`, `include_version: true` ile görevin `version` değerini de verir. Bunu `update_task`'e `if_version` olarak gönderirsen, görev o zamandan beri değiştiyse düzenleme reddedilir ve hiçbir şey yazılmaz. İkisini de kullanmazsan hiçbir şey değişmez.
 
+## İki kez yapmadan yeniden dene
+
+Yanıtı alamayan bir ajan, `create_task` veya `next_task` çağrısını aynı `request_id` ile yeniden gönderebilir (her çağrı için yeni bir id): yeniden deneme, ilk çağrının oluşturduğu ya da aldığı görevi döndürür ve hiçbir şeyi ikinci kez yapmaz. Bir id bir gün saklanır ve göreviyle birlikte silinir. Kullanmazsan hiçbir şey değişmez.
+
 ## Fikirleri backlog'a park et
 
 Settings'te Backlog'u açarsan ajanların dokunmadığı bir sütun gelir; görevlerini `todo` sütununa taşıyana kadar orada bekler.

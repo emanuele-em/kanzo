@@ -135,6 +135,10 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 
 `get_task` 加上 `include_version: true` 会多给出任务的 `version`。把它作为 `if_version` 传给 `update_task`：如果任务在此之后被改过，修改会被拒绝，什么都不写入。不传它们时，一切照旧。
 
+## 重试而不重复执行
+
+没收到回复的智能体，可以用同一个 `request_id` 再发一次 `create_task` 或 `next_task`（每次调用都用新的 id）：重试会返回第一次调用创建或领取的任务，不会再做一遍。id 保留一天，并随任务一起删除。不传它时，一切照旧。
+
 ## 把想法放进暂存列
 
 在设置中打开“暂存列”，就会多出一列智能体不会碰的任务，直到你把它们移到 `todo`。

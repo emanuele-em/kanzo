@@ -248,6 +248,8 @@ struct CreateTaskArgs {
     human: Option<bool>,
     /// Tasks it waits on, like api#12.
     waits_on: Option<String>,
+    /// New for each call; resend it only to retry that call, which then runs once.
+    request_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -303,6 +305,8 @@ struct NextTaskArgs {
     project: Option<String>,
     /// As in list_tasks, like tag:bug.
     filter: Option<String>,
+    /// New for each call; resend it only to retry that call, which then runs once.
+    request_id: Option<String>,
 }
 
 impl Kanzo {
@@ -515,12 +519,13 @@ impl Kanzo {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, move |ctx, store| {
-                let CreateTaskArgs { title, description, project, tags, status, human, waits_on } = args;
+                let CreateTaskArgs { title, description, project, tags, status, human, waits_on, request_id } = args;
                 let project = ctx.project(store, project.as_deref())?;
                 let status = status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
                 let patch = TaskPatch { description, status, tags, human, waits_on, ..Default::default() };
-                let t = store.create_task_in(project.id, &title, patch)?;
-                Ok(format!("Created {} in {}: {}{}", t.key(), t.status, t.title, waits_note(store, &t)?))
+                let (t, again) = store.create_task_once(project.id, &title, patch, request_id.as_deref())?;
+                let done = if again { "Already created earlier:" } else { "Created" };
+                Ok(format!("{done} {} in {}: {}{}", t.key(), t.status, t.title, waits_note(store, &t)?))
             })
             .await)
     }
@@ -613,8 +618,14 @@ impl Kanzo {
                 let project = ctx.scope(store, args.project.as_deref())?;
                 let id = project.as_ref().map(|p| p.id);
                 let filter = args.filter.as_deref().unwrap_or("");
-                match store.next_task_matching(id, filter)? {
-                    Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task, None)?)),
+                match store.next_task_once(id, filter, args.request_id.as_deref())? {
+                    // A retry shows the task the first call took, as it is now.
+                    Some((task, true)) => {
+                        Ok(format!("Already taken earlier:\n{}", task_detail(ctx, store, &task, None)?))
+                    }
+                    Some((task, false)) => {
+                        Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task, None)?))
+                    }
                     None => {
                         let waiting = store.waiting_in_todo(id, filter)?;
                         let scope = project.map_or("any project".into(), |p| p.slug);
@@ -1246,5 +1257,59 @@ mod tests {
         assert_eq!(schema["properties"]["escalated"]["type"], "boolean");
         let required = schema["required"].as_array().unwrap();
         assert!(!required.iter().any(|r| r == "comment" || r == "escalated"));
+    }
+
+    #[test]
+    fn create_task_and_next_task_run_once_per_request_id() {
+        block_on(async {
+            let (dir, home, _task) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let create = json!({ "title": "Once", "project": "api", "request_id": "c-1" });
+            let reply = agent.send(call_message("create_task", create.clone(), stateless(None))).await.unwrap();
+            assert_eq!(text(&reply), "Created api#2 in todo: Once");
+            let reply = agent.send(call_message("create_task", create, stateless(None))).await.unwrap();
+            assert_eq!(text(&reply), "Already created earlier: api#2 in todo: Once");
+
+            let next = json!({ "project": "api", "request_id": "n-1" });
+            let reply = agent.send(call_message("next_task", next.clone(), stateless(None))).await.unwrap();
+            assert!(text(&reply).starts_with("Moved to doing:\napi#1 Ship it\n"), "{reply}");
+            let reply = agent.send(call_message("next_task", next, stateless(None))).await.unwrap();
+            assert!(text(&reply).starts_with("Already taken earlier:\napi#1 Ship it\nstatus: doing"), "{reply}");
+            assert_eq!(home.store().unwrap().get_task(2).unwrap().status, "todo", "the retry took no other task");
+
+            let reused = json!({ "title": "Other", "project": "api", "request_id": "c-1" });
+            let reply = agent.send(call_message("create_task", reused, stateless(None))).await.unwrap();
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            assert!(text(&reply).contains("send a new one with every call"), "{reply}");
+        });
+    }
+
+    #[test]
+    fn a_joined_board_passes_request_ids_to_its_host() {
+        block_on(async {
+            let (_host_dir, host, _task) = board();
+            let port = shared(host.clone()).await;
+            let guest_dir = tempfile::tempdir().unwrap();
+            std::fs::write(guest_dir.path().join(share::FILE), format!("join 127.0.0.1:{port}\n")).unwrap();
+            let mut agent = Agent::start(Home::open(guest_dir.path().to_path_buf()).unwrap(), guest_dir.path());
+            let create = json!({ "title": "Once", "project": "api", "request_id": "joined-1" });
+            for said in ["Created api#2 in todo: Once", "Already created earlier: api#2 in todo: Once"] {
+                let reply = agent.send(call_message("create_task", create.clone(), stateless(None))).await.unwrap();
+                assert_eq!(text(&reply), said);
+            }
+            assert_eq!(host.store().unwrap().list_tasks(None, None).unwrap().len(), 2);
+        });
+    }
+
+    #[test]
+    fn only_create_task_and_next_task_take_a_request_id() {
+        for route in Kanzo::tools().map.values() {
+            let name: &str = route.attr.name.as_ref();
+            let id = &route.attr.input_schema["properties"]["request_id"];
+            assert_eq!(!id.is_null(), ["create_task", "next_task"].contains(&name), "{name}");
+            if !id.is_null() {
+                assert!(id["description"].as_str().unwrap().starts_with("New for each call"), "{name}");
+            }
+        }
     }
 }
