@@ -118,7 +118,7 @@ const MIGRATIONS: &[&str] = &[
     // An agent handed the task to the user; its next move to another column clears it.
     "ALTER TABLE tasks ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0;",
     // An edit version for every task, for update_task's optional `if_version` guard. A task's version is the
-    // `rev` of its row here: 128 random bits from SQLite, new at every meaningful write. Not a counter, and
+    // `rev` of its row here: 64 random bits from SQLite, an integer, new at every meaningful write. Not a counter, and
     // not a hash of the content: two copies of a board file that are each edited have each task's version
     // diverge on its own, so a version read from one copy is never taken by the other's different task, and
     // a task recreated under an old id never gets an old version. Triggers, not Store methods, bump it, so
@@ -131,12 +131,12 @@ const MIGRATIONS: &[&str] = &[
     // without its task.
     "CREATE TABLE task_revs (
          task_id INTEGER PRIMARY KEY,
-         rev     TEXT NOT NULL
+         rev     INTEGER NOT NULL
      );
-     INSERT INTO task_revs (task_id, rev) SELECT id, lower(hex(randomblob(16))) FROM tasks;
+     INSERT INTO task_revs (task_id, rev) SELECT id, random() FROM tasks;
      CREATE TRIGGER tasks_rev_insert AFTER INSERT ON tasks BEGIN
          DELETE FROM task_revs WHERE task_id = NEW.id;
-         INSERT INTO task_revs (task_id, rev) VALUES (NEW.id, lower(hex(randomblob(16))));
+         INSERT INTO task_revs (task_id, rev) VALUES (NEW.id, random());
      END;
      CREATE TRIGGER tasks_rev_update AFTER UPDATE OF title, description, status, project_id, tags, url, human, escalated
      ON tasks
@@ -145,25 +145,25 @@ const MIGRATIONS: &[&str] = &[
          OR NEW.human IS NOT OLD.human OR NEW.escalated IS NOT OLD.escalated
      BEGIN
          DELETE FROM task_revs WHERE task_id = NEW.id;
-         INSERT INTO task_revs (task_id, rev) VALUES (NEW.id, lower(hex(randomblob(16))));
+         INSERT INTO task_revs (task_id, rev) VALUES (NEW.id, random());
      END;
      CREATE TRIGGER tasks_rev_before_delete BEFORE DELETE ON tasks BEGIN
          DELETE FROM task_revs WHERE task_id IN (SELECT task_id FROM task_waits WHERE waits_on_id = OLD.id);
          INSERT INTO task_revs (task_id, rev)
-             SELECT task_id, lower(hex(randomblob(16))) FROM task_waits WHERE waits_on_id = OLD.id;
+             SELECT task_id, random() FROM task_waits WHERE waits_on_id = OLD.id;
      END;
      CREATE TRIGGER tasks_rev_delete AFTER DELETE ON tasks BEGIN
          DELETE FROM task_revs WHERE task_id = OLD.id;
      END;
      CREATE TRIGGER task_waits_rev_insert AFTER INSERT ON task_waits BEGIN
          DELETE FROM task_revs WHERE task_id = NEW.task_id;
-         INSERT INTO task_revs (task_id, rev) VALUES (NEW.task_id, lower(hex(randomblob(16))));
+         INSERT INTO task_revs (task_id, rev) VALUES (NEW.task_id, random());
      END;
      CREATE TRIGGER task_waits_rev_delete AFTER DELETE ON task_waits
      WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
      BEGIN
          DELETE FROM task_revs WHERE task_id = OLD.task_id;
-         INSERT INTO task_revs (task_id, rev) VALUES (OLD.task_id, lower(hex(randomblob(16))));
+         INSERT INTO task_revs (task_id, rev) VALUES (OLD.task_id, random());
      END;",
 ];
 
@@ -1174,33 +1174,32 @@ impl Store {
         Ok(out)
     }
 
-    /// The task's edit version, for `update_task_if`: `task.rev`, like `12.9c1f0a7e3b5d42688d0e1a4c7f2b9e35`.
-    /// `rev` is 128 random bits that change only when what an edit can overwrite does: title, description,
-    /// status, project, tags, url, human, escalated, and the task's own wait list; see migration 12. It names a version,
-    /// not a content: an edit and its undo are two new versions. Copies of a board file that are edited
-    /// apart get different ones, and a copy that wasn't edited has the same version and the same task.
+    /// The task's edit version, for `update_task_if`: `task.rev`, its rev in hex, like `12.9c1f0a7e3b5d4268`.
+    /// `rev` is 64 random bits that change only when what an edit can overwrite does: title, description,
+    /// status, project, tags, url, human, escalated, and the task's own wait list; see migration 12. It
+    /// names a version, not a content: an edit and its undo are two new versions. Copies of a board file
+    /// that are edited apart get different ones, and a copy that wasn't edited has the same version and
+    /// the same task.
     pub fn task_version(&self, id: i64) -> Result<String> {
-        let rev: Option<String> = self
+        Ok(format!("{id}.{:x}", self.task_rev(id)? as u64))
+    }
+
+    fn task_rev(&self, id: i64) -> Result<i64> {
+        let rev: Option<i64> = self
             .conn
             .query_row(
-                "SELECT coalesce((SELECT rev FROM task_revs WHERE task_id = t.id), '') FROM tasks t WHERE t.id = ?1",
+                "SELECT coalesce((SELECT rev FROM task_revs WHERE task_id = t.id), 0) FROM tasks t WHERE t.id = ?1",
                 [id],
                 |r| r.get(0),
             )
             .optional()?;
-        let rev = rev.ok_or_else(|| Error::NotFound(format!("no task #{id}")))?;
-        let rev = if rev.is_empty() { "0".repeat(32) } else { rev };
-        Ok(format!("{id}.{rev}"))
+        rev.ok_or_else(|| Error::NotFound(format!("no task #{id}")))
     }
 
     /// Passes only the task's current version. A made-up one, or another task's, is `Invalid`, and an old
     /// one is a `Conflict`.
     fn check_version(&self, current: &Task, given: &str) -> Result<()> {
-        let given = given.trim();
-        if given == self.task_version(current.id)? {
-            return Ok(());
-        }
-        let Some((task, _)) = parse_version(given) else {
+        let Some((task, rev)) = parse_version(given.trim()) else {
             return Err(Error::Invalid("if_version is not a version from get_task with include_version".into()));
         };
         if task != current.id {
@@ -1208,6 +1207,9 @@ impl Store {
                 "if_version is from another task, not {}; get this task's with get_task and include_version",
                 current.key()
             )));
+        }
+        if rev == self.task_rev(current.id)? {
+            return Ok(());
         }
         Err(Error::Conflict(format!(
             "{} changed since you read it, so nothing was changed. Reread it with get_task and include_version, \
@@ -1782,12 +1784,12 @@ struct Edit<'a> {
     tags: Option<String>,
 }
 
-/// Splits a version, `task.rev`, where the rev is 32 lowercase hex digits.
-fn parse_version(version: &str) -> Option<(i64, &str)> {
+/// Splits a version, `task.rev`, where the rev is up to 16 hex digits: 64 bits.
+fn parse_version(version: &str) -> Option<(i64, i64)> {
     let (task, rev) = version.split_once('.')?;
-    let hex = rev.len() == 32 && rev.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let hex = (1..=16).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit());
     hex.then_some(())?;
-    Some((task.parse().ok()?, rev))
+    Some((task.parse().ok()?, u64::from_str_radix(rev, 16).ok()? as i64))
 }
 
 fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
@@ -3183,7 +3185,7 @@ mod tests {
         let b = s.create_task(p.id, "b", "").unwrap();
         let (va, vb) = (s.task_version(a.id).unwrap(), s.task_version(b.id).unwrap());
         let (id, rev) = va.split_once('.').unwrap();
-        assert_eq!(rev.len(), 32, "128 bits");
+        assert!((1..=16).contains(&rev.len()), "64 bits: {va}");
         let changes = s.changes().unwrap();
 
         let invalid = [
@@ -3192,26 +3194,28 @@ mod tests {
             String::new(),
             " ".into(),
             "nope".into(),
-            "1.2".into(),
+            format!("{id}."),
             format!("{va}.9"),
-            format!("{id}.{}g", &rev[..31]),
-            format!("{id}.{}", &rev[..31]),
+            format!("{va}g"),
+            format!("{id}.{}", "f".repeat(17)),
+            format!("{id}.-1"),
             format!("x.{rev}"),
         ];
         for given in &invalid {
             let err = s.update_task_if(a.id, retitle("hijacked"), Some(given)).unwrap_err();
             assert!(matches!(err, Error::Invalid(_)), "{given:?}: {err}");
         }
-        let made_up = format!("{id}.{}", "0".repeat(32));
+        let made_up = format!("{id}.0");
         assert!(matches!(s.update_task_if(a.id, retitle("hijacked"), Some(&made_up)), Err(Error::Conflict(_))));
         assert!(matches!(s.update_task_if(999, retitle("x"), Some(&va)), Err(Error::NotFound(_))));
 
         assert_eq!(s.get_task(a.id).unwrap().title, "a");
         assert_eq!((s.changes().unwrap(), s.task_version(a.id).unwrap()), (changes, va.clone()));
         assert_eq!(s.task_version(b.id).unwrap(), vb);
-        // Whitespace around a good one is fine.
+        // Whitespace around a good one is fine, and so are capitals: it is the same number.
         let padded = format!(" {va}\n");
-        s.update_task_if(a.id, retitle("a2"), Some(&padded)).unwrap();
+        let (_, now) = s.update_task_if(a.id, retitle("a2"), Some(&padded)).unwrap();
+        s.update_task_if(a.id, retitle("a3"), Some(&now.unwrap().to_uppercase())).unwrap();
     }
 
     #[test]
