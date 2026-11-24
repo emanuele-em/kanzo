@@ -134,6 +134,10 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
   Next step: 最初にやること
   ```
 
+## 新しい編集を上書きしない
+
+`get_task` に `include_version: true` を付けると、タスクの `version` も返ります。それを `update_task` の `if_version` に渡すと、その後にタスクが変更されていた場合は編集が拒否され、何も書き込まれません。どちらも使わなければ、これまでどおりです。
+
 ## アイデアをバックログに置いておく
 
 Settings で Backlog をオンにすると、エージェントが手を付けない列が追加されます。そのタスクを `todo` に移すまで、エージェントは触りません。
