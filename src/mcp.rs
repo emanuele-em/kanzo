@@ -262,6 +262,8 @@ struct UpdateTaskArgs {
     waits_on: Option<String>,
     /// Saved with the change, or not at all; up to 16 KiB. To hand off: Completed, Remaining, Verified, Next step.
     comment: Option<String>,
+    /// Asks the user to look; the task's next move clears it.
+    escalated: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -530,6 +532,7 @@ impl Kanzo {
                         human: args.human,
                         url: args.url,
                         waits_on: args.waits_on,
+                        escalated: args.escalated,
                     },
                     comment,
                 )?;
@@ -707,6 +710,9 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     }
     if t.human && shown(&hidden, "human") {
         out.push_str(", human: for the user, not for agents");
+    }
+    if t.escalated {
+        out.push_str(", escalated to the user");
     }
     if shown(&hidden, "created") {
         let _ = write!(out, ", created {created}");
@@ -958,11 +964,11 @@ mod tests {
     }
 
     #[test]
-    fn a_handoff_saves_status_flag_and_comment_in_one_call() {
+    fn a_handoff_saves_status_escalation_and_comment_in_one_call() {
         block_on(async {
             let (dir, home, task) = board();
             let mut agent = Agent::start(home.clone(), dir.path());
-            let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": HANDOFF });
+            let args = json!({ "id": task.key(), "status": "review", "escalated": true, "comment": HANDOFF });
             let reply = agent.send(call_message("update_task", args, stateless(Some("claude-code")))).await.unwrap();
             assert_eq!(reply["result"]["isError"], false, "{reply}");
             assert_eq!(text(&reply), "Updated api#1, todo -> review: Ship it\nComment added as claude-code.");
@@ -970,21 +976,24 @@ mod tests {
             // What a restarted board reads back, and an agent that asks.
             let store = home.store().unwrap();
             let saved = store.get_task(task.id).unwrap();
-            assert_eq!((saved.status.as_str(), saved.human, saved.comments), ("review", true, 1));
+            assert_eq!(
+                (saved.status.as_str(), saved.escalated, saved.human, saved.comments),
+                ("review", true, false, 1)
+            );
             let comments = store.list_comments(task.id).unwrap();
             assert_eq!((comments[0].author.as_str(), comments[0].body.as_str()), ("claude-code", HANDOFF));
             let get = call_message("get_task", json!({ "id": task.key() }), stateless(None));
             let shown = agent.send(get).await.unwrap();
-            assert!(text(&shown).contains("human: for the user, not for agents"), "{shown}");
+            assert!(text(&shown).contains("status: review, escalated to the user"), "{shown}");
             assert!(text(&shown).contains("Next step: run cargo test"), "{shown}");
 
-            // Handed back to a person in todo, it is still never taken by next_task.
-            let args = json!({ "id": task.key(), "status": "todo", "comment": HANDOFF });
-            let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
-            assert_eq!(text(&reply), "Updated api#1, review -> todo: Ship it\nComment added as agent.");
+            // The user drags it back to todo for more work: the escalation ends, and an agent takes it.
+            store.move_task(task.id, "todo", None).unwrap();
             let next = call_message("next_task", json!({ "project": "api" }), stateless(None));
-            assert_eq!(text(&agent.send(next).await.unwrap()), "Nothing in todo for api.");
-            assert_eq!(authors(&home, &task), ["claude-code", "agent"]);
+            let taken = agent.send(next).await.unwrap();
+            assert!(text(&taken).starts_with("Moved to doing:\napi#1 Ship it"), "{taken}");
+            assert!(!text(&taken).contains("escalated"), "{taken}");
+            assert_eq!(authors(&home, &task), ["claude-code"]);
         });
     }
 
@@ -1014,14 +1023,14 @@ mod tests {
             // 8193 characters but 16386 bytes.
             let wide = "é".repeat(8193);
             for comment in ["", "  \n ", wide.as_str()] {
-                let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": comment });
+                let args = json!({ "id": task.key(), "status": "review", "escalated": true, "comment": comment });
                 let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
                 assert_eq!(reply["result"]["isError"], true, "{reply}");
                 assert!(text(&reply).starts_with("comment is "), "{reply}");
 
                 let store = home.store().unwrap();
                 let saved = store.get_task(task.id).unwrap();
-                assert_eq!((saved.status.as_str(), saved.human), ("todo", false));
+                assert_eq!((saved.status.as_str(), saved.escalated), ("todo", false));
                 assert!(store.list_comments(task.id).unwrap().is_empty());
                 assert_eq!(store.changes().unwrap(), before, "not even the change counter moved");
             }
@@ -1068,12 +1077,12 @@ mod tests {
             std::fs::write(guest_dir.path().join(share::FILE), format!("join 127.0.0.1:{port}\n")).unwrap();
             let mut agent = Agent::start(Home::open(guest_dir.path().to_path_buf()).unwrap(), guest_dir.path());
 
-            let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": HANDOFF });
+            let args = json!({ "id": task.key(), "status": "review", "escalated": true, "comment": HANDOFF });
             let reply = agent.send(call_message("update_task", args, stateless(Some("claude-code")))).await.unwrap();
             assert_eq!(reply["result"]["isError"], false, "{reply}");
             assert_eq!(authors(&host, &task), ["claude-code"]);
             let saved = host.store().unwrap().get_task(task.id).unwrap();
-            assert_eq!((saved.status.as_str(), saved.human), ("review", true));
+            assert_eq!((saved.status.as_str(), saved.escalated), ("review", true));
         });
     }
 
@@ -1085,30 +1094,32 @@ mod tests {
             let project = store.find_project("api").unwrap();
             let waits = TaskPatch { waits_on: Some(blocker.key()), ..Default::default() };
             let task = store.create_task_in(project.id, "Then this", waits).unwrap();
-            for property in ["waiting", "comments", "human"] {
+            for property in ["waiting", "comments"] {
                 store.set_property(property, false).unwrap();
             }
             let mut agent = Agent::start(home.clone(), dir.path());
 
-            let args = json!({ "id": task.key(), "status": "review", "human": true, "comment": HANDOFF });
+            let args = json!({ "id": task.key(), "status": "review", "escalated": true, "comment": HANDOFF });
             let reply = agent.send(call_message("update_task", args, stateless(None))).await.unwrap();
             assert_eq!(text(&reply), "Updated api#2, todo -> review: Then this\nComment added as agent.");
             let get = call_message("get_task", json!({ "id": task.key() }), stateless(None));
             let shown = agent.send(get).await.unwrap();
             let shown = text(&shown);
             assert!(!shown.contains("Next step") && !shown.contains("Comments ("), "{shown}");
-            assert!(!shown.contains("waits on") && !shown.contains("human:"), "{shown}");
+            assert!(!shown.contains("waits on") && shown.contains("escalated to the user"), "{shown}");
             assert_eq!(store.list_comments(task.id).unwrap().len(), 1, "hidden, not dropped");
         });
     }
 
     #[test]
-    fn update_task_takes_an_optional_comment_and_the_tool_list_keeps_ten_tools() {
+    fn update_task_takes_an_optional_comment_and_escalation_and_the_tool_list_keeps_ten_tools() {
         let router = Kanzo::tools();
         assert_eq!(router.map.len(), 10);
         let route = router.map.values().find(|r| r.attr.name == "update_task").unwrap();
         let schema = &route.attr.input_schema;
         assert_eq!(schema["properties"]["comment"]["type"], "string");
-        assert!(!schema["required"].as_array().unwrap().iter().any(|r| r == "comment"));
+        assert_eq!(schema["properties"]["escalated"]["type"], "boolean");
+        let required = schema["required"].as_array().unwrap();
+        assert!(!required.iter().any(|r| r == "comment" || r == "escalated"));
     }
 }

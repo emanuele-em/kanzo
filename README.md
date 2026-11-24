@@ -118,19 +118,18 @@ Then ask: *"take the next task from kanzo and do it."* The agent:
 > [!TIP]
 > **Just ask your agent:** *"when you stop, move kanzo#12 to review for me, with a handoff comment."*
 
-When an agent stops, one `update_task` call can save the status, the `human` flag and a comment together, so a task is never moved without its notes. The comment is optional, up to 16 KiB, and signed with the agent's client name. Keep it short and factual:
+One `update_task` call moves a task and saves its `comment`, signed with the agent's client name. Both are saved, or neither: an empty comment, one over 16 KiB or any refused change saves nothing.
 
-```text
-Completed: what is done
-Remaining: what is left
-Verified: what was checked, and how
-Next step: what to do first
-```
+- **To you:** `status: "review"` with `escalated: true`. The card says **Escalated** until the task next moves, so dragging it back to `todo` gives it to agents again.
+- **To another agent:** `status: "todo"` with the comment, which the next agent reads with `get_task`.
+- **What to write:** what happened, not secrets or the whole conversation:
 
-- **To you:** `status: "review"` with `human: true`. Agents leave human tasks alone, and a human task in `review` shows **Human review** on the board and in the list. Turning off the Human property in Settings hides it.
-- **To another agent:** move it to `todo` with the comment. The next agent reads it with `get_task`.
-- **All or nothing:** if the comment is empty or too long, or any other change is refused, nothing is saved.
-- **Not for secrets or transcripts:** write what happened, not private reasoning or the whole conversation.
+  ```text
+  Completed: what is done
+  Remaining: what is left
+  Verified: what was checked, and how
+  Next step: what to do first
+  ```
 
 ## Park ideas in a backlog
 

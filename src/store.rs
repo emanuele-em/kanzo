@@ -115,6 +115,8 @@ const MIGRATIONS: &[&str] = &[
          DELETE FROM events
          WHERE id <= new.id - coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'events_kept'), 1000);
      END;",
+    // An agent handed the task to the user; its next move to another column clears it.
+    "ALTER TABLE tasks ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -177,6 +179,9 @@ pub struct Task {
     /// A link to anything, like the task's pull request; empty when there is none.
     pub url: String,
     pub human: bool,
+    /// An agent handed it to the user, until it next moves to another column. Left out when not, as on most tasks.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub escalated: bool,
     pub status: String,
     pub position: f64,
     pub created_at: String,
@@ -274,6 +279,8 @@ pub struct TaskPatch {
     pub human: Option<bool>,
     /// Task keys, comma-separated; it replaces the list.
     pub waits_on: Option<String>,
+    /// Without it, a move to another column clears it.
+    pub escalated: Option<bool>,
 }
 
 /// The most a comment saved with a task edit (`update_task`'s `comment`) can hold: 16 KiB of
@@ -750,7 +757,7 @@ impl Store {
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
             t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human,
-            t.url
+            t.url, t.escalated
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -762,6 +769,7 @@ impl Store {
             tags: r.get::<_, String>(9)?.split(',').filter(|t| !t.is_empty()).map(String::from).collect(),
             url: r.get(11)?,
             human: r.get(10)?,
+            escalated: r.get(12)?,
             status: r.get(4)?,
             position: r.get(5)?,
             created_at: r.get(6)?,
@@ -1023,16 +1031,20 @@ impl Store {
         // Only what the patch changes is written, and only then is the task newer.
         let status = patch.status.as_deref().filter(|s| *s != current.status);
         let position = status.map(|s| Self::end_of_column(c, s, id)).transpose()?;
+        // A move ends an escalation, unless the same edit escalates again.
+        let escalated = patch.escalated.or(status.map(|_| false));
         // One statement, so one edit is one event: task.moved when the status changes too.
         c.execute(
             &format!(
                 "UPDATE tasks SET title = coalesce(?1, title), project_id = coalesce(?2, project_id),
                    human = coalesce(?3, human), tags = coalesce(?4, tags),
                    description = coalesce(?5, description), url = coalesce(?7, url),
-                   status = coalesce(?8, status), position = coalesce(?9, position), updated_at = {NOW}
+                   status = coalesce(?8, status), position = coalesce(?9, position),
+                   escalated = coalesce(?10, escalated), updated_at = {NOW}
                  WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
-                   coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url), coalesce(?8, status))
-                   <> (title, project_id, human, tags, description, url, status)"
+                   coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url), coalesce(?8, status),
+                   coalesce(?10, escalated))
+                   <> (title, project_id, human, tags, description, url, status, escalated)"
             ),
             params![
                 edit.title,
@@ -1043,12 +1055,17 @@ impl Store {
                 id,
                 edit.url,
                 status,
-                position
+                position,
+                escalated
             ],
         )?;
-        if let Some(keys) = &patch.waits_on
-            && self.set_waits(c, id, keys)?
-        {
+        // The events trigger doesn't watch escalated: one that changes in place is written here.
+        let escalation = status.is_none() && escalated.is_some_and(|e| e != current.escalated);
+        let waits = match &patch.waits_on {
+            Some(keys) => self.set_waits(c, id, keys)?,
+            None => false,
+        };
+        if escalation || waits {
             // One event per edit: only when the rest of the patch wrote none.
             c.execute(
                 "INSERT INTO events (kind, task_id, project_id, project, status_to)
@@ -1087,7 +1104,7 @@ impl Store {
                 c.execute(
                     &format!(
                         "UPDATE tasks SET tags = ?1, status = coalesce(?2, status), position = coalesce(?3, position),
-                           updated_at = {NOW} WHERE id = ?4"
+                           escalated = escalated AND ?2 IS NULL, updated_at = {NOW} WHERE id = ?4"
                     ),
                     params![tags.join(","), moved, position, id],
                 )?;
@@ -1142,7 +1159,9 @@ impl Store {
                 }
             }
         };
-        let touched = if current.status != status { format!(", updated_at = {NOW}") } else { String::new() };
+        // Another column makes the task newer and ends its escalation; a new place in the same one doesn't.
+        let touched =
+            if current.status != status { format!(", escalated = 0, updated_at = {NOW}") } else { String::new() };
         c.execute(
             &format!("UPDATE tasks SET status = ?1, position = ?2{touched} WHERE id = ?3"),
             params![status, position, id],
@@ -1201,7 +1220,10 @@ impl Store {
             if let Some(id) = id {
                 let position = Self::end_of_column(c, to, id)?;
                 c.execute(
-                    &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
+                    &format!(
+                        "UPDATE tasks SET status = ?1, position = ?2, escalated = 0, updated_at = {NOW}
+                         WHERE id = ?3"
+                    ),
                     params![to, position, id],
                 )?;
             }
@@ -1917,7 +1939,7 @@ mod tests {
     fn handoff() -> TaskPatch {
         TaskPatch {
             status: Some("review".into()),
-            human: Some(true),
+            escalated: Some(true),
             tags: Some("handoff".into()),
             ..Default::default()
         }
@@ -1928,21 +1950,25 @@ mod tests {
     }
 
     #[test]
-    fn a_handoff_saves_the_edit_the_human_flag_and_the_comment_together() {
+    fn a_handoff_saves_the_edit_the_escalation_and_the_comment_together() {
         let (dir, s) = store();
         let p = s.create_project("api", "", None).unwrap();
         let t = s.create_task(p.id, "Ship it", "").unwrap();
         let before = s.changes().unwrap();
+        let start = s.last_event().unwrap();
 
         let after = s.update_task_with_comment(t.id, handoff(), note("  Completed: a\nRemaining: b \n")).unwrap();
-        assert_eq!((after.status.as_str(), after.human, after.comments), ("review", true, 1));
+        assert_eq!((after.status.as_str(), after.escalated, after.comments), ("review", true, 1));
+        assert!(!after.human, "the human flag is left as it was");
         assert_eq!(after.tags, ["handoff"]);
         assert!(s.changes().unwrap() > before);
+        let kinds: Vec<String> = kinds(&s, start).into_iter().map(|e| e.0).collect();
+        assert_eq!(kinds, ["task.moved", "comment.added"]);
 
         // A new connection, as after a restart, finds all of it.
         let again = Store::open(&dir.path().join("kanzo.db"), None).unwrap();
         let task = again.get_task(t.id).unwrap();
-        assert_eq!((task.status.as_str(), task.human), ("review", true));
+        assert_eq!((task.status.as_str(), task.escalated), ("review", true));
         let comments = again.list_comments(t.id).unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!((comments[0].author.as_str(), comments[0].body.as_str()), ("codex", "Completed: a\nRemaining: b"));
@@ -1991,7 +2017,7 @@ mod tests {
         s.update_task(a, waits(&b.to_string())).unwrap();
         let before = state(&s, b);
 
-        // The status and the human flag are written before the list of waits is refused.
+        // The status and the escalation are written before the list of waits is refused.
         let patches = [
             TaskPatch { waits_on: Some(a.to_string()), ..handoff() },
             TaskPatch { waits_on: Some("999".into()), ..handoff() },
@@ -2019,12 +2045,86 @@ mod tests {
         let patch = TaskPatch { waits_on: Some(other.to_string()), ..handoff() };
         let err = s.update_task_with_comment(t, patch, note("Completed: x")).unwrap_err();
         assert!(matches!(err, Error::Db(_)) && err.to_string().contains("closed"), "{err}");
-        assert_eq!(state(&s, t), before, "status, flag, tags and waits are undone with it");
+        assert_eq!(state(&s, t), before, "status, escalation, tags and waits are undone with it");
 
         // The connection is still usable, and the same edit without a comment goes through.
         let patch = TaskPatch { waits_on: Some(other.to_string()), ..handoff() };
         let after = s.update_task(t, patch).unwrap();
-        assert_eq!((after.status.as_str(), after.human, after.waiting_on), ("review", true, vec![other]));
+        assert_eq!((after.status.as_str(), after.escalated, after.waiting_on), ("review", true, vec![other]));
+    }
+
+    #[test]
+    fn an_escalation_lasts_until_the_task_moves_and_leaves_it_to_agents_after() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Ship it", "").unwrap().id;
+        let escalated = || s.get_task(t).unwrap().escalated;
+
+        s.update_task_with_comment(t, handoff(), note("Next step: decide")).unwrap();
+        assert!(escalated());
+        // Edits that leave it in review keep it, and so does a new place in the same column.
+        let rename =
+            TaskPatch { title: Some("Ship it now".into()), status: Some("review".into()), ..Default::default() };
+        s.update_task(t, rename).unwrap();
+        s.move_task(t, "review", None).unwrap();
+        s.update_tasks(&[t], Some("review"), "looked", "").unwrap();
+        assert!(escalated());
+
+        // Dragged back to todo on the board, it is an agent's task again.
+        s.move_task(t, "todo", None).unwrap();
+        assert!(!escalated());
+        assert_eq!(s.next_task(None).unwrap().map(|t| t.id), Some(t));
+    }
+
+    #[test]
+    fn every_way_a_task_moves_ends_its_escalation() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Ship it", "").unwrap().id;
+        let escalated = || s.get_task(t).unwrap().escalated;
+        let to = |status: &str| TaskPatch { status: Some(status.into()), ..Default::default() };
+        let escalate = || s.update_task(t, TaskPatch { escalated: Some(true), ..Default::default() }).unwrap();
+
+        escalate();
+        s.update_task(t, to("doing")).unwrap();
+        assert!(!escalated(), "update_task");
+        escalate();
+        s.move_tasks(&[t], "review", None).unwrap();
+        assert!(!escalated(), "a group dragged on the board");
+        escalate();
+        s.update_tasks(&[t], Some("todo"), "", "").unwrap();
+        assert!(!escalated(), "a group moved from the selection bar");
+        escalate();
+        s.next_task(None).unwrap();
+        assert!(!escalated(), "next_task");
+
+        // Escalated again by the same edit that moves it, or cleared where it is.
+        escalate();
+        s.update_task(t, TaskPatch { escalated: Some(true), ..to("review") }).unwrap();
+        assert!(escalated());
+        s.update_task(t, TaskPatch { escalated: Some(false), ..Default::default() }).unwrap();
+        assert!(!escalated());
+    }
+
+    #[test]
+    fn an_escalation_is_one_event_with_the_rest_of_its_edit() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Ship it", "").unwrap().id;
+        let start = s.last_event().unwrap();
+        let escalate = |more: TaskPatch| s.update_task(t, TaskPatch { escalated: Some(true), ..more }).unwrap();
+
+        escalate(TaskPatch::default());
+        let changes = s.changes().unwrap();
+        escalate(TaskPatch::default());
+        assert_eq!(s.changes().unwrap(), changes, "already escalated: nothing to write");
+        s.update_task(t, TaskPatch { escalated: Some(false), ..Default::default() }).unwrap();
+        escalate(TaskPatch { title: Some("renamed".into()), ..Default::default() });
+        escalate(TaskPatch { status: Some("review".into()), ..Default::default() });
+        s.move_task(t, "todo", None).unwrap();
+
+        let kinds: Vec<String> = kinds(&s, start).into_iter().map(|e| e.0).collect();
+        assert_eq!(kinds, ["task.updated", "task.updated", "task.updated", "task.moved", "task.moved"]);
     }
 
     #[test]
