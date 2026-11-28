@@ -1450,7 +1450,7 @@ const IMAGE_COUNT: &str = "(SELECT count(*) FROM images WHERE task_id = t.id)";
 /// Computed, never stored: reopening a task blocks what waits on it again, with nothing to keep in step.
 const WAITING: &str = "EXISTS (SELECT 1 FROM task_waits w JOIN tasks b ON b.id = w.waits_on_id
     WHERE w.task_id = t.id AND b.status <> 'done')";
-const QUALIFIERS: [&str; 15] = [
+const QUALIFIERS: [&str; 16] = [
     "tag",
     "status",
     "project",
@@ -1463,6 +1463,7 @@ const QUALIFIERS: [&str; 15] = [
     "images",
     "created",
     "updated",
+    "priority",
     "is",
     "has",
     "no",
@@ -1545,11 +1546,14 @@ impl Filter {
             ("images", range) => range_sql(IMAGE_COUNT, range, number)?,
             ("created", range) => range_sql("substr(t.created_at, 1, 10)", range, date)?,
             ("updated", range) => range_sql("substr(t.updated_at, 1, 10)", range, date)?,
+            // Never NULL, so a task without one matches -priority:P0.
+            ("priority", range) => format!("coalesce({}, 0)", range_sql("t.priority", range, priority)?),
             ("is", "human") => "t.human".to_string(),
             ("is", "waiting") => WAITING.to_string(),
             ("has" | "no", "description") => "t.description <> ''".to_string(),
             ("has" | "no", "tags") => "t.tags <> ''".to_string(),
             ("has" | "no", "url") => "t.url <> ''".to_string(),
+            ("has" | "no", "priority") => "t.priority IS NOT NULL".to_string(),
             ("has" | "no", "comments") => format!("{COMMENT_COUNT} > 0"),
             ("has" | "no", "images") => format!("{IMAGE_COUNT} > 0"),
             _ => return None,
@@ -1599,6 +1603,12 @@ fn range_sql(column: &str, range: &str, side: fn(&str) -> Option<String>) -> Opt
 
 fn number(text: &str) -> Option<String> {
     text.parse::<i64>().ok().map(|n| n.to_string())
+}
+
+/// A priority in a query, already lowercase: p0 to p3, or 0 to 3.
+fn priority(text: &str) -> Option<String> {
+    let n = text.strip_prefix('p').unwrap_or(text);
+    matches!(n, "0" | "1" | "2" | "3").then(|| n.to_string())
 }
 
 fn date(text: &str) -> Option<String> {
@@ -2513,6 +2523,43 @@ mod tests {
     }
 
     #[test]
+    fn priority_filters_take_a_level_or_a_range() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let task = |title: &str, priority: Option<&str>| {
+            let patch = TaskPatch { priority: priority.map(String::from), ..Default::default() };
+            s.create_task_in(api.id, title, patch).unwrap().id
+        };
+        let (a, b, c, d) = (task("a", Some("P0")), task("b", Some("P1")), task("c", Some("P3")), task("d", None));
+        let ids = |q: &str| {
+            let mut ids: Vec<i64> = s.search(q, None).unwrap().iter().map(|t| t.id).collect();
+            ids.sort();
+            ids
+        };
+        for (q, want) in [
+            ("priority:P0", vec![a]),
+            ("priority:p1", vec![b]),
+            ("priority:3", vec![c]),
+            ("priority:<=P1", vec![a, b]),
+            ("priority:>P0", vec![b, c]),
+            ("priority:P1..P3", vec![b, c]),
+            ("-priority:P0", vec![b, c, d]),
+            ("-priority:<P3", vec![c, d]),
+            ("has:priority", vec![a, b, c]),
+            ("no:priority", vec![d]),
+            ("priority:", vec![a, b, c, d]),
+            ("priority:P4", vec![]),
+            ("priority:high", vec![]),
+        ] {
+            assert_eq!(ids(q), want, "{q}");
+        }
+
+        s.set_property("priority", false).unwrap();
+        assert!(s.search_for_agent("priority:P0").unwrap().is_empty(), "agents can't filter through it hidden");
+        assert_eq!(ids("priority:P0"), [a], "the board still can");
+    }
+
+    #[test]
     fn filter_values_cannot_change_the_sql() {
         let (_dir, s) = store();
         let api = s.create_project("api", "", None).unwrap();
@@ -2526,6 +2573,7 @@ mod tests {
             "created:2026-01-0'",
             "title:'",
             "status:'--",
+            "priority:1'OR'1",
         ] {
             assert!(s.search(q, None).unwrap().is_empty(), "{q}");
         }
