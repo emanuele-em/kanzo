@@ -1327,7 +1327,11 @@ mod tests {
             let began = Instant::now();
             let (_, got) = get_from(&home, &format!("/api/events?since={}&wait=2", cursor(&start))).await;
             assert_eq!(got["events"][0]["kind"], "task.created", "{got}");
-            assert!(began.elapsed() >= Duration::from_millis(1900), "only when the wait ended");
+            // On Windows the file's identity is its modified time, which the write changed, so the
+            // wait saw it at once. Elsewhere only the counter could have told, and it didn't.
+            if cfg!(unix) {
+                assert!(began.elapsed() >= Duration::from_millis(1900), "only when the wait ended");
+            }
         });
     }
 
