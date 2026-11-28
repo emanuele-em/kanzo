@@ -120,7 +120,7 @@ Then ask: *"take the next task from kanzo and do it."* The agent:
 
 One `update_task` call moves a task and saves its `comment`, signed with the agent's client name. Both are saved, or neither: an empty comment, one over 16 KiB or any refused change saves nothing.
 
-- **To you:** `status: "review"` with `escalated: true`. The card says **Escalated** until the task next moves, so dragging it back to `todo` gives it to agents again.
+- **To you:** `status: "review"` with `escalated: true`. The card says **Escalated** until the task next moves, so dragging it back to `todo` gives it to agents again. With Notifications on in Settings, the board tells you.
 - **To another agent:** `status: "todo"` with the comment, which the next agent reads with `get_task`.
 - **What to write:** what happened, not secrets or the whole conversation:
 
@@ -195,6 +195,7 @@ The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `nex
 | `created:`, `updated:` | a date, or a range | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | tasks for you, not agents | `-is:human` |
 | `is:waiting` | tasks waiting on unfinished ones | `-is:waiting` |
+| `is:escalated` | tasks an agent handed to you | `is:escalated` |
 | `has:`, `no:` | `description`, `tags`, `url`, `comments` or `images` | `has:url`, `no:tags` |
 
 Anything else is plain text. Use quotes for a phrase, `"on hold"`, or to look for text that reads like a qualifier, `"tag:bug"`. Agents can't filter through a property you've hidden in Settings.
@@ -308,6 +309,7 @@ Settings on the board:
 - **Task properties:** turn one off, like tags or comments, to hide it there and leave it out of what agents get. Nothing is deleted.
 - **Language:** English or Chinese, under Board.
 - **Theme:** system, light or dark, under Board.
+- **Notifications:** turn them on under Board, and when an agent escalates a task, the board tells you on this computer, from its tab or the installed app. Clicking the notification opens the task there. It works while the board is open, even in the background, at localhost or over https: browsers refuse notifications to a board opened over http from another computer. The board offers to turn them on the first time it opens and after each update, until you turn them on or off.
 - **What's new:** this version's notes, under About.
 
 ## Small and fast

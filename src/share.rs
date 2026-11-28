@@ -235,6 +235,13 @@ impl Reply {
     }
 }
 
+/// How long the shared board has to start its reply: longer than anything waits there, like
+/// /api/events?wait=25 or an update's download, so only a host that went away, asleep or off the
+/// network, runs out of it. Without it, such a request never ended, and a page waiting on the
+/// shared board's events never asked again. The body has no limit: an MCP stream stays open.
+// Shorter in tests, where a host on this machine answers at once, even on a slow runner.
+const REPLY_START: Duration = if cfg!(test) { Duration::from_secs(5) } else { Duration::from_secs(60) };
+
 async fn send(host: &str, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io::Result<Reply> {
     let connect = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(host));
     let mut conn = connect.await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
@@ -248,17 +255,22 @@ async fn send(host: &str, method: &str, path: &str, headers: &[(&str, &str)], bo
     request.extend_from_slice(body);
     conn.write_all(&request).await?;
     let mut reader = BufReader::new(conn);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    let status = line.split_whitespace().nth(1).and_then(|s| s.parse().ok());
-    let status = status.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not an HTTP reply"))?;
-    let mut headers = Vec::new();
-    loop {
-        line.clear();
+    let head = async {
+        let mut line = String::new();
         reader.read_line(&mut line).await?;
-        let Some((name, value)) = line.trim_end().split_once(':') else { break };
-        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
-    }
+        let status = line.split_whitespace().nth(1).and_then(|s| s.parse().ok());
+        let status = status.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not an HTTP reply"))?;
+        let mut headers = Vec::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await?;
+            let Some((name, value)) = line.trim_end().split_once(':') else { break };
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
+        Ok::<_, io::Error>((status, headers))
+    };
+    let timed_out = |_| io::Error::from(io::ErrorKind::TimedOut);
+    let (status, headers) = tokio::time::timeout(REPLY_START, head).await.map_err(timed_out)??;
     Ok(Reply { status, headers, body: reader })
 }
 
@@ -429,6 +441,24 @@ mod tests {
     use rmcp::model::ClientCapabilities;
 
     use super::*;
+
+    #[test]
+    fn a_shared_board_that_never_answers_ends_the_request() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let host = listener.local_addr().unwrap().to_string();
+            // Takes the request and never answers, like a host that went to sleep.
+            tokio::spawn(async move {
+                let _held = listener.accept().await;
+                std::future::pending::<()>().await
+            });
+            let began = std::time::Instant::now();
+            let failed = send(&host, "GET", "/api/events?since=0&wait=25", &[], b"").await.err().unwrap();
+            assert_eq!(failed.kind(), io::ErrorKind::TimedOut);
+            assert!(began.elapsed() < REPLY_START + Duration::from_secs(2));
+        });
+    }
 
     #[test]
     fn addresses() {

@@ -406,6 +406,8 @@ async function loadBoard() {
     state.changes = board.changes;
     $("#offline").hidden = true;
     render();
+    markFront();
+    offerNotifications();
   } catch (e) {
     if (request !== boardRequest) return;
     if (state.project !== "all" && /no project/.test(e.message)) {
@@ -937,7 +939,7 @@ const QUALIFIERS = new Map([
   ["tag", anyText], ["status", anyText], ["project", anyText], ["title", anyText], ["description", anyText],
   ["url", anyText], ["comment", anyText], ["id", inRange(isNumber)], ["comments", inRange(isNumber)],
   ["images", inRange(isNumber)], ["created", inRange(isDate)], ["updated", inRange(isDate)],
-  ["is", (v) => v === "human" || v === "waiting"], ["has", isField], ["no", isField],
+  ["is", (v) => ["human", "waiting", "escalated"].includes(v)], ["has", isField], ["no", isField],
 ]);
 
 // A part of a query, read as the server reads it. Null for a word.
@@ -1299,18 +1301,22 @@ function hideNewProject() {
 // off, as a sandboxed frame does, and it then answers Cancel without asking.
 let answerAsk = null;
 
-function ask(message) {
+// `onYes` runs in the click itself, where a browser lets the page ask for a permission.
+function ask(message, { yes = tr("OK"), no = tr("Cancel"), onYes } = {}) {
   answerAsk?.(false);
   const back = document.activeElement;
   $("#ask-text").textContent = message;
+  $("#ask-ok").textContent = yes;
+  $("#ask-cancel").textContent = no;
   $("#ask-dialog").hidden = false;
   $("#ask-ok").focus();
   return new Promise((resolve) => {
-    answerAsk = (yes) => {
+    answerAsk = (answer) => {
       answerAsk = null;
       $("#ask-dialog").hidden = true;
       back?.focus?.();
-      resolve(yes);
+      if (answer) onYes?.();
+      resolve(answer);
     };
   });
 }
@@ -1903,7 +1909,11 @@ window.addEventListener("hashchange", () => {
 });
 
 async function poll() {
-  if (document.hidden) return schedulePoll();
+  if (document.hidden) {
+    watchEscalations("local");
+    if (state.joined) watchEscalations("shared");
+    return schedulePoll();
+  }
   let local = null, shared = null;
   try { local = await api("GET", "/changes", null, "local"); } catch {}
   // Joining or leaving a board, even from the terminal, shows it in the sidebar or takes it away.
@@ -1935,6 +1945,13 @@ async function poll() {
     if (state.task) refreshTask();
   }
   if (state.joined && other && other.changes !== state.other?.changes) loadOther();
+  // Only while notifications are on, or the first change after turning them on would go unseen.
+  for (const [board, reply] of [["local", local], ["shared", shared]]) {
+    if (notifyOn() && reply && reply.changes !== notifier.changes[board]) {
+      notifier.changes[board] = reply.changes;
+      checkEscalations(board);
+    }
+  }
   schedulePoll();
 }
 
@@ -1942,6 +1959,147 @@ async function poll() {
 // never piles up requests.
 function schedulePoll() {
   setTimeout(poll, 2000);
+}
+
+// A system notification when an agent escalates a task. It comes from this page, so a click
+// brings back the window that showed it, the installed app or this tab, at the task. Turned on
+// per browser in Settings, like the theme.
+const notifier = { seen: {}, changes: {}, watching: {}, offered: false };
+// The most /api/search answers.
+const SEARCH_MAX = 30;
+
+// Only on a secure page, like localhost: over http from another computer, browsers refuse them.
+const canNotify = () => "Notification" in window && window.isSecureContext;
+
+function notifyOn() {
+  return canNotify() && Notification.permission === "granted" && localStorageGet("kanzo.notify") === "1";
+}
+
+// The board's pages in this browser, the installed app's and the tabs, share a few keys in
+// localStorage to show each escalation once, from the right window.
+const pageId = Math.random().toString(36).slice(2);
+const isApp = () => matchMedia("(display-mode: standalone)").matches;
+
+function readShared(k) {
+  try { return JSON.parse(localStorageGet(k) || "null"); } catch { return null; }
+}
+
+// What the page with focus shows, so that no page notifies about a task already in front of you.
+function markFront() {
+  if (!document.hasFocus()) return;
+  const front = JSON.stringify({ id: pageId, board: state.on, project: state.project });
+  if (localStorageGet("kanzo.front") !== front) localStorageSet("kanzo.front", front);
+}
+window.addEventListener("focus", markFront);
+window.addEventListener("blur", () => { if (readShared("kanzo.front")?.id === pageId) localStorageSet("kanzo.front", ""); });
+
+// Only one hidden page per browser waits on /api/events, the installed app's first: each wait
+// holds one of the 6 connections a browser keeps to the board for all its pages, and enough of
+// them stalled the visible ones. The page renews its turn on every wait, and another takes over
+// once it lapses, as when that page closes. With storage off, each page waits on its own.
+const WATCH_LAPSE = 40000;
+
+function holdWatch() {
+  const turn = readShared("kanzo.watcher"), app = isApp();
+  if (turn && turn.id !== pageId && Date.now() - turn.at < WATCH_LAPSE && (turn.app || !app)) return false;
+  localStorageSet("kanzo.watcher", JSON.stringify({ id: pageId, app, at: Date.now() }));
+  return true;
+}
+
+function releaseWatch() {
+  if (readShared("kanzo.watcher")?.id === pageId) localStorageSet("kanzo.watcher", "");
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) releaseWatch(); });
+window.addEventListener("pagehide", releaseWatch);
+
+// The first look at a board only learns what is escalated already, so old ones stay quiet. By
+// id, which a task keeps when it moves to another project.
+async function checkEscalations(board) {
+  if (!notifyOn()) return;
+  let tasks;
+  try { tasks = await api("GET", "/search?q=" + encodeURIComponent("is:escalated"), null, board); } catch { return; }
+  // A shared board older than is:escalated reads it as a word.
+  tasks = tasks.filter((t) => t.escalated);
+  const seen = notifier.seen[board];
+  // Search answers 30 at most, the latest edited first: past that, older ones stay known.
+  notifier.seen[board] = new Set([...(tasks.length >= SEARCH_MAX && seen ? seen : []), ...tasks.map((t) => t.id)]);
+  for (const t of seen ? tasks.filter((t) => !seen.has(t.id)) : []) notifyEscalated(t, board);
+}
+
+async function notifyEscalated(t, board) {
+  const where = (board === "shared" ? "@" : "") + `${t.project}/${t.id}`;
+  // More than one page may see it: the installed app shows it, and a tab only if no page has in
+  // time, which leaves the app's visible poll, every 2 seconds, time to find it first.
+  if (!isApp()) await new Promise((r) => setTimeout(r, 2500 + Math.random() * 500));
+  const inFront = (f) => f && f.board === board && (f.project === "all" || f.project === t.project);
+  if (inFront(readShared("kanzo.front")) || (document.hasFocus() && inFront({ board: state.on, project: state.project }))) return;
+  let shown = {};
+  try { shown = JSON.parse(localStorageGet("kanzo.notified") || "{}"); } catch {}
+  const now = Date.now();
+  if (now - (shown[where] || 0) < 60000) return;
+  for (const w of Object.keys(shown)) if (now - shown[w] >= 60000) delete shown[w];
+  shown[where] = now;
+  localStorageSet("kanzo.notified", JSON.stringify(shown));
+  try {
+    const n = new Notification(tr("{0} needs you", key(t)), { body: t.title, tag: `kanzo-${where}`, icon: "/icon.png" });
+    n.onclick = () => { window.focus(); location.hash = "#" + where; n.close(); };
+  } catch {}
+}
+
+// A hidden page doesn't poll, so it waits on /api/events instead: the server answers as soon as
+// the board changes, and a browser never delays an answer the way it delays a hidden page's timers.
+async function watchEscalations(board) {
+  if (notifier.watching[board] || !notifyOn()) return;
+  notifier.watching[board] = true;
+  let since = null;
+  while (notifyOn() && document.hidden && (board === "local" || state.joined) && holdWatch()) {
+    try {
+      const reply = await api("GET", "/events?wait=25" + (since ? "&since=" + encodeURIComponent(since) : ""), null, board);
+      // The first reply only says where to start: look then, so a page that opens hidden, as
+      // after an update, knows what is escalated already and shows the next one. After that,
+      // only a move or an edit can escalate a task, not a comment.
+      const edits = reply.events.some((e) => e.kind === "task.moved" || e.kind === "task.updated");
+      if (!since || reply.reset || edits) await checkEscalations(board);
+      since = reply.last;
+    } catch { await new Promise((r) => setTimeout(r, 5000)); }
+  }
+  notifier.watching[board] = false;
+}
+
+// Safari before 15 answers the permission request with a callback, not a promise.
+function askNotifications() {
+  return new Promise((resolve) => Notification.requestPermission(resolve)?.then(resolve));
+}
+
+// Called in a click: a browser asks for permission only then. A prompt closed without an answer
+// leaves them undecided, so the board offers them again after the next update.
+async function setNotifications(on) {
+  if (on) {
+    const answer = await askNotifications();
+    if (answer === "denied") toast(tr("This browser blocks notifications from the board: allow them in its site settings."));
+    if (answer !== "granted") return false;
+  }
+  localStorageSet("kanzo.notify", on ? "1" : "0");
+  notifier.seen = {};
+  notifier.changes = {};
+  return on;
+}
+
+$("#settings-notify").addEventListener("change", async (e) => { e.target.checked = await setNotifications(e.target.checked); });
+
+// The first time the board opens, and again after each update, until they're turned on, or off
+// in Settings: "Not now" only waits for the next version. A browser never asks for permission
+// without a click, so the board asks first, in the page. The version is this computer's, as a
+// shared board's may differ and would bring the offer back on each switch between them.
+function offerNotifications() {
+  if (notifier.offered || !pageVersion || !canNotify() || Notification.permission === "denied") return;
+  if (localStorageGet("kanzo.notify") !== null) return;
+  if (localStorageGet("kanzo.notifyOffered") === pageVersion || !$("#ask-dialog").hidden) return;
+  // Once a page too, where storage is off, as in some private windows.
+  notifier.offered = true;
+  localStorageSet("kanzo.notifyOffered", pageVersion);
+  ask(tr("Get a notification on this computer when an agent escalates a task to you? You can change it in Settings."),
+      { yes: tr("Turn on"), no: tr("Not now"), onYes: () => setNotifications(true) });
 }
 
 let syncing = false;
@@ -2162,6 +2320,8 @@ function openSettings(section = "board") {
   $("#settings-backlog").checked = state.board?.statuses.includes("backlog") ?? false;
   // A board on an older version sends no events_kept.
   $("#settings-events-kept").value = state.board?.events_kept ?? 1000;
+  $("#settings-notify-row").hidden = !canNotify();
+  $("#settings-notify").checked = notifyOn();
   document.querySelectorAll("[data-property]").forEach((box) => { box.checked = !isPropertyHidden(box.dataset.property); });
   $("#sync-url").value = syncRemote || "";
   $("#sync-create").hidden = !!syncRemote;

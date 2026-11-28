@@ -537,6 +537,21 @@ fn read_events(s: &Store, q: &EventsQuery) -> store::Result<store::EventPage> {
     s.events_after(q.since.as_deref(), project, EVENTS_PER_REPLY)
 }
 
+/// SQLite's file change counter, 4 bytes at offset 24 of kanzo.db. With Kanzo's rollback journal
+/// and normal locking, every commit from any process bumps it; in WAL mode or with exclusive
+/// locking it wouldn't, and a waiting reader would hear of changes only when its wait ends, never
+/// lose them. Opening the board every half second instead made a waiting reader cost 160 ms of
+/// CPU a minute, four times a visible board's poll; now it costs the same as that poll. It's read
+/// right here: 28 bytes of a file the system has cached cost less than a helper thread, and none
+/// stays busy for the whole wait. None if it can't be read, as while kanzo sync swaps the file:
+/// then the board is read to find out.
+fn change_counter(db: &std::path::Path) -> Option<[u8; 4]> {
+    use std::io::Read;
+    let mut head = [0; 28];
+    std::fs::File::open(db).ok()?.read_exact(&mut head).ok()?;
+    Some([head[24], head[25], head[26], head[27]])
+}
+
 /// Lets a service react to the board as it changes, like starting an agent for a new task,
 /// without polling the whole board: `GET /api/events?since=<last>&wait=25` in a loop.
 async fn events(
@@ -546,14 +561,23 @@ async fn events(
 ) -> Response {
     let q = Arc::new(q);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.min(EVENTS_WAIT_MAX));
+    let db = home.db_path();
+    // The file and its counter at the last read: the board is read again only once a write has
+    // changed them. The file too, since kanzo sync can swap in one whose counter is the same.
+    let mut read = None;
     loop {
-        let (h, query) = (home.clone(), q.clone());
-        let result = blocking(move || read_events(&h.store()?, &query)).await;
-        // With nothing new, ask again every half second until the wait is over.
-        let nothing_new = matches!(&result, Ok(Ok(e)) if e.events.is_empty() && !e.reset);
-        if !nothing_new || q.since.is_none() || tokio::time::Instant::now() >= deadline || shutdown.is_cancelled() {
-            return reply(result);
+        let stamp = (home.db_identity(), change_counter(&db));
+        let last = q.since.is_none() || tokio::time::Instant::now() >= deadline || shutdown.is_cancelled();
+        if last || read != Some(stamp) {
+            read = Some(stamp);
+            let (h, query) = (home.clone(), q.clone());
+            let result = blocking(move || read_events(&h.store()?, &query)).await;
+            let nothing_new = matches!(&result, Ok(Ok(e)) if e.events.is_empty() && !e.reset);
+            if !nothing_new || last {
+                return reply(result);
+            }
         }
+        // With nothing new, look again every half second until the wait is over.
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
             _ = shutdown.cancelled() => {}
@@ -1257,6 +1281,57 @@ mod tests {
             assert_eq!(code, "200");
             assert_eq!(got["events"][0]["kind"], "task.created");
             assert!(began.elapsed() < Duration::from_secs(5), "answers when the event comes, not after the wait");
+        });
+    }
+
+    #[test]
+    fn every_write_changes_the_counter_a_waiting_reader_watches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = test_home(&tmp);
+        let s = home.store().unwrap();
+        let p = s.create_project("api", "", None).unwrap();
+        let mut seen = vec![change_counter(&home.db_path()).unwrap()];
+        let t = s.create_task(p.id, "first", "").unwrap();
+        seen.push(change_counter(&home.db_path()).unwrap());
+        s.add_comment(t.id, "agent", "on it", &[]).unwrap();
+        seen.push(change_counter(&home.db_path()).unwrap());
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(change_counter(&tmp.path().join("nope.db")), None);
+    }
+
+    #[test]
+    fn a_change_the_counter_misses_still_comes_when_the_wait_ends() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = test_home(&tmp);
+            let pid = home.store().unwrap().create_project("api", "", None).unwrap().id;
+            let (_, start) = get_from(&home, "/api/events").await;
+            let writer = home.clone();
+            // Between two of the wait's looks, half a second apart: a write that leaves the
+            // counter as it was, as if it had never bumped it.
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::task::spawn_blocking(move || {
+                    use std::io::{Seek, SeekFrom, Write};
+                    let before = change_counter(&writer.db_path()).unwrap();
+                    writer.store().unwrap().create_task(pid, "unseen", "").unwrap();
+                    let mut file = std::fs::OpenOptions::new().write(true).open(writer.db_path()).unwrap();
+                    file.seek(SeekFrom::Start(24)).unwrap();
+                    file.write_all(&before).unwrap();
+                })
+                .await
+                .unwrap();
+            });
+            let began = Instant::now();
+            let (_, got) = get_from(&home, &format!("/api/events?since={}&wait=2", cursor(&start))).await;
+            assert_eq!(got["events"][0]["kind"], "task.created", "{got}");
+            // On Windows the file's identity is its modified time, which the write changed, so the
+            // wait saw it at once. Elsewhere only the counter could have told, and it didn't.
+            if cfg!(unix) {
+                assert!(began.elapsed() >= Duration::from_millis(1900), "only when the wait ended");
+            }
         });
     }
 

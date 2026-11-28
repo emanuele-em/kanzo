@@ -123,7 +123,7 @@ Sonra şunu iste: *"kanzo'dan sıradaki görevi al ve yap."* Ajan:
 
 Tek bir `update_task` çağrısı görevi taşır ve `comment`'ini kaydeder; yorum ajanın istemci adıyla imzalanır. İkisi birlikte kaydedilir ya da hiçbiri: boş bir yorum, 16 KiB'tan uzun bir yorum ya da reddedilen herhangi bir değişiklik hiçbir şey kaydetmez.
 
-- **Sana:** `status: "review"` ile `escalated: true`. Görev bir sonraki taşınışına kadar kartta **Escalated** yazar; `todo`'ya geri sürüklersen görev yine ajanlara kalır.
+- **Sana:** `status: "review"` ile `escalated: true`. Görev bir sonraki taşınışına kadar kartta **Escalated** yazar; `todo`'ya geri sürüklersen görev yine ajanlara kalır. Settings'te Notifications açıksa pano sana haber verir.
 - **Başka bir ajana:** yorumla birlikte `status: "todo"`; sonraki ajan onu `get_task` ile okur.
 - **Ne yazılır:** ne olduğu; sırlar ya da konuşmanın tamamı değil:
 
@@ -198,6 +198,7 @@ Panonun filtresi (`f`), arama (`/`) ve `list_tasks` ile `next_task`'ın `filter`
 | `created:`, `updated:` | bir tarih ya da aralık | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | ajanlara değil, sana ait görevler | `-is:human` |
 | `is:waiting` | bitmemiş görevleri bekleyen görevler | `-is:waiting` |
+| `is:escalated` | bir ajanın sana devrettiği görevler | `is:escalated` |
 | `has:`, `no:` | `description`, `tags`, `url`, `comments` ya da `images` | `has:url`, `no:tags` |
 
 Geri kalan her şey düz metindir. Bir ifade için tırnak kullan, `"on hold"`; niteleyiciye benzeyen bir metni aramak için de, `"tag:bug"`. Ajanlar, Settings'te gizlediğin bir özellik üzerinden filtreleme yapamaz.
@@ -311,6 +312,7 @@ Panodaki ayarlar:
 - **Görev özellikleri:** etiketler ya da yorumlar gibi birini kapatırsan panoda gizlenir ve ajanlara gönderilenlerin dışında kalır. Hiçbir şey silinmez.
 - **Dil:** Board altında, İngilizce ya da Çince.
 - **Tema:** Board altında, sistem, açık ya da koyu.
+- **Bildirimler:** Board altında aç; bir ajan bir görevi sana devrettiğinde pano bunu bu bilgisayarda, kendi sekmesinden ya da yüklü uygulamadan bildirir. Bildirime tıklarsan görev orada açılır. Pano açık olduğu sürece, arka planda bile çalışır; pano localhost'ta ya da https ile açık olmalı, çünkü tarayıcılar başka bir bilgisayardan http ile açılan panoya bildirim izni vermez. Pano ilk açıldığında ve her güncellemeden sonra, sen açana ya da kapatana kadar bunu açmayı önerir.
 - **What's new:** About altında, bu sürümün notları.
 
 ## Küçük ve hızlı
