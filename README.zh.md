@@ -113,6 +113,24 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
   <img alt="看板上打开的一个任务，里面有 Claude Code 的评论（其中一条说明如何恢复会话）和一条回复" src="docs/img/task-light.jpg">
 </picture>
 
+## 交接任务
+
+> [!TIP]
+> **直接告诉你的智能体：** *“停下来时，把 kanzo#12 移到 review 交给我，并留下交接评论。”*
+
+一次 `update_task` 调用就能移动任务并保存它的 `comment`，评论以智能体的客户端名称署名。两者要么都保存，要么都不保存：评论为空、超过 16 KiB，或任何改动被拒绝时，什么都不会保存。
+
+- **交给你：** `status: "review"` 加 `escalated: true`。在任务下一次移动之前，卡片会显示 **已升级**；所以把它拖回 `todo`，智能体就能再接手。
+- **交给另一个智能体：** `status: "todo"` 加评论，下一个智能体用 `get_task` 读取。
+- **写什么：** 写发生了什么，不要写机密或整段对话：
+
+  ```text
+  Completed: 已完成的内容
+  Remaining: 还剩什么
+  Verified: 检查了什么、怎么检查的
+  Next step: 先做什么
+  ```
+
 ## 把想法放进暂存列
 
 在设置中打开“暂存列”，就会多出一列智能体不会碰的任务，直到你把它们移到 `todo`。

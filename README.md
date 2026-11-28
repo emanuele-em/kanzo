@@ -113,6 +113,24 @@ Then ask: *"take the next task from kanzo and do it."* The agent:
   <img alt="A task open on the board, with Claude Code's comments, one saying how to resume its session, and a reply" src="docs/img/task-light.jpg">
 </picture>
 
+## Hand a task off
+
+> [!TIP]
+> **Just ask your agent:** *"when you stop, move kanzo#12 to review for me, with a handoff comment."*
+
+One `update_task` call moves a task and saves its `comment`, signed with the agent's client name. Both are saved, or neither: an empty comment, one over 16 KiB or any refused change saves nothing.
+
+- **To you:** `status: "review"` with `escalated: true`. The card says **Escalated** until the task next moves, so dragging it back to `todo` gives it to agents again.
+- **To another agent:** `status: "todo"` with the comment, which the next agent reads with `get_task`.
+- **What to write:** what happened, not secrets or the whole conversation:
+
+  ```text
+  Completed: what is done
+  Remaining: what is left
+  Verified: what was checked, and how
+  Next step: what to do first
+  ```
+
 ## Park ideas in a backlog
 
 Turn on Backlog in Settings for a column agents leave alone, until you move its tasks to `todo`.

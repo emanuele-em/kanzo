@@ -37,6 +37,8 @@ struct TaskOut {
     tags: Vec<String>,
     url: String,
     human: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    escalated: bool,
     waits_on: Vec<String>,
     images: Vec<String>,
     status: String,
@@ -55,6 +57,7 @@ impl TaskOut {
             tags: task.tags,
             url: task.url,
             human: task.human,
+            escalated: task.escalated,
             waits_on,
             images,
             status: task.status,
@@ -144,6 +147,9 @@ fn markdown(board: &Board) -> String {
                 if t.human {
                     md.push_str("Human task.\n");
                 }
+                if t.escalated {
+                    md.push_str("Escalated to the user.\n");
+                }
                 if !t.tags.is_empty() {
                     let _ = writeln!(md, "Tags: {}.", t.tags.join(", "));
                 }
@@ -211,6 +217,28 @@ mod tests {
         let only = collect(&store, Some("web"), Path::new("/k/images")).unwrap();
         assert_eq!(only.projects.len(), 1);
         assert!(collect(&store, Some("nope"), Path::new("/k/images")).is_err());
+    }
+
+    #[test]
+    fn exports_a_handoff_comment_with_the_task_it_moved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        let store = home.store().unwrap();
+        let api = store.create_project("api", "API", None).unwrap();
+        let t = store.create_task(api.id, "Fix login", "").unwrap();
+        let patch = store::TaskPatch { status: Some("review".into()), escalated: Some(true), ..Default::default() };
+        let note = store::NewComment { author: "claude-code", body: "Completed: a\nRemaining: b" };
+        store.update_task_with_comment(t.id, patch, Some(note)).unwrap();
+
+        let board = collect(&store, None, Path::new("/k/images")).unwrap();
+        let md = markdown(&board);
+        assert!(md.contains("### review\n\n#### api#1 Fix login"), "{md}");
+        assert!(md.contains("Escalated to the user.") && !md.contains("Human task."), "{md}");
+        assert!(md.contains("- **claude-code**, ") && md.contains("Completed: a\n  Remaining: b"), "{md}");
+        let json: serde_json::Value = serde_json::to_value(&board).unwrap();
+        let task = &json["projects"][0]["tasks"][0];
+        assert_eq!((task["status"].as_str(), task["escalated"].as_bool()), (Some("review"), Some(true)));
+        assert_eq!(task["comments"][0]["body"], "Completed: a\nRemaining: b");
     }
 
     #[test]
