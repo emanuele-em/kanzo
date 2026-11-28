@@ -195,6 +195,7 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 | `created:`, `updated:` | 一个日期或范围 | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | 留给你而不是智能体的任务 | `-is:human` |
 | `is:waiting` | 正在等待未完成任务的任务 | `-is:waiting` |
+| `is:escalated` | 智能体交给你的任务 | `is:escalated` |
 | `has:`, `no:` | `description`、`tags`、`url`、`comments` 或 `images` | `has:url`, `no:tags` |
 
 其他内容都按普通文本处理。用引号表示短语，如 `"on hold"`，或者查找看起来像限定符的文本，如 `"tag:bug"`。智能体无法通过你在设置中隐藏的属性进行筛选。

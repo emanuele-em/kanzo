@@ -195,6 +195,7 @@ The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `nex
 | `created:`, `updated:` | a date, or a range | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | tasks for you, not agents | `-is:human` |
 | `is:waiting` | tasks waiting on unfinished ones | `-is:waiting` |
+| `is:escalated` | tasks an agent handed to you | `is:escalated` |
 | `has:`, `no:` | `description`, `tags`, `url`, `comments` or `images` | `has:url`, `no:tags` |
 
 Anything else is plain text. Use quotes for a phrase, `"on hold"`, or to look for text that reads like a qualifier, `"tag:bug"`. Agents can't filter through a property you've hidden in Settings.

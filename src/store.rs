@@ -1524,6 +1524,7 @@ impl Filter {
             ("updated", range) => range_sql("substr(t.updated_at, 1, 10)", range, date)?,
             ("is", "human") => "t.human".to_string(),
             ("is", "waiting") => WAITING.to_string(),
+            ("is", "escalated") => "t.escalated".to_string(),
             ("has" | "no", "description") => "t.description <> ''".to_string(),
             ("has" | "no", "tags") => "t.tags <> ''".to_string(),
             ("has" | "no", "url") => "t.url <> ''".to_string(),
@@ -2473,6 +2474,20 @@ mod tests {
         s.update_task(l, TaskPatch { description: Some("status:doing is the text".into()), ..Default::default() })
             .unwrap();
         assert_eq!(ids("\"status:doing\""), [l]);
+    }
+
+    #[test]
+    fn is_escalated_finds_what_agents_handed_to_the_user() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let plain = s.create_task(api.id, "Plain", "").unwrap().id;
+        let handed = s.create_task(api.id, "Handed over", "").unwrap().id;
+        let escalate = TaskPatch { status: Some("review".into()), escalated: Some(true), ..Default::default() };
+        s.update_task(handed, escalate).unwrap();
+        let ids = |q: &str| s.search(q, None).unwrap().iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!((ids("is:escalated"), ids("-is:escalated")), (vec![handed], vec![plain]));
+        s.move_task(handed, "todo", None).unwrap();
+        assert!(ids("is:escalated").is_empty(), "a move ends it");
     }
 
     #[test]

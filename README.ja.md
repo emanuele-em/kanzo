@@ -198,6 +198,7 @@ Settings で Backlog をオンにすると、エージェントが手を付け�
 | `created:`, `updated:` | 日付、または範囲 | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | エージェントではなくあなた向けのタスク | `-is:human` |
 | `is:waiting` | 未完了のタスクを待っているタスク | `-is:waiting` |
+| `is:escalated` | エージェントがあなたに渡したタスク | `is:escalated` |
 | `has:`, `no:` | `description`、`tags`、`url`、`comments`、`images` | `has:url`, `no:tags` |
 
 それ以外はすべてプレーンテキストとして扱われます。フレーズには `"on hold"` のように引用符を使い、修飾子のように見えるテキストを探すときも `"tag:bug"` のように引用符を使います。Settings で非表示にしたプロパティでは、エージェントは絞り込みできません。

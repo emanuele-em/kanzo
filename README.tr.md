@@ -198,6 +198,7 @@ Panonun filtresi (`f`), arama (`/`) ve `list_tasks` ile `next_task`'ın `filter`
 | `created:`, `updated:` | bir tarih ya da aralık | `created:2026-11-05`, `updated:<2026-01-31` |
 | `is:human` | ajanlara değil, sana ait görevler | `-is:human` |
 | `is:waiting` | bitmemiş görevleri bekleyen görevler | `-is:waiting` |
+| `is:escalated` | bir ajanın sana devrettiği görevler | `is:escalated` |
 | `has:`, `no:` | `description`, `tags`, `url`, `comments` ya da `images` | `has:url`, `no:tags` |
 
 Geri kalan her şey düz metindir. Bir ifade için tırnak kullan, `"on hold"`; niteleyiciye benzeyen bir metni aramak için de, `"tag:bug"`. Ajanlar, Settings'te gizlediğin bir özellik üzerinden filtreleme yapamaz.

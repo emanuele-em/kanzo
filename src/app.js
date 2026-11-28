@@ -937,7 +937,7 @@ const QUALIFIERS = new Map([
   ["tag", anyText], ["status", anyText], ["project", anyText], ["title", anyText], ["description", anyText],
   ["url", anyText], ["comment", anyText], ["id", inRange(isNumber)], ["comments", inRange(isNumber)],
   ["images", inRange(isNumber)], ["created", inRange(isDate)], ["updated", inRange(isDate)],
-  ["is", (v) => v === "human" || v === "waiting"], ["has", isField], ["no", isField],
+  ["is", (v) => ["human", "waiting", "escalated"].includes(v)], ["has", isField], ["no", isField],
 ]);
 
 // A part of a query, read as the server reads it. Null for a word.
