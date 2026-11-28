@@ -65,7 +65,7 @@ let pageVersion = null;
 
 function noticeVersion(version) {
   if (!version) return;
-  pageVersion ??= version;
+  if (pageVersion === null) pageVersion = version;
   if (version !== pageVersion && !document.activeElement?.matches("input, textarea, select")) location.reload();
 }
 

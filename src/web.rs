@@ -1082,6 +1082,15 @@ mod tests {
     }
 
     #[test]
+    fn the_board_script_uses_no_logical_assignment() {
+        // Chrome 85, Firefox 79 and Safari 14 brought these in. On the older browsers the board
+        // supports, one of them is a syntax error that stops the whole script.
+        for op in ["??=", "||=", "&&="] {
+            assert!(!APP_JS.contains(op), "app.js uses {op}: write it out, as in `if (x === null) x = y;`");
+        }
+    }
+
+    #[test]
     fn csp_allows_the_inline_theme_script() {
         use base64::Engine;
         use sha2::Digest;
