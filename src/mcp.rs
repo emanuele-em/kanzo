@@ -229,7 +229,7 @@ struct ListTasksArgs {
     /// One column, or "all". Done is left out by default.
     status: Option<String>,
     /// Words, or tag: status: project: title: description: url: comment: id: comments: images: created: updated:
-    /// is:human is:waiting has: no:, like tag:bug -status:done. Includes done.
+    /// priority: is:human is:waiting has: no:, like tag:bug -status:done. Includes done.
     filter: Option<String>,
 }
 
@@ -253,6 +253,8 @@ struct CreateTaskArgs {
     status: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// P0 (highest) to P3.
+    priority: Option<String>,
     /// Tasks it waits on, like api#12.
     waits_on: Option<String>,
 }
@@ -273,6 +275,8 @@ struct UpdateTaskArgs {
     tags: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// P0 (highest) to P3; "" clears.
+    priority: Option<String>,
     /// A link; "" clears.
     url: Option<String>,
     /// Tasks it waits on, like api#12; "" clears.
@@ -514,10 +518,10 @@ impl Kanzo {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run_for(&ext, move |ctx, store| {
-                let CreateTaskArgs { title, description, project, tags, status, human, waits_on } = args;
+                let CreateTaskArgs { title, description, project, tags, status, human, priority, waits_on } = args;
                 let project = ctx.project(store, project.as_deref())?;
                 let status = status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
-                let patch = TaskPatch { description, status, tags, human, waits_on, ..Default::default() };
+                let patch = TaskPatch { description, status, tags, human, priority, waits_on, ..Default::default() };
                 let t = store.create_task_in(project.id, &title, patch)?;
                 Ok(format!("Created {} in {}: {}{}", t.key(), t.status, t.title, waits_note(store, &t)?))
             })
@@ -552,7 +556,7 @@ impl Kanzo {
                         url: args.url,
                         waits_on: args.waits_on,
                         escalated: args.escalated,
-                        priority: None,
+                        priority: args.priority,
                     },
                     comment,
                 )?;
@@ -589,7 +593,7 @@ impl Kanzo {
             .await)
     }
 
-    #[tool(description = "Take the top todo task, move it to doing and show it.")]
+    #[tool(description = "Take the top todo task, P0 first, move it to doing and show it.")]
     async fn next_task(
         &self,
         Parameters(args): Parameters<NextTaskArgs>,
@@ -673,7 +677,11 @@ fn shown(hidden: &[String], property: &str) -> bool {
 }
 
 fn task_line(out: &mut String, t: &Task, hidden: &[String]) {
-    let _ = write!(out, "{} [{}] {}", t.key(), t.status, t.title);
+    let _ = write!(out, "{} [{}] ", t.key(), t.status);
+    if let Some(p) = t.priority.filter(|_| shown(hidden, "priority")) {
+        let _ = write!(out, "P{p} ");
+    }
+    out.push_str(&t.title);
     if shown(hidden, "tags") {
         write_tags(out, t);
     }
@@ -725,6 +733,9 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
         write_tags(&mut out, t);
     }
     let _ = write!(out, "\nstatus: {}", t.status);
+    if let Some(p) = t.priority.filter(|_| shown(&hidden, "priority")) {
+        let _ = write!(out, ", priority: P{p}");
+    }
     if shown(&hidden, "waiting") {
         write_waits(&mut out, t);
     }
@@ -1136,6 +1147,50 @@ mod tests {
             assert!(!shown.contains("waits on") && shown.contains("escalated to the user"), "{shown}");
             assert_eq!(store.list_comments(task.id).unwrap().len(), 1, "hidden, not dropped");
         });
+    }
+
+    #[test]
+    fn agents_set_see_and_take_a_tasks_priority() {
+        block_on(async {
+            let (dir, home, _) = board();
+            let mut agent = Agent::start(home.clone(), dir.path());
+            let mut call = async |tool: &str, args: Value| {
+                let reply = agent.send(call_message(tool, args, stateless(None))).await.unwrap();
+                (reply["result"]["isError"] == true, text(&reply).to_string())
+            };
+            let (_, created) =
+                call("create_task", json!({ "title": "Fix login", "project": "api", "priority": "P1" })).await;
+            assert_eq!(created, "Created api#2 in todo: Fix login");
+            let (_, list) = call("list_tasks", json!({ "project": "api" })).await;
+            assert!(list.contains("api#1 [todo] Ship it\napi#2 [todo] P1 Fix login"), "{list}");
+            let (_, found) = call("list_tasks", json!({ "project": "api", "filter": "priority:<=P1" })).await;
+            assert!(found.contains("api#2") && !found.contains("api#1"), "{found}");
+            let (_, shown) = call("get_task", json!({ "id": "api#2" })).await;
+            assert!(shown.contains("\nstatus: todo, priority: P1, created "), "{shown}");
+
+            let (error, wrong) = call("update_task", json!({ "id": "api#1", "priority": "high" })).await;
+            assert!(error && wrong.contains("P0 (highest)"), "{wrong}");
+            let (_, taken) = call("next_task", json!({ "project": "api" })).await;
+            assert!(taken.starts_with("Moved to doing:\napi#2 Fix login"), "P1 before none: {taken}");
+
+            home.store().unwrap().set_property("priority", false).unwrap();
+            let (_, hidden) = call("get_task", json!({ "id": "api#2" })).await;
+            assert!(!hidden.contains("P1"), "{hidden}");
+            let (_, cleared) = call("update_task", json!({ "id": "api#2", "priority": "" })).await;
+            assert_eq!(cleared, "Updated api#2: Fix login");
+            assert_eq!(home.store().unwrap().get_task(2).unwrap().priority, None);
+        });
+    }
+
+    #[test]
+    fn create_task_and_update_task_take_an_optional_priority() {
+        let router = Kanzo::tools();
+        for tool in ["create_task", "update_task"] {
+            let route = router.map.values().find(|r| r.attr.name == tool).unwrap();
+            let schema = &route.attr.input_schema;
+            assert_eq!(schema["properties"]["priority"]["type"], "string", "{tool}");
+            assert!(!schema["required"].as_array().unwrap().iter().any(|r| r == "priority"), "{tool}");
+        }
     }
 
     #[test]
