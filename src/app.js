@@ -803,8 +803,8 @@ for (const [select, name] of [[$("#list-sort"), "kanzo.sort"], [$("#list-group")
 function renderList(tasks, all, more) {
   const { statuses, projects } = state.board;
   const by = $("#list-sort").value, group = $("#list-group").value;
-  // As agents take them: none counts as P2, and a tie keeps board order, since sort is stable.
-  const rank = (t) => t.priority ?? 2;
+  // Tasks without a priority last, as when grouped; a tie keeps board order, since sort is stable.
+  const rank = (t) => t.priority ?? 4;
   const sorted = !by ? tasks : [...tasks].sort((a, b) =>
     by === "id" ? a.id - b.id : by === "title" ? a.title.localeCompare(b.title) : by === "priority" ? rank(a) - rank(b) : b[by].localeCompare(a[by]));
   const firstGroups = group === "status" ? statuses : group === "project" ? projects.map((p) => p.slug) : group === "priority" ? ["P0", "P1", "P2", "P3", ""] : [];
