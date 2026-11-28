@@ -1955,13 +1955,24 @@ async function poll() {
   schedulePoll();
 }
 
+// The next check starts only after this one finished, so a slow or busy server
+// never piles up requests.
+function schedulePoll() {
+  setTimeout(poll, 2000);
+}
+
 // A system notification when an agent escalates a task. It comes from this page, so a click
 // brings back the window that showed it, the installed app or this tab, at the task. Turned on
 // per browser in Settings, like the theme.
 const notifier = { seen: {}, changes: {}, watching: {}, offered: false };
+// The most /api/search answers.
+const SEARCH_MAX = 30;
+
+// Only on a secure page, like localhost: over http from another computer, browsers refuse them.
+const canNotify = () => "Notification" in window && window.isSecureContext;
 
 function notifyOn() {
-  return "Notification" in window && Notification.permission === "granted" && localStorageGet("kanzo.notify") === "1";
+  return canNotify() && Notification.permission === "granted" && localStorageGet("kanzo.notify") === "1";
 }
 
 // The board's pages in this browser, the installed app's and the tabs, share a few keys in
@@ -2001,14 +2012,18 @@ function releaseWatch() {
 document.addEventListener("visibilitychange", () => { if (!document.hidden) releaseWatch(); });
 window.addEventListener("pagehide", releaseWatch);
 
-// The first look at a board only learns what is escalated already, so old ones stay quiet.
+// The first look at a board only learns what is escalated already, so old ones stay quiet. By
+// id, which a task keeps when it moves to another project.
 async function checkEscalations(board) {
   if (!notifyOn()) return;
   let tasks;
   try { tasks = await api("GET", "/search?q=" + encodeURIComponent("is:escalated"), null, board); } catch { return; }
+  // A shared board older than is:escalated reads it as a word.
+  tasks = tasks.filter((t) => t.escalated);
   const seen = notifier.seen[board];
-  notifier.seen[board] = new Set(tasks.map(key));
-  for (const t of seen ? tasks.filter((t) => !seen.has(key(t))) : []) notifyEscalated(t, board);
+  // Search answers 30 at most, the latest edited first: past that, older ones stay known.
+  notifier.seen[board] = new Set([...(tasks.length >= SEARCH_MAX && seen ? seen : []), ...tasks.map((t) => t.id)]);
+  for (const t of seen ? tasks.filter((t) => !seen.has(t.id)) : []) notifyEscalated(t, board);
 }
 
 async function notifyEscalated(t, board) {
@@ -2077,7 +2092,7 @@ $("#settings-notify").addEventListener("change", async (e) => { e.target.checked
 // without a click, so the board asks first, in the page. The version is this computer's, as a
 // shared board's may differ and would bring the offer back on each switch between them.
 function offerNotifications() {
-  if (notifier.offered || !pageVersion || !("Notification" in window) || Notification.permission === "denied") return;
+  if (notifier.offered || !pageVersion || !canNotify() || Notification.permission === "denied") return;
   if (localStorageGet("kanzo.notify") !== null) return;
   if (localStorageGet("kanzo.notifyOffered") === pageVersion || !$("#ask-dialog").hidden) return;
   // Once a page too, where storage is off, as in some private windows.
@@ -2085,12 +2100,6 @@ function offerNotifications() {
   localStorageSet("kanzo.notifyOffered", pageVersion);
   ask(tr("Get a notification on this computer when an agent escalates a task to you? You can change it in Settings."),
       { yes: tr("Turn on"), no: tr("Not now"), onYes: () => setNotifications(true) });
-}
-
-// The next check starts only after this one finished, so a slow or busy server
-// never piles up requests.
-function schedulePoll() {
-  setTimeout(poll, 2000);
 }
 
 let syncing = false;
@@ -2311,7 +2320,7 @@ function openSettings(section = "board") {
   $("#settings-backlog").checked = state.board?.statuses.includes("backlog") ?? false;
   // A board on an older version sends no events_kept.
   $("#settings-events-kept").value = state.board?.events_kept ?? 1000;
-  $("#settings-notify-row").hidden = !("Notification" in window);
+  $("#settings-notify-row").hidden = !canNotify();
   $("#settings-notify").checked = notifyOn();
   document.querySelectorAll("[data-property]").forEach((box) => { box.checked = !isPropertyHidden(box.dataset.property); });
   $("#sync-url").value = syncRemote || "";
