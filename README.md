@@ -309,7 +309,7 @@ Settings on the board:
 - **Task properties:** turn one off, like tags or comments, to hide it there and leave it out of what agents get. Nothing is deleted.
 - **Language:** English or Chinese, under Board.
 - **Theme:** system, light or dark, under Board.
-- **Notifications:** turn them on under Board, and when an agent escalates a task, the board tells you on this computer, from its tab or the installed app. Click it to open the task there. It works while the board is open, even in the background. The board offers to turn them on the first time it opens and after each update, until you turn them on or off.
+- **Notifications:** turn them on under Board, and when an agent escalates a task, the board tells you on this computer, from its tab or the installed app. Clicking the notification opens the task there. It works while the board is open, even in the background, at localhost or over https: browsers refuse notifications to a board opened over http from another computer. The board offers to turn them on the first time it opens and after each update, until you turn them on or off.
 - **What's new:** this version's notes, under About.
 
 ## Small and fast
