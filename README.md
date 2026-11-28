@@ -131,6 +131,10 @@ One `update_task` call moves a task and saves its `comment`, signed with the age
   Next step: what to do first
   ```
 
+## Don't overwrite a newer edit
+
+`get_task` with `include_version: true` adds the task's `version`. Pass it to `update_task` as `if_version`, and if the task changed since, the edit is refused and nothing is written. Without them, nothing changes.
+
 ## Park ideas in a backlog
 
 Turn on Backlog in Settings for a column agents leave alone, until you move its tasks to `todo`.

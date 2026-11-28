@@ -131,6 +131,10 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
   Next step: 先做什么
   ```
 
+## 不覆盖更新的修改
+
+`get_task` 加上 `include_version: true` 会多给出任务的 `version`。把它作为 `if_version` 传给 `update_task`：如果任务在此之后被改过，修改会被拒绝，什么都不写入。不传它们时，一切照旧。
+
 ## 把想法放进暂存列
 
 在设置中打开“暂存列”，就会多出一列智能体不会碰的任务，直到你把它们移到 `todo`。

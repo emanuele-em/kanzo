@@ -134,6 +134,10 @@ Tek bir `update_task` çağrısı görevi taşır ve `comment`'ini kaydeder; yor
   Next step: ilk yapılacak şey
   ```
 
+## Daha yeni bir düzenlemenin üzerine yazma
+
+`get_task`, `include_version: true` ile görevin `version` değerini de verir. Bunu `update_task`'e `if_version` olarak gönderirsen, görev o zamandan beri değiştiyse düzenleme reddedilir ve hiçbir şey yazılmaz. İkisini de kullanmazsan hiçbir şey değişmez.
+
 ## Fikirleri backlog'a park et
 
 Settings'te Backlog'u açarsan ajanların dokunmadığı bir sütun gelir; görevlerini `todo` sütununa taşıyana kadar orada bekler.
