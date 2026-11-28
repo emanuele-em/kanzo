@@ -733,11 +733,12 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
         write_tags(&mut out, t);
     }
     let _ = write!(out, "\nstatus: {}", t.status);
-    if let Some(p) = t.priority.filter(|_| shown(&hidden, "priority")) {
-        let _ = write!(out, ", priority: P{p}");
-    }
+    // Right after the status, which it qualifies.
     if shown(&hidden, "waiting") {
         write_waits(&mut out, t);
+    }
+    if let Some(p) = t.priority.filter(|_| shown(&hidden, "priority")) {
+        let _ = write!(out, ", priority: P{p}");
     }
     if t.human && shown(&hidden, "human") {
         out.push_str(", human: for the user, not for agents");
@@ -1167,6 +1168,10 @@ mod tests {
             assert!(found.contains("api#2") && !found.contains("api#1"), "{found}");
             let (_, shown) = call("get_task", json!({ "id": "api#2" })).await;
             assert!(shown.contains("\nstatus: todo, priority: P1, created "), "{shown}");
+            let waits = json!({ "title": "Then this", "project": "api", "priority": "P0", "waits_on": "api#1" });
+            call("create_task", waits).await;
+            let (_, waiting) = call("get_task", json!({ "id": "api#3" })).await;
+            assert!(waiting.contains("\nstatus: todo (waits on #1), priority: P0, created "), "{waiting}");
 
             let (error, wrong) = call("update_task", json!({ "id": "api#1", "priority": "high" })).await;
             assert!(error && wrong.contains("P0 (highest)"), "{wrong}");
