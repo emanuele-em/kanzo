@@ -81,7 +81,7 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 - **Select tasks:** `⌘`-click them, or drag on empty board space, then move, tag or delete them together. Drag one and the rest follow.
 - **List view:** the list icon shows the same tasks as rows to sort and group.
 - **Human tasks:** mark a task Human and agents leave it to you. The person icon shows only those.
-- **Priority:** give a task P0, the highest, to P3. Agents take higher ones first, and a task without one counts as P2, so a board without priorities works as before. The list sorts and groups by it. Agents set it with `priority`.
+- **Priority:** give a task P0, the highest, to P3. Agents take higher ones first, and a task without one counts as P2, so a board without priorities works as before. The list sorts and groups by it. Agents set it with `priority`. Turn Priority off in Settings and agents go by the column again.
 - **Images:** paste or drop one into a task or a comment.
 - **Move to another project:** pick it in a task's panel. Its number stays, so `api#12` becomes `web#12`. Agents move it with `project`.
 - **Links:** give a task a URL, like its pull request, and open it from its card. Agents set it with `url`.

@@ -84,7 +84,7 @@ Pano http://localhost:4242 adresinde açılır. Bütün kurulum bundan ibaret: i
 - **Görev seçme:** `⌘` ile tıkla ya da panonun boş bir yerinde sürükle; sonra hepsini birlikte taşı, etiketle ya da sil. Birini sürüklersen diğerleri de peşinden gelir.
 - **Liste görünümü:** liste simgesi aynı görevleri sıralanıp gruplanabilen satırlar olarak gösterir.
 - **İnsan görevleri:** bir görevi Human olarak işaretlersen ajanlar onu sana bırakır. Kişi simgesi yalnızca bunları gösterir.
-- **Öncelik:** bir göreve P0 (en yüksek) ile P3 arasında bir öncelik ver. Ajanlar önce yüksek öncelikli görevleri alır; önceliği olmayan bir görev P2 sayılır, yani öncelik kullanmayan bir pano eskisi gibi çalışır. Liste önceliğe göre sıralanıp gruplanabilir. Ajanlar bunu `priority` ile ayarlar.
+- **Öncelik:** bir göreve P0 (en yüksek) ile P3 arasında bir öncelik ver. Ajanlar önce yüksek öncelikli görevleri alır; önceliği olmayan bir görev P2 sayılır, yani öncelik kullanmayan bir pano eskisi gibi çalışır. Liste önceliğe göre sıralanıp gruplanabilir. Ajanlar bunu `priority` ile ayarlar. Settings'te Priority'yi kapatırsan ajanlar yine sütundaki sıraya göre gider.
 - **Görseller:** bir göreve ya da yoruma yapıştır veya sürükleyip bırak.
 - **Başka projeye taşıma:** görev panelinden projeyi seç. Numarası aynı kalır, yani `api#12` `web#12` olur. Ajanlar bunu `project` ile taşır.
 - **Bağlantılar:** göreve bir URL ver (örneğin pull request'i) ve kartından aç. Ajanlar bunu `url` ile ayarlar.
