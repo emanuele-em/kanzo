@@ -76,6 +76,8 @@ const ZH_CN = {
   "Close": "关闭",
   "Task title": "任务标题",
   "Status": "状态",
+  "Priority": "优先级",
+  "No priority": "无优先级",
   "Tags": "标签",
   "Add tags, like bug, ui": "添加标签，如 bug、ui",
   "URL": "URL",

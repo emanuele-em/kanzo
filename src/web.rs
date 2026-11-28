@@ -744,6 +744,7 @@ struct Patch {
     project: Option<String>,
     tags: Option<String>,
     human: Option<bool>,
+    priority: Option<String>,
     url: Option<String>,
     waits_on: Option<String>,
 }
@@ -763,7 +764,7 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 url: p.url,
                 waits_on: p.waits_on,
                 escalated: None,
-                priority: None,
+                priority: p.priority,
             },
         )
     })

@@ -277,6 +277,11 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .card .num .dot { width: 6px; height: 6px; }
 .card .tags, .result .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .card .human-mark { flex: none; margin-top: 1px; color: var(--muted); display: inline-flex; }
+/* P0 to P3: the letters say it, the color only helps. */
+.card .prio { flex: none; margin-top: 2px; color: var(--faint); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.card .prio.p0 { color: var(--danger); }
+.card .prio.p1 { color: var(--waits); }
+.card .prio.p2 { color: var(--muted); }
 .card .human-mark .icon svg { width: 15px; height: 15px; }
 /* An escalated task: the words say it, the border and tint only help. */
 .card .escalated-mark { flex: none; display: inline-flex; align-items: center; gap: 5px; margin-top: 2px; color: var(--link); font-size: 12px; font-weight: 600; white-space: nowrap; }
@@ -352,6 +357,7 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .props > [data-prop] { display: contents; }
 [data-hide~="description"] .desc, [data-hide~="description"] [data-prop="description"],
 [data-hide~="tags"] [data-prop="tags"], [data-hide~="url"] [data-prop="url"],
+[data-hide~="priority"] .prio, [data-hide~="priority"] [data-prop="priority"],
 [data-hide~="human"] .human-mark, [data-hide~="human"] [data-prop="human"],
 [data-hide~="waiting"] .waits, [data-hide~="waiting"] [data-prop="waiting"],
 [data-hide~="created"] [data-prop="created"],
@@ -592,8 +598,8 @@ html:not(.ready) aside { visibility: hidden; }
     <div id="filters"></div>
     <span class="query" id="filter-box" hidden><span class="query-mirror" aria-hidden="true"><span></span></span><input type="search" id="filter" placeholder="Filter board" title="Show only the tasks that match, like tag:bug or -status:done (f)" aria-label="Filter the board" autocomplete="off" spellcheck="false"></span>
     <span id="list-tools" hidden>
-      <label class="pick"><span aria-hidden="true">Sort by</span><select class="field" id="list-sort" aria-label="Sort by"><option value="">Board order</option><option value="updated_at">Updated</option><option value="created_at">Created</option><option value="title">Title</option><option value="id">ID</option></select></label>
-      <label class="pick"><span aria-hidden="true">Group by</span><select class="field" id="list-group" aria-label="Group by"><option value="">None</option><option value="status">Status</option><option value="project">Project</option><option value="tags">Tag</option></select></label>
+      <label class="pick"><span aria-hidden="true">Sort by</span><select class="field" id="list-sort" aria-label="Sort by"><option value="">Board order</option><option value="updated_at">Updated</option><option value="created_at">Created</option><option value="title">Title</option><option value="priority">Priority</option><option value="id">ID</option></select></label>
+      <label class="pick"><span aria-hidden="true">Group by</span><select class="field" id="list-group" aria-label="Group by"><option value="">None</option><option value="status">Status</option><option value="project">Project</option><option value="priority">Priority</option><option value="tags">Tag</option></select></label>
     </span>
     <button class="ghost" id="view" title="Show as a list" aria-label="Show as a list" aria-pressed="false" hidden><span class="icon" data-icon="list"></span></button>
     <button class="ghost" id="human-only" title="Show only human tasks (h)" aria-label="Show only human tasks" aria-pressed="false" hidden><span class="icon" data-icon="human"></span></button>
@@ -627,6 +633,7 @@ html:not(.ready) aside { visibility: hidden; }
     <textarea class="inline title-input" id="p-title" rows="1" spellcheck="false" placeholder="Task title"></textarea>
     <div class="props">
       Status <span><select class="field" id="p-status"></select></span>
+      <div data-prop="priority">Priority <span><select class="field" id="p-priority"><option value="">No priority</option><option>P0</option><option>P1</option><option>P2</option><option>P3</option></select></span></div>
       <div data-prop="tags">Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span></div>
       <div data-prop="url">URL <span><input class="inline" id="p-url" type="url" placeholder="Add a link, like a pull request" autocomplete="off" spellcheck="false"></span></div>
       <div data-prop="human">Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span></div>
