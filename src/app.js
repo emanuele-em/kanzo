@@ -406,6 +406,7 @@ async function loadBoard() {
     state.changes = board.changes;
     $("#offline").hidden = true;
     render();
+    markFront();
     offerNotifications();
   } catch (e) {
     if (request !== boardRequest) return;
@@ -1963,6 +1964,43 @@ function notifyOn() {
   return "Notification" in window && Notification.permission === "granted" && localStorageGet("kanzo.notify") === "1";
 }
 
+// The board's pages in this browser, the installed app's and the tabs, share a few keys in
+// localStorage to show each escalation once, from the right window.
+const pageId = Math.random().toString(36).slice(2);
+const isApp = () => matchMedia("(display-mode: standalone)").matches;
+
+function readShared(k) {
+  try { return JSON.parse(localStorageGet(k) || "null"); } catch { return null; }
+}
+
+// What the page with focus shows, so that no page notifies about a task already in front of you.
+function markFront() {
+  if (!document.hasFocus()) return;
+  const front = JSON.stringify({ id: pageId, board: state.on, project: state.project });
+  if (localStorageGet("kanzo.front") !== front) localStorageSet("kanzo.front", front);
+}
+window.addEventListener("focus", markFront);
+window.addEventListener("blur", () => { if (readShared("kanzo.front")?.id === pageId) localStorageSet("kanzo.front", ""); });
+
+// Only one hidden page per browser waits on /api/events, the installed app's first: each wait
+// holds one of the 6 connections a browser keeps to the board for all its pages, and enough of
+// them stalled the visible ones. The page renews its turn on every wait, and another takes over
+// once it lapses, as when that page closes. With storage off, each page waits on its own.
+const WATCH_LAPSE = 40000;
+
+function holdWatch() {
+  const turn = readShared("kanzo.watcher"), app = isApp();
+  if (turn && turn.id !== pageId && Date.now() - turn.at < WATCH_LAPSE && (turn.app || !app)) return false;
+  localStorageSet("kanzo.watcher", JSON.stringify({ id: pageId, app, at: Date.now() }));
+  return true;
+}
+
+function releaseWatch() {
+  if (readShared("kanzo.watcher")?.id === pageId) localStorageSet("kanzo.watcher", "");
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) releaseWatch(); });
+window.addEventListener("pagehide", releaseWatch);
+
 // The first look at a board only learns what is escalated already, so old ones stay quiet.
 async function checkEscalations(board) {
   if (!notifyOn()) return;
@@ -1975,8 +2013,11 @@ async function checkEscalations(board) {
 
 async function notifyEscalated(t, board) {
   const where = (board === "shared" ? "@" : "") + `${t.project}/${t.id}`;
-  // Each open page sees it: the installed app shows it, and a tab only if no page did in time.
-  if (!matchMedia("(display-mode: standalone)").matches) await new Promise((r) => setTimeout(r, 1000 + Math.random() * 500));
+  // More than one page may see it: the installed app shows it, and a tab only if no page has in
+  // time, which leaves the app's visible poll, every 2 seconds, time to find it first.
+  if (!isApp()) await new Promise((r) => setTimeout(r, 2500 + Math.random() * 500));
+  const inFront = (f) => f && f.board === board && (f.project === "all" || f.project === t.project);
+  if (inFront(readShared("kanzo.front")) || (document.hasFocus() && inFront({ board: state.on, project: state.project }))) return;
   let shown = {};
   try { shown = JSON.parse(localStorageGet("kanzo.notified") || "{}"); } catch {}
   const now = Date.now();
@@ -1984,8 +2025,6 @@ async function notifyEscalated(t, board) {
   for (const w of Object.keys(shown)) if (now - shown[w] >= 60000) delete shown[w];
   shown[where] = now;
   localStorageSet("kanzo.notified", JSON.stringify(shown));
-  // Not for a task already in front of you.
-  if (document.hasFocus() && board === state.on && (state.project === "all" || state.project === t.project)) return;
   try {
     const n = new Notification(tr("{0} needs you", key(t)), { body: t.title, tag: `kanzo-${where}`, icon: "/icon.png" });
     n.onclick = () => { window.focus(); location.hash = "#" + where; n.close(); };
@@ -1998,7 +2037,7 @@ async function watchEscalations(board) {
   if (notifier.watching[board] || !notifyOn()) return;
   notifier.watching[board] = true;
   let since = null;
-  while (notifyOn() && document.hidden && (board === "local" || state.joined)) {
+  while (notifyOn() && document.hidden && (board === "local" || state.joined) && holdWatch()) {
     try {
       const reply = await api("GET", "/events?wait=25" + (since ? "&since=" + encodeURIComponent(since) : ""), null, board);
       // The first reply only says where to start: look then, so a page that opens hidden, as
