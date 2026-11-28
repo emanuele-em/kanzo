@@ -120,6 +120,17 @@ const MIGRATIONS: &[&str] = &[
     // Where a repo lives, like gitlab.com, for links to it. Empty is GitHub, as for a repo
     // linked as owner/repo, or before this.
     "ALTER TABLE project_repos ADD COLUMN host TEXT;",
+    // A task's priority: 0 for P0, the highest, to 3 for P3. NULL, as on most tasks, is none.
+    // events_task_updated lists the columns it watches, so it learns this one too.
+    "ALTER TABLE tasks ADD COLUMN priority INTEGER;
+     DROP TRIGGER events_task_updated;
+     CREATE TRIGGER events_task_updated AFTER UPDATE ON tasks
+     WHEN old.status IS new.status AND (old.title IS NOT new.title OR old.description IS NOT new.description
+         OR old.tags IS NOT new.tags OR old.url IS NOT new.url OR old.human IS NOT new.human
+         OR old.project_id IS NOT new.project_id OR old.priority IS NOT new.priority) BEGIN
+         INSERT INTO events (kind, task_id, project_id, project, status_to)
+         VALUES ('task.updated', new.id, new.project_id, (SELECT slug FROM projects WHERE id = new.project_id), new.status);
+     END;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -184,6 +195,9 @@ pub struct Task {
     /// A link to anything, like the task's pull request; empty when there is none.
     pub url: String,
     pub human: bool,
+    /// 0 for P0, the highest, to 3. Left out when there is none, as on most tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
     /// An agent handed it to the user, until it next moves to another column. Left out when not, as on most tasks.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub escalated: bool,
@@ -282,6 +296,8 @@ pub struct TaskPatch {
     pub tags: Option<String>,
     pub url: Option<String>,
     pub human: Option<bool>,
+    /// P0 to P3, or 0 to 3; "" clears it.
+    pub priority: Option<String>,
     /// Task keys, comma-separated; it replaces the list.
     pub waits_on: Option<String>,
     /// Without it, a move to another column clears it.
@@ -306,8 +322,8 @@ pub const DONE: &str = STATUSES[3];
 pub const BACKLOG: &str = "backlog";
 
 /// What a task shows besides its id, title and status; each can be turned off in Settings.
-const PROPERTIES: [&str; 9] =
-    ["description", "tags", "url", "human", "waiting", "created", "updated", "comments", "images"];
+const PROPERTIES: [&str; 10] =
+    ["description", "priority", "tags", "url", "human", "waiting", "created", "updated", "comments", "images"];
 
 pub struct Store {
     conn: Connection,
@@ -774,7 +790,7 @@ impl Store {
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
             t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human,
-            t.url, t.escalated
+            t.url, t.escalated, t.priority
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -786,6 +802,7 @@ impl Store {
             tags: r.get::<_, String>(9)?.split(',').filter(|t| !t.is_empty()).map(String::from).collect(),
             url: r.get(11)?,
             human: r.get(10)?,
+            priority: r.get(13)?,
             escalated: r.get(12)?,
             status: r.get(4)?,
             position: r.get(5)?,
@@ -942,19 +959,20 @@ impl Store {
     }
 
     // One write, or an agent could take a task before it's human, or before it waits.
-    // Uses description, status, tags, human, waits_on.
+    // Uses description, status, tags, human, priority, waits_on.
     pub fn create_task_in(&self, project_id: i64, title: &str, patch: TaskPatch) -> Result<Task> {
         let title = clean_title(title)?;
         let status = patch.status.as_deref().unwrap_or(STATUSES[0]);
         self.check_status(status)?;
         let description = patch.description.as_deref().unwrap_or("").trim();
         let tags = clean_tags(patch.tags.as_deref().unwrap_or("")).join(",");
+        let priority = patch.priority.as_deref().map(clean_priority).transpose()?.flatten();
         let id = self.write(|c| {
             let position = Self::end_of_column(c, status, 0)?;
             c.execute(
-                "INSERT INTO tasks (project_id, title, description, status, position, tags, human) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false)],
+                "INSERT INTO tasks (project_id, title, description, status, position, tags, human, priority) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false), priority],
             )?;
             let id = c.last_insert_rowid();
             if let Some(keys) = &patch.waits_on {
@@ -1037,7 +1055,8 @@ impl Store {
             self.check_status(s)?;
         }
         let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
-        Ok(Edit { patch, title, url, tags })
+        let priority = patch.priority.as_deref().map(clean_priority).transpose()?;
+        Ok(Edit { patch, title, url, tags, priority })
     }
 
     /// Runs in the caller's write, on its connection `c`: a later failure there undoes it.
@@ -1057,11 +1076,13 @@ impl Store {
                    human = coalesce(?3, human), tags = coalesce(?4, tags),
                    description = coalesce(?5, description), url = coalesce(?7, url),
                    status = coalesce(?8, status), position = coalesce(?9, position),
-                   escalated = coalesce(?10, escalated), updated_at = {NOW}
-                 WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
+                   escalated = coalesce(?10, escalated), priority = iif(?11, ?12, priority), updated_at = {NOW}
+                 WHERE id = ?6 AND ((coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
                    coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url), coalesce(?8, status),
                    coalesce(?10, escalated))
-                   <> (title, project_id, human, tags, description, url, status, escalated)"
+                   <> (title, project_id, human, tags, description, url, status, escalated)
+                   -- Apart, and with IS NOT: none is NULL, which <> never tells apart.
+                   OR iif(?11, ?12, priority) IS NOT priority)"
             ),
             params![
                 edit.title,
@@ -1073,7 +1094,9 @@ impl Store {
                 edit.url,
                 status,
                 position,
-                escalated
+                escalated,
+                edit.priority.is_some(),
+                edit.priority.flatten()
             ],
         )?;
         // The events trigger doesn't watch escalated: one that changes in place is written here.
@@ -1659,6 +1682,20 @@ struct Edit<'a> {
     title: Option<String>,
     url: Option<String>,
     tags: Option<String>,
+    /// Some(None) clears it.
+    priority: Option<Option<i64>>,
+}
+
+/// P0 to P3, as typed: `P1`, `p1` or `1`. Empty is none.
+fn clean_priority(input: &str) -> Result<Option<i64>> {
+    let text = input.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.strip_prefix(['P', 'p']).unwrap_or(text) {
+        n @ ("0" | "1" | "2" | "3") => Ok(Some(n.parse().unwrap_or_default())),
+        _ => Err(Error::Invalid(format!("priority {text:?} isn't one of P0 (highest), P1, P2, P3"))),
+    }
 }
 
 fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
@@ -2693,6 +2730,54 @@ mod tests {
         }
         assert_eq!(titles(&s.list_tasks(None, Some("doing")).unwrap()).last(), Some(&"a"));
         assert!(s.move_task(a.id, "nope", None).is_err());
+    }
+
+    #[test]
+    fn a_task_keeps_its_priority_until_it_is_cleared() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let set = |id: i64, priority: &str| {
+            s.update_task(id, TaskPatch { priority: Some(priority.into()), ..Default::default() })
+        };
+        let urgent = TaskPatch { priority: Some(" P1 ".into()), ..Default::default() };
+        let t = s.create_task_in(p.id, "Fix login", urgent).unwrap();
+        assert_eq!(t.priority, Some(1));
+        assert_eq!(s.create_task(p.id, "Later", "").unwrap().priority, None);
+
+        assert_eq!(set(t.id, "p3").unwrap().priority, Some(3));
+        assert_eq!(set(t.id, "0").unwrap().priority, Some(0));
+        let renamed = s.update_task(t.id, TaskPatch { title: Some("Fix the login".into()), ..Default::default() });
+        assert_eq!(renamed.unwrap().priority, Some(0), "an edit without it keeps it");
+        assert_eq!(set(t.id, "").unwrap().priority, None);
+        assert_eq!(set(t.id, "P2").unwrap().priority, Some(2));
+
+        let before = (s.changes().unwrap(), s.get_task(t.id).unwrap().updated_at);
+        for wrong in ["P4", "-1", "high", "P", "p1x"] {
+            let err = set(t.id, wrong).unwrap_err();
+            assert!(err.to_string().contains("P0 (highest)"), "{wrong}: {err}");
+        }
+        set(t.id, "P2").unwrap();
+        assert_eq!((s.changes().unwrap(), s.get_task(t.id).unwrap().updated_at), before, "nothing to write");
+        let bad = TaskPatch { priority: Some("urgent".into()), ..Default::default() };
+        assert!(s.create_task_in(p.id, "Nope", bad).is_err());
+    }
+
+    #[test]
+    fn a_new_priority_is_one_task_updated_event_and_none_is_left_out_of_the_json() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Fix login", "").unwrap();
+        let json = serde_json::to_value(&t).unwrap();
+        assert!(json.get("priority").is_none(), "{json}");
+
+        let start = s.last_event().unwrap();
+        let t = s.update_task(t.id, TaskPatch { priority: Some("P0".into()), ..Default::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&t).unwrap()["priority"], 0);
+        s.update_task(t.id, TaskPatch { priority: Some("".into()), ..Default::default() }).unwrap();
+        let moved = TaskPatch { priority: Some("P1".into()), status: Some("doing".into()), ..Default::default() };
+        s.update_task(t.id, moved).unwrap();
+        let kinds: Vec<String> = kinds(&s, start).into_iter().map(|e| e.0).collect();
+        assert_eq!(kinds, ["task.updated", "task.updated", "task.moved"]);
     }
 
     #[test]

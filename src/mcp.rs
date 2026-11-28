@@ -552,6 +552,7 @@ impl Kanzo {
                         url: args.url,
                         waits_on: args.waits_on,
                         escalated: args.escalated,
+                        priority: None,
                     },
                     comment,
                 )?;
