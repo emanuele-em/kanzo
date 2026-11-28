@@ -120,7 +120,7 @@ Then ask: *"take the next task from kanzo and do it."* The agent:
 
 One `update_task` call moves a task and saves its `comment`, signed with the agent's client name. Both are saved, or neither: an empty comment, one over 16 KiB or any refused change saves nothing.
 
-- **To you:** `status: "review"` with `escalated: true`. The card says **Escalated** until the task next moves, so dragging it back to `todo` gives it to agents again.
+- **To you:** `status: "review"` with `escalated: true`. The card says **Escalated** until the task next moves, so dragging it back to `todo` gives it to agents again. With Notifications on in Settings, the board tells you.
 - **To another agent:** `status: "todo"` with the comment, which the next agent reads with `get_task`.
 - **What to write:** what happened, not secrets or the whole conversation:
 
@@ -309,6 +309,7 @@ Settings on the board:
 - **Task properties:** turn one off, like tags or comments, to hide it there and leave it out of what agents get. Nothing is deleted.
 - **Language:** English or Chinese, under Board.
 - **Theme:** system, light or dark, under Board.
+- **Notifications:** turn them on under Board, and when an agent escalates a task, the board tells you on this computer, from its tab or the installed app. Click it to open the task there. It works while the board is open, even in the background.
 - **What's new:** this version's notes, under About.
 
 ## Small and fast

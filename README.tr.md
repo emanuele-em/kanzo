@@ -123,7 +123,7 @@ Sonra şunu iste: *"kanzo'dan sıradaki görevi al ve yap."* Ajan:
 
 Tek bir `update_task` çağrısı görevi taşır ve `comment`'ini kaydeder; yorum ajanın istemci adıyla imzalanır. İkisi birlikte kaydedilir ya da hiçbiri: boş bir yorum, 16 KiB'tan uzun bir yorum ya da reddedilen herhangi bir değişiklik hiçbir şey kaydetmez.
 
-- **Sana:** `status: "review"` ile `escalated: true`. Görev bir sonraki taşınışına kadar kartta **Escalated** yazar; `todo`'ya geri sürüklersen görev yine ajanlara kalır.
+- **Sana:** `status: "review"` ile `escalated: true`. Görev bir sonraki taşınışına kadar kartta **Escalated** yazar; `todo`'ya geri sürüklersen görev yine ajanlara kalır. Settings'te Notifications açıksa pano sana haber verir.
 - **Başka bir ajana:** yorumla birlikte `status: "todo"`; sonraki ajan onu `get_task` ile okur.
 - **Ne yazılır:** ne olduğu; sırlar ya da konuşmanın tamamı değil:
 
@@ -312,6 +312,7 @@ Panodaki ayarlar:
 - **Görev özellikleri:** etiketler ya da yorumlar gibi birini kapatırsan panoda gizlenir ve ajanlara gönderilenlerin dışında kalır. Hiçbir şey silinmez.
 - **Dil:** Board altında, İngilizce ya da Çince.
 - **Tema:** Board altında, sistem, açık ya da koyu.
+- **Bildirimler:** Board altında aç; bir ajan bir görevi sana devrettiğinde pano bunu bu bilgisayarda, kendi sekmesinden ya da yüklü uygulamadan bildirir. Bildirime tıklarsan görev orada açılır. Pano açık olduğu sürece, arka planda bile çalışır.
 - **What's new:** About altında, bu sürümün notları.
 
 ## Küçük ve hızlı
