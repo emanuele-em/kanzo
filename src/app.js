@@ -1957,7 +1957,7 @@ async function poll() {
 // A system notification when an agent escalates a task. It comes from this page, so a click
 // brings back the window that showed it, the installed app or this tab, at the task. Turned on
 // per browser in Settings, like the theme.
-const notifier = { seen: {}, changes: {}, watching: {} };
+const notifier = { seen: {}, changes: {}, watching: {}, offered: false };
 
 function notifyOn() {
   return "Notification" in window && Notification.permission === "granted" && localStorageGet("kanzo.notify") === "1";
@@ -2017,11 +2017,13 @@ function askNotifications() {
   return new Promise((resolve) => Notification.requestPermission(resolve)?.then(resolve));
 }
 
-// Called in a click: a browser asks for permission only then.
+// Called in a click: a browser asks for permission only then. A prompt closed without an answer
+// leaves them undecided, so the board offers them again after the next update.
 async function setNotifications(on) {
-  if (on && await askNotifications() !== "granted") {
-    toast(tr("This browser blocks notifications from the board: allow them in its site settings."));
-    on = false;
+  if (on) {
+    const answer = await askNotifications();
+    if (answer === "denied") toast(tr("This browser blocks notifications from the board: allow them in its site settings."));
+    if (answer !== "granted") return false;
   }
   localStorageSet("kanzo.notify", on ? "1" : "0");
   notifier.seen = {};
@@ -2033,13 +2035,15 @@ $("#settings-notify").addEventListener("change", async (e) => { e.target.checked
 
 // The first time the board opens, and again after each update, until they're turned on, or off
 // in Settings: "Not now" only waits for the next version. A browser never asks for permission
-// without a click, so the board asks first, in the page.
+// without a click, so the board asks first, in the page. The version is this computer's, as a
+// shared board's may differ and would bring the offer back on each switch between them.
 function offerNotifications() {
-  const version = state.board?.version;
-  if (!version || !("Notification" in window) || Notification.permission === "denied") return;
+  if (notifier.offered || !pageVersion || !("Notification" in window) || Notification.permission === "denied") return;
   if (localStorageGet("kanzo.notify") !== null) return;
-  if (localStorageGet("kanzo.notifyOffered") === version || !$("#ask-dialog").hidden) return;
-  localStorageSet("kanzo.notifyOffered", version);
+  if (localStorageGet("kanzo.notifyOffered") === pageVersion || !$("#ask-dialog").hidden) return;
+  // Once a page too, where storage is off, as in some private windows.
+  notifier.offered = true;
+  localStorageSet("kanzo.notifyOffered", pageVersion);
   ask(tr("Get a notification on this computer when an agent escalates a task to you? You can change it in Settings."),
       { yes: tr("Turn on"), no: tr("Not now"), onYes: () => setNotifications(true) });
 }
