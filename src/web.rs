@@ -537,11 +537,14 @@ fn read_events(s: &Store, q: &EventsQuery) -> store::Result<store::EventPage> {
     s.events_after(q.since.as_deref(), project, EVENTS_PER_REPLY)
 }
 
-/// SQLite's file change counter, 4 bytes at offset 24 of kanzo.db, which every write bumps in its
-/// rollback journal mode. Reading it costs a few microseconds. Opening the board every half second
-/// instead made a waiting reader cost 160 ms of CPU a minute, four times a visible board's poll;
-/// now it costs the same as that poll. None if it can't be read, as while kanzo sync swaps the
-/// file: then the board is read to find out.
+/// SQLite's file change counter, 4 bytes at offset 24 of kanzo.db. With Kanzo's rollback journal
+/// and normal locking, every commit from any process bumps it; in WAL mode or with exclusive
+/// locking it wouldn't, and a waiting reader would hear of changes only when its wait ends, never
+/// lose them. Opening the board every half second instead made a waiting reader cost 160 ms of
+/// CPU a minute, four times a visible board's poll; now it costs the same as that poll. It's read
+/// right here: 28 bytes of a file the system has cached cost less than a helper thread, and none
+/// stays busy for the whole wait. None if it can't be read, as while kanzo sync swaps the file:
+/// then the board is read to find out.
 fn change_counter(db: &std::path::Path) -> Option<[u8; 4]> {
     use std::io::Read;
     let mut head = [0; 28];
@@ -559,13 +562,14 @@ async fn events(
     let q = Arc::new(q);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.min(EVENTS_WAIT_MAX));
     let db = home.db_path();
-    // The counter at the last read: the board is read again only once a write has changed it.
+    // The file and its counter at the last read: the board is read again only once a write has
+    // changed them. The file too, since kanzo sync can swap in one whose counter is the same.
     let mut read = None;
     loop {
-        let counter = change_counter(&db);
+        let stamp = (home.db_identity(), change_counter(&db));
         let last = q.since.is_none() || tokio::time::Instant::now() >= deadline || shutdown.is_cancelled();
-        if last || read != Some(counter) {
-            read = Some(counter);
+        if last || read != Some(stamp) {
+            read = Some(stamp);
             let (h, query) = (home.clone(), q.clone());
             let result = blocking(move || read_events(&h.store()?, &query)).await;
             let nothing_new = matches!(&result, Ok(Ok(e)) if e.events.is_empty() && !e.reset);
@@ -1294,6 +1298,37 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), 3, "{seen:?}");
         assert_eq!(change_counter(&tmp.path().join("nope.db")), None);
+    }
+
+    #[test]
+    fn a_change_the_counter_misses_still_comes_when_the_wait_ends() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = test_home(&tmp);
+            let pid = home.store().unwrap().create_project("api", "", None).unwrap().id;
+            let (_, start) = get_from(&home, "/api/events").await;
+            let writer = home.clone();
+            // Between two of the wait's looks, half a second apart: a write that leaves the
+            // counter as it was, as if it had never bumped it.
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::task::spawn_blocking(move || {
+                    use std::io::{Seek, SeekFrom, Write};
+                    let before = change_counter(&writer.db_path()).unwrap();
+                    writer.store().unwrap().create_task(pid, "unseen", "").unwrap();
+                    let mut file = std::fs::OpenOptions::new().write(true).open(writer.db_path()).unwrap();
+                    file.seek(SeekFrom::Start(24)).unwrap();
+                    file.write_all(&before).unwrap();
+                })
+                .await
+                .unwrap();
+            });
+            let began = Instant::now();
+            let (_, got) = get_from(&home, &format!("/api/events?since={}&wait=2", cursor(&start))).await;
+            assert_eq!(got["events"][0]["kind"], "task.created", "{got}");
+            assert!(began.elapsed() >= Duration::from_millis(1900), "only when the wait ended");
+        });
     }
 
     #[test]
