@@ -120,6 +120,17 @@ const MIGRATIONS: &[&str] = &[
     // Where a repo lives, like gitlab.com, for links to it. Empty is GitHub, as for a repo
     // linked as owner/repo, or before this.
     "ALTER TABLE project_repos ADD COLUMN host TEXT;",
+    // A task's priority: 0 for P0, the highest, to 3 for P3. NULL, as on most tasks, is none.
+    // events_task_updated lists the columns it watches, so it learns this one too.
+    "ALTER TABLE tasks ADD COLUMN priority INTEGER;
+     DROP TRIGGER events_task_updated;
+     CREATE TRIGGER events_task_updated AFTER UPDATE ON tasks
+     WHEN old.status IS new.status AND (old.title IS NOT new.title OR old.description IS NOT new.description
+         OR old.tags IS NOT new.tags OR old.url IS NOT new.url OR old.human IS NOT new.human
+         OR old.project_id IS NOT new.project_id OR old.priority IS NOT new.priority) BEGIN
+         INSERT INTO events (kind, task_id, project_id, project, status_to)
+         VALUES ('task.updated', new.id, new.project_id, (SELECT slug FROM projects WHERE id = new.project_id), new.status);
+     END;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -184,6 +195,9 @@ pub struct Task {
     /// A link to anything, like the task's pull request; empty when there is none.
     pub url: String,
     pub human: bool,
+    /// 0 for P0, the highest, to 3. Left out when there is none, as on most tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
     /// An agent handed it to the user, until it next moves to another column. Left out when not, as on most tasks.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub escalated: bool,
@@ -282,6 +296,8 @@ pub struct TaskPatch {
     pub tags: Option<String>,
     pub url: Option<String>,
     pub human: Option<bool>,
+    /// P0 to P3, or 0 to 3; "" clears it.
+    pub priority: Option<String>,
     /// Task keys, comma-separated; it replaces the list.
     pub waits_on: Option<String>,
     /// Without it, a move to another column clears it.
@@ -306,8 +322,12 @@ pub const DONE: &str = STATUSES[3];
 pub const BACKLOG: &str = "backlog";
 
 /// What a task shows besides its id, title and status; each can be turned off in Settings.
-const PROPERTIES: [&str; 9] =
-    ["description", "tags", "url", "human", "waiting", "created", "updated", "comments", "images"];
+const PROPERTIES: [&str; 10] =
+    ["description", "priority", "tags", "url", "human", "waiting", "created", "updated", "comments", "images"];
+
+/// How next_task ranks before the column's order: a task without a priority counts as P2, the usual
+/// middle, so P0 and P1 go before it, P3 after, and P2 by its place in the column.
+const BY_PRIORITY: &str = "coalesce(t.priority, 2), ";
 
 pub struct Store {
     conn: Connection,
@@ -774,7 +794,7 @@ impl Store {
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
             t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human,
-            t.url, t.escalated
+            t.url, t.escalated, t.priority
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -786,6 +806,7 @@ impl Store {
             tags: r.get::<_, String>(9)?.split(',').filter(|t| !t.is_empty()).map(String::from).collect(),
             url: r.get(11)?,
             human: r.get(10)?,
+            priority: r.get(13)?,
             escalated: r.get(12)?,
             status: r.get(4)?,
             position: r.get(5)?,
@@ -942,19 +963,20 @@ impl Store {
     }
 
     // One write, or an agent could take a task before it's human, or before it waits.
-    // Uses description, status, tags, human, waits_on.
+    // Uses description, status, tags, human, priority, waits_on.
     pub fn create_task_in(&self, project_id: i64, title: &str, patch: TaskPatch) -> Result<Task> {
         let title = clean_title(title)?;
         let status = patch.status.as_deref().unwrap_or(STATUSES[0]);
         self.check_status(status)?;
         let description = patch.description.as_deref().unwrap_or("").trim();
         let tags = clean_tags(patch.tags.as_deref().unwrap_or("")).join(",");
+        let priority = patch.priority.as_deref().map(clean_priority).transpose()?.flatten();
         let id = self.write(|c| {
             let position = Self::end_of_column(c, status, 0)?;
             c.execute(
-                "INSERT INTO tasks (project_id, title, description, status, position, tags, human) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false)],
+                "INSERT INTO tasks (project_id, title, description, status, position, tags, human, priority) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![project_id, title, description, status, position, tags, patch.human.unwrap_or(false), priority],
             )?;
             let id = c.last_insert_rowid();
             if let Some(keys) = &patch.waits_on {
@@ -1037,7 +1059,8 @@ impl Store {
             self.check_status(s)?;
         }
         let tags = patch.tags.as_deref().map(|t| clean_tags(t).join(","));
-        Ok(Edit { patch, title, url, tags })
+        let priority = patch.priority.as_deref().map(clean_priority).transpose()?;
+        Ok(Edit { patch, title, url, tags, priority })
     }
 
     /// Runs in the caller's write, on its connection `c`: a later failure there undoes it.
@@ -1057,11 +1080,12 @@ impl Store {
                    human = coalesce(?3, human), tags = coalesce(?4, tags),
                    description = coalesce(?5, description), url = coalesce(?7, url),
                    status = coalesce(?8, status), position = coalesce(?9, position),
-                   escalated = coalesce(?10, escalated), updated_at = {NOW}
+                   escalated = coalesce(?10, escalated), priority = iif(?11, ?12, priority), updated_at = {NOW}
                  WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
                    coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url), coalesce(?8, status),
-                   coalesce(?10, escalated))
-                   <> (title, project_id, human, tags, description, url, status, escalated)"
+                   coalesce(?10, escalated), iif(?11, ?12, priority))
+                   -- IS NOT, as a priority can be NULL, which <> can't tell apart.
+                   IS NOT (title, project_id, human, tags, description, url, status, escalated, priority)"
             ),
             params![
                 edit.title,
@@ -1073,7 +1097,9 @@ impl Store {
                 edit.url,
                 status,
                 position,
-                escalated
+                escalated,
+                edit.priority.is_some(),
+                edit.priority.flatten()
             ],
         )?;
         // The events trigger doesn't watch escalated: one that changes in place is written here.
@@ -1203,13 +1229,14 @@ impl Store {
         self.next_task_matching(project_id, "")
     }
 
-    /// The todo tasks for agents that match `query`, from FROM on, with its values.
-    fn agents_todo(&self, project_id: Option<i64>, query: &str) -> Result<(String, Vec<Value>)> {
+    /// The todo tasks for agents that match `query`, from FROM on, with its values. `hidden` is
+    /// what Settings turns off, which agents can't filter through.
+    fn agents_todo(&self, project_id: Option<i64>, query: &str, hidden: &[String]) -> Result<(String, Vec<Value>)> {
         let filter = if query.trim().is_empty() {
             Filter::default()
         } else {
             self.add_has_word()?;
-            Filter::new(query, 3, &self.hidden_properties()?)
+            Filter::new(query, 3, hidden)
         };
         let sql = format!(
             "FROM tasks t JOIN projects p ON p.id = t.project_id
@@ -1223,16 +1250,20 @@ impl Store {
 
     /// How many tasks `next_task` skips because they wait on others.
     pub fn waiting_in_todo(&self, project_id: Option<i64>, query: &str) -> Result<i64> {
-        let (todo, values) = self.agents_todo(project_id, query)?;
+        let (todo, values) = self.agents_todo(project_id, query, &self.hidden_properties()?)?;
         let sql = format!("SELECT count(*) {todo} AND {WAITING}");
         Ok(self.conn.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0))?)
     }
 
+    /// Higher priorities first, then the top of the column. With priority hidden in Settings, only
+    /// the column, as agents can't see it then.
     pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
-        let (todo, values) = self.agents_todo(project_id, query)?;
+        let hidden = self.hidden_properties()?;
+        let (todo, values) = self.agents_todo(project_id, query, &hidden)?;
+        let first = if hidden.iter().any(|p| p == "priority") { "" } else { BY_PRIORITY };
         let to = STATUSES[1];
         let id = self.write(|c| {
-            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY t.position LIMIT 1");
+            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY {first}t.position LIMIT 1");
             let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
             if let Some(id) = id {
                 let position = Self::end_of_column(c, to, id)?;
@@ -1427,7 +1458,7 @@ const IMAGE_COUNT: &str = "(SELECT count(*) FROM images WHERE task_id = t.id)";
 /// Computed, never stored: reopening a task blocks what waits on it again, with nothing to keep in step.
 const WAITING: &str = "EXISTS (SELECT 1 FROM task_waits w JOIN tasks b ON b.id = w.waits_on_id
     WHERE w.task_id = t.id AND b.status <> 'done')";
-const QUALIFIERS: [&str; 15] = [
+const QUALIFIERS: [&str; 16] = [
     "tag",
     "status",
     "project",
@@ -1440,6 +1471,7 @@ const QUALIFIERS: [&str; 15] = [
     "images",
     "created",
     "updated",
+    "priority",
     "is",
     "has",
     "no",
@@ -1522,11 +1554,17 @@ impl Filter {
             ("images", range) => range_sql(IMAGE_COUNT, range, number)?,
             ("created", range) => range_sql("substr(t.created_at, 1, 10)", range, date)?,
             ("updated", range) => range_sql("substr(t.updated_at, 1, 10)", range, date)?,
+            // Never NULL, so a task without one matches -priority:P0.
+            ("priority", range) => {
+                let level = |text: &str| priority_level(text).map(|n| n.to_string());
+                format!("coalesce({}, 0)", range_sql("t.priority", range, level)?)
+            }
             ("is", "human") => "t.human".to_string(),
             ("is", "waiting") => WAITING.to_string(),
             ("has" | "no", "description") => "t.description <> ''".to_string(),
             ("has" | "no", "tags") => "t.tags <> ''".to_string(),
             ("has" | "no", "url") => "t.url <> ''".to_string(),
+            ("has" | "no", "priority") => "t.priority IS NOT NULL".to_string(),
             ("has" | "no", "comments") => format!("{COMMENT_COUNT} > 0"),
             ("has" | "no", "images") => format!("{IMAGE_COUNT} > 0"),
             _ => return None,
@@ -1659,6 +1697,31 @@ struct Edit<'a> {
     title: Option<String>,
     url: Option<String>,
     tags: Option<String>,
+    /// Some(None) clears it.
+    priority: Option<Option<i64>>,
+}
+
+/// A priority as typed, in a task or a query: `P1`, `p1` or `1` is 1.
+fn priority_level(text: &str) -> Option<i64> {
+    match text.strip_prefix(['P', 'p']).unwrap_or(text) {
+        "0" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        "3" => Some(3),
+        _ => None,
+    }
+}
+
+/// A task's priority, P0 to P3; empty is none.
+fn clean_priority(input: &str) -> Result<Option<i64>> {
+    let text = input.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match priority_level(text) {
+        Some(n) => Ok(Some(n)),
+        None => Err(Error::Invalid(format!("unknown priority {text:?}; use one of: P0 (highest), P1, P2, P3"))),
+    }
 }
 
 fn parse_task_key(key: &str) -> Result<(Option<String>, i64)> {
@@ -2476,6 +2539,43 @@ mod tests {
     }
 
     #[test]
+    fn priority_filters_take_a_level_or_a_range() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let task = |title: &str, priority: Option<&str>| {
+            let patch = TaskPatch { priority: priority.map(String::from), ..Default::default() };
+            s.create_task_in(api.id, title, patch).unwrap().id
+        };
+        let (a, b, c, d) = (task("a", Some("P0")), task("b", Some("P1")), task("c", Some("P3")), task("d", None));
+        let ids = |q: &str| {
+            let mut ids: Vec<i64> = s.search(q, None).unwrap().iter().map(|t| t.id).collect();
+            ids.sort();
+            ids
+        };
+        for (q, want) in [
+            ("priority:P0", vec![a]),
+            ("priority:p1", vec![b]),
+            ("priority:3", vec![c]),
+            ("priority:<=P1", vec![a, b]),
+            ("priority:>P0", vec![b, c]),
+            ("priority:P1..P3", vec![b, c]),
+            ("-priority:P0", vec![b, c, d]),
+            ("-priority:<P3", vec![c, d]),
+            ("has:priority", vec![a, b, c]),
+            ("no:priority", vec![d]),
+            ("priority:", vec![a, b, c, d]),
+            ("priority:P4", vec![]),
+            ("priority:high", vec![]),
+        ] {
+            assert_eq!(ids(q), want, "{q}");
+        }
+
+        s.set_property("priority", false).unwrap();
+        assert!(s.search_for_agent("priority:P0").unwrap().is_empty(), "agents can't filter through it hidden");
+        assert_eq!(ids("priority:P0"), [a], "the board still can");
+    }
+
+    #[test]
     fn filter_values_cannot_change_the_sql() {
         let (_dir, s) = store();
         let api = s.create_project("api", "", None).unwrap();
@@ -2489,6 +2589,7 @@ mod tests {
             "created:2026-01-0'",
             "title:'",
             "status:'--",
+            "priority:1'OR'1",
         ] {
             assert!(s.search(q, None).unwrap().is_empty(), "{q}");
         }
@@ -2693,6 +2794,95 @@ mod tests {
         }
         assert_eq!(titles(&s.list_tasks(None, Some("doing")).unwrap()).last(), Some(&"a"));
         assert!(s.move_task(a.id, "nope", None).is_err());
+    }
+
+    #[test]
+    fn a_task_keeps_its_priority_until_it_is_cleared() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let set = |id: i64, priority: &str| {
+            s.update_task(id, TaskPatch { priority: Some(priority.into()), ..Default::default() })
+        };
+        let urgent = TaskPatch { priority: Some(" P1 ".into()), ..Default::default() };
+        let t = s.create_task_in(p.id, "Fix login", urgent).unwrap();
+        assert_eq!(t.priority, Some(1));
+        let later = s.create_task(p.id, "Later", "").unwrap();
+        assert_eq!(later.priority, None);
+        let changes = s.changes().unwrap();
+        set(later.id, " ").unwrap();
+        assert_eq!(s.changes().unwrap(), changes, "clearing none writes nothing");
+
+        assert_eq!(set(t.id, "p3").unwrap().priority, Some(3));
+        assert_eq!(set(t.id, "0").unwrap().priority, Some(0));
+        let renamed = s.update_task(t.id, TaskPatch { title: Some("Fix the login".into()), ..Default::default() });
+        assert_eq!(renamed.unwrap().priority, Some(0), "an edit without it keeps it");
+        assert_eq!(set(t.id, "").unwrap().priority, None);
+        assert_eq!(set(t.id, "P2").unwrap().priority, Some(2));
+
+        let before = (s.changes().unwrap(), s.get_task(t.id).unwrap().updated_at);
+        for wrong in ["P4", "-1", "high", "P", "p1x"] {
+            let err = set(t.id, wrong).unwrap_err();
+            assert!(err.to_string().contains("P0 (highest)"), "{wrong}: {err}");
+        }
+        set(t.id, "P2").unwrap();
+        assert_eq!((s.changes().unwrap(), s.get_task(t.id).unwrap().updated_at), before, "nothing to write");
+        let bad = TaskPatch { priority: Some("urgent".into()), ..Default::default() };
+        assert!(s.create_task_in(p.id, "Nope", bad).is_err());
+    }
+
+    #[test]
+    fn a_new_priority_is_one_task_updated_event_and_none_is_left_out_of_the_json() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Fix login", "").unwrap();
+        let json = serde_json::to_value(&t).unwrap();
+        assert!(json.get("priority").is_none(), "{json}");
+
+        let start = s.last_event().unwrap();
+        let t = s.update_task(t.id, TaskPatch { priority: Some("P0".into()), ..Default::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&t).unwrap()["priority"], 0);
+        s.update_task(t.id, TaskPatch { priority: Some("".into()), ..Default::default() }).unwrap();
+        let moved = TaskPatch { priority: Some("P1".into()), status: Some("doing".into()), ..Default::default() };
+        s.update_task(t.id, moved).unwrap();
+        let kinds: Vec<String> = kinds(&s, start).into_iter().map(|e| e.0).collect();
+        assert_eq!(kinds, ["task.updated", "task.updated", "task.moved"]);
+    }
+
+    #[test]
+    fn next_task_takes_higher_priorities_first_and_none_as_p2() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let task = |title: &str, priority: &str| {
+            let patch = TaskPatch { priority: Some(priority.into()), ..Default::default() };
+            s.create_task_in(api.id, title, patch).unwrap();
+        };
+        // In the column's order, top first.
+        task("low", "P3");
+        task("plain", "");
+        task("normal", "P2");
+        task("urgent", "P0");
+        task("soon", "P1");
+        task("urgent too", "P0");
+        let human = TaskPatch { priority: Some("P0".into()), human: Some(true), ..Default::default() };
+        s.create_task_in(api.id, "for the user", human).unwrap();
+        let mut taken = Vec::new();
+        while let Some(t) = s.next_task(None).unwrap() {
+            taken.push(t.title);
+        }
+        assert_eq!(taken, ["urgent", "urgent too", "soon", "plain", "normal", "low"]);
+    }
+
+    #[test]
+    fn next_task_keeps_to_the_column_while_priority_is_hidden() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        s.create_task(api.id, "top", "").unwrap();
+        let urgent = TaskPatch { priority: Some("P0".into()), ..Default::default() };
+        s.create_task_in(api.id, "urgent", urgent).unwrap();
+        s.set_property("priority", false).unwrap();
+        assert_eq!(s.next_task(None).unwrap().unwrap().title, "top");
+        s.set_property("priority", true).unwrap();
+        assert_eq!(s.next_task(None).unwrap().unwrap().title, "urgent");
     }
 
     #[test]

@@ -37,6 +37,9 @@ struct TaskOut {
     tags: Vec<String>,
     url: String,
     human: bool,
+    /// P0 to P3, as the board shows it; left out when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    priority: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     escalated: bool,
     waits_on: Vec<String>,
@@ -57,6 +60,7 @@ impl TaskOut {
             tags: task.tags,
             url: task.url,
             human: task.human,
+            priority: task.priority.map(|p| format!("P{p}")),
             escalated: task.escalated,
             waits_on,
             images,
@@ -145,6 +149,9 @@ fn markdown(board: &Board) -> String {
                     short_time(&t.created_at),
                     short_time(&t.updated_at)
                 );
+                if let Some(p) = &t.priority {
+                    let _ = writeln!(md, "Priority: {p}.");
+                }
                 if t.human {
                     md.push_str("Human task.\n");
                 }
@@ -218,6 +225,26 @@ mod tests {
         let only = collect(&store, Some("web"), Path::new("/k/images")).unwrap();
         assert_eq!(only.projects.len(), 1);
         assert!(collect(&store, Some("nope"), Path::new("/k/images")).is_err());
+    }
+
+    #[test]
+    fn exports_a_priority_as_the_board_shows_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::open(tmp.path().to_path_buf()).unwrap();
+        let store = home.store().unwrap();
+        let api = store.create_project("api", "API", None).unwrap();
+        let urgent = store::TaskPatch { priority: Some("P0".into()), ..Default::default() };
+        store.create_task_in(api.id, "Fix login", urgent).unwrap();
+        store.create_task(api.id, "Write docs", "").unwrap();
+
+        let board = collect(&store, None, Path::new("/k/images")).unwrap();
+        let md = markdown(&board);
+        assert!(md.contains("#### api#1 Fix login\n\nCreated ") && md.contains(".\nPriority: P0.\n"), "{md}");
+        assert_eq!(md.matches("Priority:").count(), 1, "{md}");
+        let json: serde_json::Value = serde_json::to_value(&board).unwrap();
+        let tasks = &json["projects"][0]["tasks"];
+        assert_eq!(tasks[0]["priority"], "P0");
+        assert!(tasks[1].get("priority").is_none(), "{json}");
     }
 
     #[test]

@@ -803,18 +803,22 @@ for (const [select, name] of [[$("#list-sort"), "kanzo.sort"], [$("#list-group")
 function renderList(tasks, all, more) {
   const { statuses, projects } = state.board;
   const by = $("#list-sort").value, group = $("#list-group").value;
+  // Tasks without a priority last, as when grouped; a tie keeps board order, since sort is stable.
+  const rank = (t) => t.priority ?? 4;
   const sorted = !by ? tasks : [...tasks].sort((a, b) =>
-    by === "id" ? a.id - b.id : by === "title" ? a.title.localeCompare(b.title) : b[by].localeCompare(a[by]));
-  const groups = new Map((group === "status" ? statuses : group === "project" ? projects.map((p) => p.slug) : []).map((g) => [g, []]));
+    by === "id" ? a.id - b.id : by === "title" ? a.title.localeCompare(b.title) : by === "priority" ? rank(a) - rank(b) : b[by].localeCompare(a[by]));
+  const firstGroups = group === "status" ? statuses : group === "project" ? projects.map((p) => p.slug) : group === "priority" ? ["P0", "P1", "P2", "P3", ""] : [];
+  const groups = new Map(firstGroups.map((g) => [g, []]));
+  const groupOf = (t) => group === "priority" ? priorityLabel(t) : group ? t[group] : "";
   for (const t of sorted) {
-    for (const g of group === "tags" ? (t.tags.length ? t.tags : [""]) : [group ? t[group] : ""]) {
+    for (const g of group === "tags" ? (t.tags.length ? t.tags : [""]) : [groupOf(t)]) {
       if (!groups.has(g)) groups.set(g, []);
       groups.get(g).push(t);
     }
   }
   const names = group === "tags" ? [...groups.keys()].sort((a, b) => !a - !b || a.localeCompare(b)) : [...groups.keys()];
   $("#list").replaceChildren(...names.flatMap((g) => !groups.get(g).length ? [] : [
-    group ? el("h2", { style: group === "status" ? "text-transform:capitalize" : null }, g || "No tag", el("span", { class: "count" }, String(groups.get(g).length))) : null,
+    group ? el("h2", { style: group === "status" ? "text-transform:capitalize" : null }, g || (group === "priority" ? tr("No priority") : "No tag"), el("span", { class: "count" }, String(groups.get(g).length))) : null,
     ...groups.get(g).map((t) => card(t, all, true)),
   ]).filter(Boolean), ...(more ? [more] : []));
 }
@@ -931,12 +935,13 @@ const inRange = (side) => (v) => {
   const ends = v.split("..");
   return ends.length > 1 ? ends.length === 2 && ends.every(side) : side(v.replace(/^(>=|<=|>|<)/, ""));
 };
-const isField = (v) => ["description", "tags", "url", "comments", "images"].includes(v);
+const isField = (v) => ["description", "priority", "tags", "url", "comments", "images"].includes(v);
+const isPriority = (v) => /^p?[0-3]$/.test(v);
 // What the server takes as each qualifier's value: anything else makes it a plain word.
 const QUALIFIERS = new Map([
   ["tag", anyText], ["status", anyText], ["project", anyText], ["title", anyText], ["description", anyText],
   ["url", anyText], ["comment", anyText], ["id", inRange(isNumber)], ["comments", inRange(isNumber)],
-  ["images", inRange(isNumber)], ["created", inRange(isDate)], ["updated", inRange(isDate)],
+  ["images", inRange(isNumber)], ["created", inRange(isDate)], ["updated", inRange(isDate)], ["priority", inRange(isPriority)],
   ["is", (v) => v === "human" || v === "waiting"], ["has", isField], ["no", isField],
 ]);
 
@@ -1003,6 +1008,11 @@ function summary(t, ...extra) {
     t.description ? el("span", { class: "desc" }, plainText(t.description)) : null,
     chips.length ? el("span", { class: "tags" }, chips) : null,
   ];
+}
+
+// "P1", or "" for a task without a priority.
+function priorityLabel(t) {
+  return t.priority == null ? "" : `P${t.priority}`;
 }
 
 // Only on cards: search rows are buttons, and a link can't sit inside one.
@@ -1156,6 +1166,7 @@ function card(t, showProject, row) {
                            onclick: (e) => { if (e.metaKey || e.ctrlKey) toggleSelected(t.id); else openTask(t.id); } },
     row ? statusIcon(t.status) : null,
     el("div", { class: "head" },
+      t.priority == null ? null : el("span", { class: `prio p${t.priority}`, title: tr("Priority") }, priorityLabel(t)),
       el("div", { class: "title" }, t.title),
       t.human ? el("span", { class: "human-mark", title: tr("Human task: agents skip it") }, icon("human")) : null,
       // On a board card the words get their own line, so a narrow column keeps room for the title.
@@ -1415,6 +1426,7 @@ async function refreshTask() {
   if (!statuses.includes(task.status)) status.append(el("option", { value: task.status }, task.status));
   status.value = task.status;
   $("#p-human").checked = task.human;
+  $("#p-priority").value = priorityLabel(task);
   $("#p-waits-links").replaceChildren(...waits_on.map(taskLink));
   $("#p-blocks").replaceChildren(...blocks.map(taskLink));
   $("#p-blocks-row").hidden = !blocks.length;
@@ -1614,6 +1626,7 @@ $("#p-desc-view").addEventListener("mousedown", (e) => { if (e.target.closest("a
 $("#p-desc-view").addEventListener("focus", editDesc);
 
 $("#p-status").addEventListener("change", (e) => patchTask({ status: e.target.value }));
+$("#p-priority").addEventListener("change", (e) => patchTask({ priority: e.target.value }));
 $("#p-human").addEventListener("change", (e) => patchTask({ human: e.target.checked }));
 
 let pending = [];
@@ -2216,7 +2229,7 @@ $("#settings-events-kept").addEventListener("change", async (e) => {
     loadBoard();
   } catch (err) { e.target.value = state.board?.events_kept ?? 1000; toast(err.message); }
 });
-$('.settings-pane[data-section="board"]').append(...["Description", "Tags", "URL", "Human", "Waiting", "Created", "Updated", "Comments", "Images"].map((name) => {
+$('.settings-pane[data-section="board"]').append(...["Description", "Priority", "Tags", "URL", "Human", "Waiting", "Created", "Updated", "Comments", "Images"].map((name) => {
   const property = name.toLowerCase();
   return el("label", { class: "setting" }, el("span", { class: "text" }, tr(name)),
     el("span", { class: "switch" },
