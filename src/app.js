@@ -163,6 +163,7 @@ const ICONS = {
   check: '<path d="M20 6 9 17l-5-5"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
   human: '<circle cx="12" cy="8" r="4"/><path d="M5 21v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1"/>',
+  flag: '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1zM4 22v-7"/>',
   url: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   github: '<path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.1-1.3-.3-2.5-1-3.5.3-1.2.3-2.4 0-3.5 0 0-1 0-3 1.5a12 12 0 0 0-8 0C6 2 5 2 5 2c-.3 1.2-.3 2.4 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.4.5-.7 1-.8 1.7-.2.6-.3 1.2-.2 1.8v4"/><path d="M9 18c-4.5 2-5-2-7-2"/>',
   gitBranch: '<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
@@ -1145,15 +1146,23 @@ async function spread(group, grabbed, from, place) {
 
 // In the list, a row: no drag to reorder, since a sorted list has no one position to drop into.
 function card(t, showProject, row) {
-  const node = el("div", { class: "card" + (row ? " row" : "") + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (state.selected.has(t.id) ? " selected" : ""),
+  // An agent handed it to you: said in words too, not only in the border and tint.
+  const escalated = t.escalated
+    ? el("span", { class: "escalated-mark", title: tr("An agent asks you to look; moving the task clears it") },
+        icon("flag"), tr("Escalated"))
+    : null;
+  const node = el("div", { class: "card" + (row ? " row" : "") + (state.task === t.id ? " open" : "") + (t.waiting_on ? " waiting" : "") + (t.escalated ? " escalated" : "") + (state.selected.has(t.id) ? " selected" : ""),
                            draggable: row ? null : "true", "data-id": t.id,
                            onclick: (e) => { if (e.metaKey || e.ctrlKey) toggleSelected(t.id); else openTask(t.id); } },
     row ? statusIcon(t.status) : null,
     el("div", { class: "head" },
       el("div", { class: "title" }, t.title),
       t.human ? el("span", { class: "human-mark", title: tr("Human task: agents skip it") }, icon("human")) : null,
+      // On a board card the words get their own line, so a narrow column keeps room for the title.
+      row ? escalated : null,
       el("span", { class: "num", title: tr("Copy {0}", key(t)), onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
+    row ? null : escalated,
     ...summary(t, waitChip(t), urlChip(t)).slice(row ? 1 : 0));
   node.addEventListener("dragstart", (e) => {
     state.dragging = t.id;

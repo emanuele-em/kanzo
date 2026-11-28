@@ -116,6 +116,24 @@ Sonra şunu iste: *"kanzo'dan sıradaki görevi al ve yap."* Ajan:
   <img alt="Panoda açık bir görev: Claude Code'un yorumları, bunlardan biri oturumuna nasıl devam edileceğini söylüyor, altında bir yanıt" src="docs/img/task-light.jpg">
 </picture>
 
+## Bir görevi devret
+
+> [!TIP]
+> **Ajanına söylemen yeterli:** *"durduğunda kanzo#12'yi bir devir yorumuyla bana review'a taşı."*
+
+Tek bir `update_task` çağrısı görevi taşır ve `comment`'ini kaydeder; yorum ajanın istemci adıyla imzalanır. İkisi birlikte kaydedilir ya da hiçbiri: boş bir yorum, 16 KiB'tan uzun bir yorum ya da reddedilen herhangi bir değişiklik hiçbir şey kaydetmez.
+
+- **Sana:** `status: "review"` ile `escalated: true`. Görev bir sonraki taşınışına kadar kartta **Escalated** yazar; `todo`'ya geri sürüklersen görev yine ajanlara kalır.
+- **Başka bir ajana:** yorumla birlikte `status: "todo"`; sonraki ajan onu `get_task` ile okur.
+- **Ne yazılır:** ne olduğu; sırlar ya da konuşmanın tamamı değil:
+
+  ```text
+  Completed: biten iş
+  Remaining: kalan iş
+  Verified: neyin nasıl kontrol edildiği
+  Next step: ilk yapılacak şey
+  ```
+
 ## Fikirleri backlog'a park et
 
 Settings'te Backlog'u açarsan ajanların dokunmadığı bir sütun gelir; görevlerini `todo` sütununa taşıyana kadar orada bekler.
