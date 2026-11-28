@@ -81,6 +81,7 @@ The board opens at http://localhost:4242. That's all the setup there is: the fir
 - **Select tasks:** `⌘`-click them, or drag on empty board space, then move, tag or delete them together. Drag one and the rest follow.
 - **List view:** the list icon shows the same tasks as rows to sort and group.
 - **Human tasks:** mark a task Human and agents leave it to you. The person icon shows only those.
+- **Priority:** give a task P0, the highest, to P3. Agents take higher ones first, and a task without one counts as P2, so a board without priorities works as before. The list sorts and groups by it. Agents set it with `priority`.
 - **Images:** paste or drop one into a task or a comment.
 - **Move to another project:** pick it in a task's panel. Its number stays, so `api#12` becomes `web#12`. Agents move it with `project`.
 - **Links:** give a task a URL, like its pull request, and open it from its card. Agents set it with `url`.
@@ -193,9 +194,10 @@ The board's filter (`f`), search (`/`) and the `filter` of `list_tasks` and `nex
 | `title:`, `description:`, `url:`, `comment:` | text in that field | `title:login`, `comment:"on hold"` |
 | `id:`, `comments:`, `images:` | a number, or a range | `id:12`, `comments:>2`, `images:1..3` |
 | `created:`, `updated:` | a date, or a range | `created:2026-11-05`, `updated:<2026-01-31` |
+| `priority:` | a priority, or a range | `priority:P0`, `priority:<=P1` |
 | `is:human` | tasks for you, not agents | `-is:human` |
 | `is:waiting` | tasks waiting on unfinished ones | `-is:waiting` |
-| `has:`, `no:` | `description`, `tags`, `url`, `comments` or `images` | `has:url`, `no:tags` |
+| `has:`, `no:` | `description`, `priority`, `tags`, `url`, `comments` or `images` | `has:url`, `no:tags` |
 
 Anything else is plain text. Use quotes for a phrase, `"on hold"`, or to look for text that reads like a qualifier, `"tag:bug"`. Agents can't filter through a property you've hidden in Settings.
 

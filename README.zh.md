@@ -81,6 +81,7 @@ kanzo
 - **选择任务：** `⌘`-点击任务，或在看板空白处拖动，然后一起移动、加标签或删除。拖动其中一个，其余的会跟着移动。
 - **列表视图：** 列表图标会把同样的任务显示成可排序、可分组的行。
 - **人工任务：** 把任务标记为“人工”后，智能体会把它留给你。人物图标只显示这些任务。
+- **优先级：** 给任务设 P0（最高）到 P3。智能体先领优先级高的任务；没有优先级的任务按 P2 算，所以不设优先级的看板和以前一样。列表可以按优先级排序和分组。智能体用 `priority` 设置它。
 - **图片：** 粘贴或拖放到任务或评论中。
 - **移到其他项目：** 在任务面板中选择项目。编号不变，`api#12` 会变成 `web#12`。智能体通过 `project` 移动。
 - **链接：** 给任务设置 URL，比如它的拉取请求，就能从卡片上打开。智能体通过 `url` 设置。
@@ -193,9 +194,10 @@ codex mcp add kanzo -- kanzo mcp                 # Codex
 | `title:`, `description:`, `url:`, `comment:` | 该字段中的文字 | `title:login`, `comment:"on hold"` |
 | `id:`, `comments:`, `images:` | 一个数字或范围 | `id:12`, `comments:>2`, `images:1..3` |
 | `created:`, `updated:` | 一个日期或范围 | `created:2026-11-05`, `updated:<2026-01-31` |
+| `priority:` | 一个优先级或范围 | `priority:P0`, `priority:<=P1` |
 | `is:human` | 留给你而不是智能体的任务 | `-is:human` |
 | `is:waiting` | 正在等待未完成任务的任务 | `-is:waiting` |
-| `has:`, `no:` | `description`、`tags`、`url`、`comments` 或 `images` | `has:url`, `no:tags` |
+| `has:`, `no:` | `description`、`priority`、`tags`、`url`、`comments` 或 `images` | `has:url`, `no:tags` |
 
 其他内容都按普通文本处理。用引号表示短语，如 `"on hold"`，或者查找看起来像限定符的文本，如 `"tag:bug"`。智能体无法通过你在设置中隐藏的属性进行筛选。
 
