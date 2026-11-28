@@ -31,6 +31,9 @@ install-updater = false
 github-attestations = true
 # After every file is built, so the installer and sha256.sum are signed too
 github-attestations-phase = "host"
+# Test the packaged x64 Linux binary before the release is hosted.
+global-artifacts-jobs = ["./release-smoke-linux-x64"]
+github-custom-job-permissions = { release-smoke-linux-x64 = { contents = "read" } }
 # Also publish each release to crates.io, for `cargo install kanzo`
 publish-jobs = ["./publish-crates"]
 

@@ -1,0 +1,37 @@
+name: Linux x64 release smoke test
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: artifacts-build-local-x86_64-unknown-linux-musl
+          path: ${{ runner.temp }}/kanzo-x64-release
+      - name: Install QEMU user-mode emulation
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-user
+      - name: Initialize and export a board without AVX
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kanzo-x64-release"
+          target=x86_64-unknown-linux-musl
+          tar --no-same-owner -xJf "kanzo-$target.tar.xz" "kanzo-$target/kanzo"
+          # --version does not touch SQLite. qemu64 has no AVX or AVX2.
+          ulimit -c 0
+          kanzo=(qemu-x86_64 -cpu qemu64 "kanzo-$target/kanzo" --home "$PWD/board")
+          "${kanzo[@]}" init
+          test -s board/kanzo.db
+          "${kanzo[@]}" export --format json | jq -e '.projects == []'
