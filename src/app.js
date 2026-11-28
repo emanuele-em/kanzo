@@ -2001,7 +2001,11 @@ async function watchEscalations(board) {
   while (notifyOn() && document.hidden && (board === "local" || state.joined)) {
     try {
       const reply = await api("GET", "/events?wait=25" + (since ? "&since=" + encodeURIComponent(since) : ""), null, board);
-      if (since && (reply.events.length || reply.reset)) await checkEscalations(board);
+      // The first reply only says where to start: look then, so a page that opens hidden, as
+      // after an update, knows what is escalated already and shows the next one. After that,
+      // only a move or an edit can escalate a task, not a comment.
+      const edits = reply.events.some((e) => e.kind === "task.moved" || e.kind === "task.updated");
+      if (!since || reply.reset || edits) await checkEscalations(board);
       since = reply.last;
     } catch { await new Promise((r) => setTimeout(r, 5000)); }
   }
