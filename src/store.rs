@@ -117,6 +117,9 @@ const MIGRATIONS: &[&str] = &[
      END;",
     // An agent handed the task to the user; its next move to another column clears it.
     "ALTER TABLE tasks ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0;",
+    // Where a repo lives, like gitlab.com, for links to it. Empty is GitHub, as for a repo
+    // linked as owner/repo, or before this.
+    "ALTER TABLE project_repos ADD COLUMN host TEXT;",
 ];
 
 const PROJECT_COLORS: &[&str] = &["gray", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -163,6 +166,8 @@ pub struct Project {
     pub slug: String,
     pub name: String,
     pub repos: Vec<String>,
+    /// Each repo's page, in the order of `repos`.
+    pub repo_urls: Vec<String>,
     pub color: Option<String>,
     pub created_at: String,
     pub open: i64,
@@ -572,15 +577,21 @@ impl Store {
             (SELECT group_concat(repo, ',' ORDER BY r.rowid) FROM project_repos r WHERE r.project_id = p.id),
             p.color, p.created_at,
             (SELECT count(*) FROM tasks t WHERE t.project_id = p.id AND t.status <> ?1),
-            (SELECT count(*) FROM tasks t WHERE t.project_id = p.id)
+            (SELECT count(*) FROM tasks t WHERE t.project_id = p.id),
+            (SELECT group_concat('https://' || coalesce(host, 'github.com') || '/' || repo, ',' ORDER BY r.rowid)
+             FROM project_repos r WHERE r.project_id = p.id)
         FROM projects p";
 
     fn project_row(r: &Row) -> rusqlite::Result<Project> {
+        let list = |i| -> rusqlite::Result<Vec<String>> {
+            Ok(r.get::<_, Option<String>>(i)?.map(|s| s.split(',').map(String::from).collect()).unwrap_or_default())
+        };
         Ok(Project {
             id: r.get(0)?,
             slug: r.get(1)?,
             name: r.get(2)?,
-            repos: r.get::<_, Option<String>>(3)?.map(|s| s.split(',').map(String::from).collect()).unwrap_or_default(),
+            repos: list(3)?,
+            repo_urls: list(8)?,
             color: r.get(4)?,
             created_at: r.get(5)?,
             open: r.get(6)?,
@@ -640,7 +651,9 @@ impl Store {
             "" => slug.clone(),
             n => n.to_string(),
         };
-        let repo = repo.map(str::trim).filter(|r| !r.is_empty()).map(clean_repo).transpose()?;
+        let repo = repo.map(str::trim).filter(|r| !r.is_empty());
+        let host = repo.and_then(host_from_url);
+        let repo = repo.map(clean_repo).transpose()?;
         // Checked in the write's transaction, so nobody can take the slug or the repo in between.
         self.write(|c| {
             if self.project_by_slug(&slug)?.is_some() {
@@ -652,8 +665,8 @@ impl Store {
             c.execute("INSERT INTO projects (slug, name) VALUES (?1, ?2)", params![slug, name])?;
             if let Some(r) = &repo {
                 c.execute(
-                    "INSERT INTO project_repos (repo, project_id) VALUES (?1, ?2)",
-                    params![r, c.last_insert_rowid()],
+                    "INSERT INTO project_repos (repo, project_id, host) VALUES (?1, ?2, ?3)",
+                    params![r, c.last_insert_rowid(), host],
                 )?;
             }
             Ok(())
@@ -663,13 +676,17 @@ impl Store {
 
     pub fn link_repo(&self, slug: &str, repo: &str) -> Result<Project> {
         let project = self.find_project(slug)?;
+        let host = host_from_url(repo);
         let repo = clean_repo(repo)?;
         if project.repos.contains(&repo) {
             return Ok(project);
         }
         self.write(|c| {
             self.check_repo_free(&repo)?;
-            c.execute("INSERT INTO project_repos (repo, project_id) VALUES (?1, ?2)", params![repo, project.id])?;
+            c.execute(
+                "INSERT INTO project_repos (repo, project_id, host) VALUES (?1, ?2, ?3)",
+                params![repo, project.id, host],
+            )?;
             Ok(())
         })?;
         self.find_project(&project.slug)
@@ -1674,6 +1691,20 @@ pub fn repo_from_url(input: &str) -> Option<String> {
     *last = last.strip_suffix(".git").unwrap_or(*last);
     let ok = |p: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
     (parts.len() >= 2 && parts.iter().all(|p| ok(p))).then(|| parts.join("/").to_ascii_lowercase())
+}
+
+/// The website a repo's URL names, like gitlab.com, without the user or password. None for
+/// owner/repo, and for an SSH alias from ~/.ssh/config, like github-work: it has no dot.
+pub fn host_from_url(input: &str) -> Option<String> {
+    let s = input.trim();
+    let authority = match s.split_once("://") {
+        Some((_, rest)) => rest.split('/').next()?,
+        None => s.split_once(':')?.0,
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host.split(':').next()?;
+    let ok = host.contains('.') && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'));
+    ok.then(|| host.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -2817,6 +2848,39 @@ mod tests {
         }
         assert_eq!(repo_from_url("repo"), None);
         assert_eq!(repo_from_url("own er/repo"), None);
+    }
+
+    #[test]
+    fn hosts() {
+        for (url, host) in [
+            ("https://gitlab.com/acme/backend/api", Some("gitlab.com")),
+            ("git@gitlab.com:acme/api.git", Some("gitlab.com")),
+            ("ssh://git@git.example.com:2222/acme/api.git", Some("git.example.com")),
+            ("https://me:token@GitLab.example.com/acme/api.git", Some("gitlab.example.com")),
+            ("https://github.com/owner/repo/pull/3", Some("github.com")),
+            ("git@github-work:owner/repo.git", None),
+            ("owner/repo", None),
+            ("acme/backend/api", None),
+        ] {
+            assert_eq!(host_from_url(url).as_deref(), host, "{url}");
+        }
+    }
+
+    #[test]
+    fn repo_links_go_to_their_host() {
+        let (_dir, s) = store();
+        s.create_project("api", "", Some("git@gitlab.example.com:acme/backend/api.git")).unwrap();
+        s.link_repo("api", "me/api-docs").unwrap();
+        let p = s.link_repo("api", "https://gitlab.com/acme/web").unwrap();
+        assert_eq!(p.repos, ["acme/backend/api", "me/api-docs", "acme/web"]);
+        assert_eq!(
+            p.repo_urls,
+            [
+                "https://gitlab.example.com/acme/backend/api",
+                "https://github.com/me/api-docs",
+                "https://gitlab.com/acme/web"
+            ]
+        );
     }
 
     #[test]

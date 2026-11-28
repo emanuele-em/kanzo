@@ -104,7 +104,7 @@ Other MCP clients: run `kanzo mcp` (apps like Raycast need the full path, from `
 
 Then ask: *"take the next task from kanzo and do it."* The agent:
 
-- finds the project from the git remote of its repo; link more repos from the project's ⋯ menu;
+- finds the project from the git remote of its repo, on GitHub, GitLab or another host; link more repos from the project's ⋯ menu;
 - moves the card to `doing` and comments as it works;
 - on `review`, comments how to resume its session.
 
