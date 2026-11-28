@@ -325,6 +325,10 @@ pub const BACKLOG: &str = "backlog";
 const PROPERTIES: [&str; 10] =
     ["description", "priority", "tags", "url", "human", "waiting", "created", "updated", "comments", "images"];
 
+/// What a task without a priority counts as when agents take the next one: P2, the usual middle,
+/// so P0 and P1 go before it, P3 after, and P2 by its place in the column.
+const PRIORITY_NONE: i64 = 2;
+
 pub struct Store {
     conn: Connection,
     statuses: Vec<String>,
@@ -1251,11 +1255,18 @@ impl Store {
         Ok(self.conn.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0))?)
     }
 
+    /// Higher priorities first, then the top of the column. With priority hidden in Settings, only
+    /// the column, as agents can't see it then.
     pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
         let (todo, values) = self.agents_todo(project_id, query)?;
+        let order = if self.hidden_properties()?.iter().any(|p| p == "priority") {
+            "t.position".to_string()
+        } else {
+            format!("coalesce(t.priority, {PRIORITY_NONE}), t.position")
+        };
         let to = STATUSES[1];
         let id = self.write(|c| {
-            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY t.position LIMIT 1");
+            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY {order} LIMIT 1");
             let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
             if let Some(id) = id {
                 let position = Self::end_of_column(c, to, id)?;
@@ -2826,6 +2837,43 @@ mod tests {
         s.update_task(t.id, moved).unwrap();
         let kinds: Vec<String> = kinds(&s, start).into_iter().map(|e| e.0).collect();
         assert_eq!(kinds, ["task.updated", "task.updated", "task.moved"]);
+    }
+
+    #[test]
+    fn next_task_takes_higher_priorities_first_and_none_as_p2() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        let task = |title: &str, priority: &str| {
+            let patch = TaskPatch { priority: Some(priority.into()), ..Default::default() };
+            s.create_task_in(api.id, title, patch).unwrap();
+        };
+        // In the column's order, top first.
+        task("low", "P3");
+        task("plain", "");
+        task("normal", "P2");
+        task("urgent", "P0");
+        task("soon", "P1");
+        task("urgent too", "P0");
+        let human = TaskPatch { priority: Some("P0".into()), human: Some(true), ..Default::default() };
+        s.create_task_in(api.id, "for the user", human).unwrap();
+        let mut taken = Vec::new();
+        while let Some(t) = s.next_task(None).unwrap() {
+            taken.push(t.title);
+        }
+        assert_eq!(taken, ["urgent", "urgent too", "soon", "plain", "normal", "low"]);
+    }
+
+    #[test]
+    fn next_task_keeps_to_the_column_while_priority_is_hidden() {
+        let (_dir, s) = store();
+        let api = s.create_project("api", "", None).unwrap();
+        s.create_task(api.id, "top", "").unwrap();
+        let urgent = TaskPatch { priority: Some("P0".into()), ..Default::default() };
+        s.create_task_in(api.id, "urgent", urgent).unwrap();
+        s.set_property("priority", false).unwrap();
+        assert_eq!(s.next_task(None).unwrap().unwrap().title, "top");
+        s.set_property("priority", true).unwrap();
+        assert_eq!(s.next_task(None).unwrap().unwrap().title, "urgent");
     }
 
     #[test]
