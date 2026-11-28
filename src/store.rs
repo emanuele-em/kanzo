@@ -325,9 +325,9 @@ pub const BACKLOG: &str = "backlog";
 const PROPERTIES: [&str; 10] =
     ["description", "priority", "tags", "url", "human", "waiting", "created", "updated", "comments", "images"];
 
-/// What a task without a priority counts as when agents take the next one: P2, the usual middle,
-/// so P0 and P1 go before it, P3 after, and P2 by its place in the column.
-const PRIORITY_NONE: i64 = 2;
+/// How next_task ranks before the column's order: a task without a priority counts as P2, the usual
+/// middle, so P0 and P1 go before it, P3 after, and P2 by its place in the column.
+const BY_PRIORITY: &str = "coalesce(t.priority, 2), ";
 
 pub struct Store {
     conn: Connection,
@@ -1081,12 +1081,11 @@ impl Store {
                    description = coalesce(?5, description), url = coalesce(?7, url),
                    status = coalesce(?8, status), position = coalesce(?9, position),
                    escalated = coalesce(?10, escalated), priority = iif(?11, ?12, priority), updated_at = {NOW}
-                 WHERE id = ?6 AND ((coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
+                 WHERE id = ?6 AND (coalesce(?1, title), coalesce(?2, project_id), coalesce(?3, human),
                    coalesce(?4, tags), coalesce(?5, description), coalesce(?7, url), coalesce(?8, status),
-                   coalesce(?10, escalated))
-                   <> (title, project_id, human, tags, description, url, status, escalated)
-                   -- Apart, and with IS NOT: none is NULL, which <> never tells apart.
-                   OR iif(?11, ?12, priority) IS NOT priority)"
+                   coalesce(?10, escalated), iif(?11, ?12, priority))
+                   -- IS NOT, as a priority can be NULL, which <> can't tell apart.
+                   IS NOT (title, project_id, human, tags, description, url, status, escalated, priority)"
             ),
             params![
                 edit.title,
@@ -1230,13 +1229,14 @@ impl Store {
         self.next_task_matching(project_id, "")
     }
 
-    /// The todo tasks for agents that match `query`, from FROM on, with its values.
-    fn agents_todo(&self, project_id: Option<i64>, query: &str) -> Result<(String, Vec<Value>)> {
+    /// The todo tasks for agents that match `query`, from FROM on, with its values. `hidden` is
+    /// what Settings turns off, which agents can't filter through.
+    fn agents_todo(&self, project_id: Option<i64>, query: &str, hidden: &[String]) -> Result<(String, Vec<Value>)> {
         let filter = if query.trim().is_empty() {
             Filter::default()
         } else {
             self.add_has_word()?;
-            Filter::new(query, 3, &self.hidden_properties()?)
+            Filter::new(query, 3, hidden)
         };
         let sql = format!(
             "FROM tasks t JOIN projects p ON p.id = t.project_id
@@ -1250,7 +1250,7 @@ impl Store {
 
     /// How many tasks `next_task` skips because they wait on others.
     pub fn waiting_in_todo(&self, project_id: Option<i64>, query: &str) -> Result<i64> {
-        let (todo, values) = self.agents_todo(project_id, query)?;
+        let (todo, values) = self.agents_todo(project_id, query, &self.hidden_properties()?)?;
         let sql = format!("SELECT count(*) {todo} AND {WAITING}");
         Ok(self.conn.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0))?)
     }
@@ -1258,15 +1258,12 @@ impl Store {
     /// Higher priorities first, then the top of the column. With priority hidden in Settings, only
     /// the column, as agents can't see it then.
     pub fn next_task_matching(&self, project_id: Option<i64>, query: &str) -> Result<Option<Task>> {
-        let (todo, values) = self.agents_todo(project_id, query)?;
-        let order = if self.hidden_properties()?.iter().any(|p| p == "priority") {
-            "t.position".to_string()
-        } else {
-            format!("coalesce(t.priority, {PRIORITY_NONE}), t.position")
-        };
+        let hidden = self.hidden_properties()?;
+        let (todo, values) = self.agents_todo(project_id, query, &hidden)?;
+        let first = if hidden.iter().any(|p| p == "priority") { "" } else { BY_PRIORITY };
         let to = STATUSES[1];
         let id = self.write(|c| {
-            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY {order} LIMIT 1");
+            let sql = format!("SELECT t.id {todo} AND NOT {WAITING} ORDER BY {first}t.position LIMIT 1");
             let id: Option<i64> = c.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0)).optional()?;
             if let Some(id) = id {
                 let position = Self::end_of_column(c, to, id)?;
@@ -1558,7 +1555,10 @@ impl Filter {
             ("created", range) => range_sql("substr(t.created_at, 1, 10)", range, date)?,
             ("updated", range) => range_sql("substr(t.updated_at, 1, 10)", range, date)?,
             // Never NULL, so a task without one matches -priority:P0.
-            ("priority", range) => format!("coalesce({}, 0)", range_sql("t.priority", range, priority)?),
+            ("priority", range) => {
+                let level = |text: &str| priority_level(text).map(|n| n.to_string());
+                format!("coalesce({}, 0)", range_sql("t.priority", range, level)?)
+            }
             ("is", "human") => "t.human".to_string(),
             ("is", "waiting") => WAITING.to_string(),
             ("has" | "no", "description") => "t.description <> ''".to_string(),
@@ -1614,12 +1614,6 @@ fn range_sql(column: &str, range: &str, side: fn(&str) -> Option<String>) -> Opt
 
 fn number(text: &str) -> Option<String> {
     text.parse::<i64>().ok().map(|n| n.to_string())
-}
-
-/// A priority in a query, already lowercase: p0 to p3, or 0 to 3.
-fn priority(text: &str) -> Option<String> {
-    let n = text.strip_prefix('p').unwrap_or(text);
-    matches!(n, "0" | "1" | "2" | "3").then(|| n.to_string())
 }
 
 fn date(text: &str) -> Option<String> {
@@ -1707,15 +1701,26 @@ struct Edit<'a> {
     priority: Option<Option<i64>>,
 }
 
-/// P0 to P3, as typed: `P1`, `p1` or `1`. Empty is none.
+/// A priority as typed, in a task or a query: `P1`, `p1` or `1` is 1.
+fn priority_level(text: &str) -> Option<i64> {
+    match text.strip_prefix(['P', 'p']).unwrap_or(text) {
+        "0" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        "3" => Some(3),
+        _ => None,
+    }
+}
+
+/// A task's priority, P0 to P3; empty is none.
 fn clean_priority(input: &str) -> Result<Option<i64>> {
     let text = input.trim();
     if text.is_empty() {
         return Ok(None);
     }
-    match text.strip_prefix(['P', 'p']).unwrap_or(text) {
-        n @ ("0" | "1" | "2" | "3") => Ok(Some(n.parse().unwrap_or_default())),
-        _ => Err(Error::Invalid(format!("priority {text:?} isn't one of P0 (highest), P1, P2, P3"))),
+    match priority_level(text) {
+        Some(n) => Ok(Some(n)),
+        None => Err(Error::Invalid(format!("unknown priority {text:?}; use one of: P0 (highest), P1, P2, P3"))),
     }
 }
 
@@ -2801,7 +2806,11 @@ mod tests {
         let urgent = TaskPatch { priority: Some(" P1 ".into()), ..Default::default() };
         let t = s.create_task_in(p.id, "Fix login", urgent).unwrap();
         assert_eq!(t.priority, Some(1));
-        assert_eq!(s.create_task(p.id, "Later", "").unwrap().priority, None);
+        let later = s.create_task(p.id, "Later", "").unwrap();
+        assert_eq!(later.priority, None);
+        let changes = s.changes().unwrap();
+        set(later.id, " ").unwrap();
+        assert_eq!(s.changes().unwrap(), changes, "clearing none writes nothing");
 
         assert_eq!(set(t.id, "p3").unwrap().priority, Some(3));
         assert_eq!(set(t.id, "0").unwrap().priority, Some(0));

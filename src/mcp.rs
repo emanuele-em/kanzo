@@ -553,10 +553,10 @@ impl Kanzo {
                         tags: args.tags,
                         project_id,
                         human: args.human,
+                        priority: args.priority,
                         url: args.url,
                         waits_on: args.waits_on,
                         escalated: args.escalated,
-                        priority: args.priority,
                     },
                     comment,
                 )?;
@@ -1181,6 +1181,8 @@ mod tests {
             home.store().unwrap().set_property("priority", false).unwrap();
             let (_, hidden) = call("get_task", json!({ "id": "api#2" })).await;
             assert!(!hidden.contains("P1"), "{hidden}");
+            let (_, list) = call("list_tasks", json!({ "project": "api" })).await;
+            assert!(list.contains("api#2 [doing] Fix login") && !list.contains(" P"), "{list}");
             let (_, cleared) = call("update_task", json!({ "id": "api#2", "priority": "" })).await;
             assert_eq!(cleared, "Updated api#2: Fix login");
             assert_eq!(home.store().unwrap().get_task(2).unwrap().priority, None);

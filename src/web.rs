@@ -761,10 +761,10 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 project_id,
                 tags: p.tags,
                 human: p.human,
+                priority: p.priority,
                 url: p.url,
                 waits_on: p.waits_on,
                 escalated: None,
-                priority: p.priority,
             },
         )
     })
