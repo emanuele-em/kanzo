@@ -277,12 +277,12 @@ html:not([data-hide~="waiting"]) .card.waiting:not(:hover) { opacity: .6; }
 .card .num .dot { width: 6px; height: 6px; }
 .card .tags, .result .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .card .human-mark { flex: none; margin-top: 1px; color: var(--muted); display: inline-flex; }
+.card .human-mark .icon svg { width: 15px; height: 15px; }
 /* P0 to P3: the letters say it, the color only helps. */
 .card .prio { flex: none; margin-top: 2px; color: var(--faint); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .card .prio.p0 { color: var(--danger); }
 .card .prio.p1 { color: var(--waits); }
 .card .prio.p2 { color: var(--muted); }
-.card .human-mark .icon svg { width: 15px; height: 15px; }
 /* An escalated task: the words say it, the border and tint only help. */
 .card .escalated-mark { flex: none; display: inline-flex; align-items: center; gap: 5px; margin-top: 2px; color: var(--link); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .card .escalated-mark .icon svg { width: 14px; height: 14px; }

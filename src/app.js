@@ -809,7 +809,7 @@ function renderList(tasks, all, more) {
     by === "id" ? a.id - b.id : by === "title" ? a.title.localeCompare(b.title) : by === "priority" ? rank(a) - rank(b) : b[by].localeCompare(a[by]));
   const firstGroups = group === "status" ? statuses : group === "project" ? projects.map((p) => p.slug) : group === "priority" ? ["P0", "P1", "P2", "P3", ""] : [];
   const groups = new Map(firstGroups.map((g) => [g, []]));
-  const groupOf = (t) => group === "priority" ? (t.priority == null ? "" : `P${t.priority}`) : group ? t[group] : "";
+  const groupOf = (t) => group === "priority" ? priorityLabel(t) : group ? t[group] : "";
   for (const t of sorted) {
     for (const g of group === "tags" ? (t.tags.length ? t.tags : [""]) : [groupOf(t)]) {
       if (!groups.has(g)) groups.set(g, []);
@@ -1010,6 +1010,11 @@ function summary(t, ...extra) {
   ];
 }
 
+// "P1", or "" for a task without a priority.
+function priorityLabel(t) {
+  return t.priority == null ? "" : `P${t.priority}`;
+}
+
 // Only on cards: search rows are buttons, and a link can't sit inside one.
 function urlChip(t) {
   if (!t.url || isPropertyHidden("url")) return null;
@@ -1161,7 +1166,7 @@ function card(t, showProject, row) {
                            onclick: (e) => { if (e.metaKey || e.ctrlKey) toggleSelected(t.id); else openTask(t.id); } },
     row ? statusIcon(t.status) : null,
     el("div", { class: "head" },
-      t.priority == null ? null : el("span", { class: `prio p${t.priority}`, title: tr("Priority") }, `P${t.priority}`),
+      t.priority == null ? null : el("span", { class: `prio p${t.priority}`, title: tr("Priority") }, priorityLabel(t)),
       el("div", { class: "title" }, t.title),
       t.human ? el("span", { class: "human-mark", title: tr("Human task: agents skip it") }, icon("human")) : null,
       // On a board card the words get their own line, so a narrow column keeps room for the title.
@@ -1421,7 +1426,7 @@ async function refreshTask() {
   if (!statuses.includes(task.status)) status.append(el("option", { value: task.status }, task.status));
   status.value = task.status;
   $("#p-human").checked = task.human;
-  $("#p-priority").value = task.priority == null ? "" : `P${task.priority}`;
+  $("#p-priority").value = priorityLabel(task);
   $("#p-waits-links").replaceChildren(...waits_on.map(taskLink));
   $("#p-blocks").replaceChildren(...blocks.map(taskLink));
   $("#p-blocks-row").hidden = !blocks.length;
