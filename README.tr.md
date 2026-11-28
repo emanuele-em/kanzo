@@ -312,7 +312,7 @@ Panodaki ayarlar:
 - **Görev özellikleri:** etiketler ya da yorumlar gibi birini kapatırsan panoda gizlenir ve ajanlara gönderilenlerin dışında kalır. Hiçbir şey silinmez.
 - **Dil:** Board altında, İngilizce ya da Çince.
 - **Tema:** Board altında, sistem, açık ya da koyu.
-- **Bildirimler:** Board altında aç; bir ajan bir görevi sana devrettiğinde pano bunu bu bilgisayarda, kendi sekmesinden ya da yüklü uygulamadan bildirir. Bildirime tıklarsan görev orada açılır. Pano açık olduğu sürece, arka planda bile çalışır.
+- **Bildirimler:** Board altında aç; bir ajan bir görevi sana devrettiğinde pano bunu bu bilgisayarda, kendi sekmesinden ya da yüklü uygulamadan bildirir. Bildirime tıklarsan görev orada açılır. Pano açık olduğu sürece, arka planda bile çalışır. Pano ilk açıldığında ve her güncellemeden sonra, sen açana ya da kapatana kadar bunu açmayı önerir.
 - **What's new:** About altında, bu sürümün notları.
 
 ## Küçük ve hızlı

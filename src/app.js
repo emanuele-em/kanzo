@@ -406,6 +406,7 @@ async function loadBoard() {
     state.changes = board.changes;
     $("#offline").hidden = true;
     render();
+    offerNotifications();
   } catch (e) {
     if (request !== boardRequest) return;
     if (state.project !== "all" && /no project/.test(e.message)) {
@@ -1299,18 +1300,22 @@ function hideNewProject() {
 // off, as a sandboxed frame does, and it then answers Cancel without asking.
 let answerAsk = null;
 
-function ask(message) {
+// `onYes` runs in the click itself, where a browser lets the page ask for a permission.
+function ask(message, { yes = tr("OK"), no = tr("Cancel"), onYes } = {}) {
   answerAsk?.(false);
   const back = document.activeElement;
   $("#ask-text").textContent = message;
+  $("#ask-ok").textContent = yes;
+  $("#ask-cancel").textContent = no;
   $("#ask-dialog").hidden = false;
   $("#ask-ok").focus();
   return new Promise((resolve) => {
-    answerAsk = (yes) => {
+    answerAsk = (answer) => {
       answerAsk = null;
       $("#ask-dialog").hidden = true;
       back?.focus?.();
-      resolve(yes);
+      if (answer) onYes?.();
+      resolve(answer);
     };
   });
 }
@@ -2008,16 +2013,32 @@ function askNotifications() {
   return new Promise((resolve) => Notification.requestPermission(resolve)?.then(resolve));
 }
 
-$("#settings-notify").addEventListener("change", async (e) => {
-  if (e.target.checked && await askNotifications() !== "granted") {
-    e.target.checked = false;
+// Called in a click: a browser asks for permission only then.
+async function setNotifications(on) {
+  if (on && await askNotifications() !== "granted") {
     toast(tr("This browser blocks notifications from the board: allow them in its site settings."));
-    return;
+    on = false;
   }
-  localStorageSet("kanzo.notify", e.target.checked ? "1" : "0");
+  localStorageSet("kanzo.notify", on ? "1" : "0");
   notifier.seen = {};
   notifier.changes = {};
-});
+  return on;
+}
+
+$("#settings-notify").addEventListener("change", async (e) => { e.target.checked = await setNotifications(e.target.checked); });
+
+// The first time the board opens, and again after each update, until they're turned on, or off
+// in Settings: "Not now" only waits for the next version. A browser never asks for permission
+// without a click, so the board asks first, in the page.
+function offerNotifications() {
+  const version = state.board?.version;
+  if (!version || !("Notification" in window) || Notification.permission === "denied") return;
+  if (localStorageGet("kanzo.notify") !== null) return;
+  if (localStorageGet("kanzo.notifyOffered") === version || !$("#ask-dialog").hidden) return;
+  localStorageSet("kanzo.notifyOffered", version);
+  ask(tr("Get a notification on this computer when an agent escalates a task to you? You can change it in Settings."),
+      { yes: tr("Turn on"), no: tr("Not now"), onYes: () => setNotifications(true) });
+}
 
 // The next check starts only after this one finished, so a slow or busy server
 // never piles up requests.
