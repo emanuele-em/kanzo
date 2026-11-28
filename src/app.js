@@ -1903,7 +1903,11 @@ window.addEventListener("hashchange", () => {
 });
 
 async function poll() {
-  if (document.hidden) return schedulePoll();
+  if (document.hidden) {
+    watchEscalations("local");
+    if (state.joined) watchEscalations("shared");
+    return schedulePoll();
+  }
   let local = null, shared = null;
   try { local = await api("GET", "/changes", null, "local"); } catch {}
   // Joining or leaving a board, even from the terminal, shows it in the sidebar or takes it away.
@@ -1935,8 +1939,85 @@ async function poll() {
     if (state.task) refreshTask();
   }
   if (state.joined && other && other.changes !== state.other?.changes) loadOther();
+  // Only while notifications are on, or the first change after turning them on would go unseen.
+  for (const [board, reply] of [["local", local], ["shared", shared]]) {
+    if (notifyOn() && reply && reply.changes !== notifier.changes[board]) {
+      notifier.changes[board] = reply.changes;
+      checkEscalations(board);
+    }
+  }
   schedulePoll();
 }
+
+// A system notification when an agent escalates a task. It comes from this page, so a click
+// brings back the window that showed it, the installed app or this tab, at the task. Turned on
+// per browser in Settings, like the theme.
+const notifier = { seen: {}, changes: {}, watching: {} };
+
+function notifyOn() {
+  return "Notification" in window && Notification.permission === "granted" && localStorageGet("kanzo.notify") === "1";
+}
+
+// The first look at a board only learns what is escalated already, so old ones stay quiet.
+async function checkEscalations(board) {
+  if (!notifyOn()) return;
+  let tasks;
+  try { tasks = await api("GET", "/search?q=" + encodeURIComponent("is:escalated"), null, board); } catch { return; }
+  const seen = notifier.seen[board];
+  notifier.seen[board] = new Set(tasks.map(key));
+  for (const t of seen ? tasks.filter((t) => !seen.has(key(t))) : []) notifyEscalated(t, board);
+}
+
+async function notifyEscalated(t, board) {
+  const where = (board === "shared" ? "@" : "") + `${t.project}/${t.id}`;
+  // Each open page sees it: the installed app shows it, and a tab only if no page did in time.
+  if (!matchMedia("(display-mode: standalone)").matches) await new Promise((r) => setTimeout(r, 1000 + Math.random() * 500));
+  let shown = {};
+  try { shown = JSON.parse(localStorageGet("kanzo.notified") || "{}"); } catch {}
+  const now = Date.now();
+  if (now - (shown[where] || 0) < 60000) return;
+  for (const w of Object.keys(shown)) if (now - shown[w] >= 60000) delete shown[w];
+  shown[where] = now;
+  localStorageSet("kanzo.notified", JSON.stringify(shown));
+  // Not for a task already in front of you.
+  if (document.hasFocus() && board === state.on && (state.project === "all" || state.project === t.project)) return;
+  try {
+    const n = new Notification(tr("{0} needs you", key(t)), { body: t.title, tag: `kanzo-${where}`, icon: "/icon.png" });
+    n.onclick = () => { window.focus(); location.hash = "#" + where; n.close(); };
+  } catch {}
+}
+
+// A hidden page doesn't poll, so it waits on /api/events instead: the server answers as soon as
+// the board changes, and a browser never delays an answer the way it delays a hidden page's timers.
+async function watchEscalations(board) {
+  if (notifier.watching[board] || !notifyOn()) return;
+  notifier.watching[board] = true;
+  let since = null;
+  while (notifyOn() && document.hidden && (board === "local" || state.joined)) {
+    try {
+      const reply = await api("GET", "/events?wait=25" + (since ? "&since=" + encodeURIComponent(since) : ""), null, board);
+      if (since && (reply.events.length || reply.reset)) await checkEscalations(board);
+      since = reply.last;
+    } catch { await new Promise((r) => setTimeout(r, 5000)); }
+  }
+  notifier.watching[board] = false;
+}
+
+// Safari before 15 answers the permission request with a callback, not a promise.
+function askNotifications() {
+  return new Promise((resolve) => Notification.requestPermission(resolve)?.then(resolve));
+}
+
+$("#settings-notify").addEventListener("change", async (e) => {
+  if (e.target.checked && await askNotifications() !== "granted") {
+    e.target.checked = false;
+    toast(tr("This browser blocks notifications from the board: allow them in its site settings."));
+    return;
+  }
+  localStorageSet("kanzo.notify", e.target.checked ? "1" : "0");
+  notifier.seen = {};
+  notifier.changes = {};
+});
 
 // The next check starts only after this one finished, so a slow or busy server
 // never piles up requests.
@@ -2162,6 +2243,8 @@ function openSettings(section = "board") {
   $("#settings-backlog").checked = state.board?.statuses.includes("backlog") ?? false;
   // A board on an older version sends no events_kept.
   $("#settings-events-kept").value = state.board?.events_kept ?? 1000;
+  $("#settings-notify-row").hidden = !("Notification" in window);
+  $("#settings-notify").checked = notifyOn();
   document.querySelectorAll("[data-property]").forEach((box) => { box.checked = !isPropertyHidden(box.dataset.property); });
   $("#sync-url").value = syncRemote || "";
   $("#sync-create").hidden = !!syncRemote;
